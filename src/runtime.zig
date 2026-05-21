@@ -1,7 +1,9 @@
 const std = @import("std");
 const config = @import("config.zig");
 const dashboard_ui = @import("dashboard.zig");
+const paths = @import("paths.zig");
 const render = @import("render.zig");
+const proc_runner = @import("runner.zig");
 
 pub const Runtime = struct {
     gpa: std.mem.Allocator,
@@ -9,6 +11,10 @@ pub const Runtime = struct {
     cfg: config.Config,
     config_path: []const u8,
     zask_path: []const u8,
+
+    fn runner(self: Runtime) proc_runner.Runner {
+        return .{ .gpa = self.gpa, .io = self.io };
+    }
 
     pub fn renderSession(self: Runtime, writer: *std.Io.Writer) !void {
         try render.renderTmuxp(self.cfg, self.gpa, writer, self.zask_path, self.config_path);
@@ -270,7 +276,7 @@ pub const Runtime = struct {
     }
 
     fn writeSessionFile(self: Runtime) ![]const u8 {
-        const dir = try std.fs.path.join(self.gpa, &.{ try configBase(self.gpa), try self.cfg.projectName() });
+        const dir = try std.fs.path.join(self.gpa, &.{ try paths.configBase(self.gpa), try self.cfg.projectName() });
         const mkdir_result = try self.run(&.{ "mkdir", "-p", dir });
         self.gpa.free(mkdir_result.stdout);
         self.gpa.free(mkdir_result.stderr);
@@ -278,7 +284,7 @@ pub const Runtime = struct {
         var out: std.Io.Writer.Allocating = .init(self.gpa);
         defer out.deinit();
         try self.renderSession(&out.writer);
-        try writeFile(self.io, path, out.writer.buffered());
+        try paths.writeFile(self.io, path, out.writer.buffered());
         return path;
     }
 
@@ -366,30 +372,27 @@ pub const Runtime = struct {
     }
 
     fn logDir(self: Runtime) ![]const u8 {
-        return std.fs.path.join(self.gpa, &.{ try dataBase(self.gpa), try self.cfg.projectName(), "logs", "current" });
+        return std.fs.path.join(self.gpa, &.{ try paths.dataBase(self.gpa), try self.cfg.projectName(), "logs", "current" });
     }
 
     fn pathExists(self: Runtime, path: []const u8) !bool {
-        std.Io.Dir.cwd().access(self.io, path, .{}) catch return false;
-        return true;
+        return paths.exists(self.io, path);
     }
 
     fn run(self: Runtime, argv: []const []const u8) !std.process.RunResult {
-        return std.process.run(self.gpa, self.io, .{ .argv = argv, .stdout_limit = .limited(1024 * 1024), .stderr_limit = .limited(1024 * 1024) });
+        return try self.runner().run(argv);
     }
 
     fn runCwd(self: Runtime, argv: []const []const u8, cwd: []const u8) !std.process.RunResult {
-        return std.process.run(self.gpa, self.io, .{ .argv = argv, .cwd = .{ .path = cwd }, .stdout_limit = .limited(1024 * 1024), .stderr_limit = .limited(1024 * 1024) });
+        return try self.runner().runCwd(argv, cwd);
     }
 
     fn runInteractive(self: Runtime, argv: []const []const u8) !std.process.Child.Term {
-        var child = try std.process.spawn(self.io, .{ .argv = argv });
-        return child.wait(self.io);
+        return try self.runner().runInteractive(argv);
     }
 
     fn runInteractiveCwd(self: Runtime, argv: []const []const u8, cwd: []const u8) !std.process.Child.Term {
-        var child = try std.process.spawn(self.io, .{ .argv = argv, .cwd = .{ .path = cwd } });
-        return child.wait(self.io);
+        return try self.runner().runInteractiveCwd(argv, cwd);
     }
 };
 
@@ -414,30 +417,6 @@ fn runningContainerCount(output: []const u8) usize {
     }
     if (count == 0) return 0;
     return count - 1;
-}
-
-fn writeFile(io: std.Io, path: []const u8, contents: []const u8) !void {
-    var file = if (std.fs.path.isAbsolute(path))
-        try std.Io.Dir.createFileAbsolute(io, path, .{})
-    else
-        try std.Io.Dir.cwd().createFile(io, path, .{});
-    defer file.close(io);
-    try file.writeStreamingAll(io, contents);
-}
-
-pub fn configBase(gpa: std.mem.Allocator) ![]const u8 {
-    if (std.c.getenv("XDG_CONFIG_HOME")) |value| return std.fs.path.join(gpa, &.{ std.mem.span(value), "zask" });
-    return std.fs.path.join(gpa, &.{ home(), ".config", "zask" });
-}
-
-pub fn dataBase(gpa: std.mem.Allocator) ![]const u8 {
-    if (std.c.getenv("XDG_DATA_HOME")) |value| return std.fs.path.join(gpa, &.{ std.mem.span(value), "zask" });
-    return std.fs.path.join(gpa, &.{ home(), ".local", "share", "zask" });
-}
-
-pub fn home() []const u8 {
-    if (std.c.getenv("HOME")) |value| return std.mem.span(value);
-    return "";
 }
 
 test "counts running docker compose rows" {

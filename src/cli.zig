@@ -2,8 +2,8 @@ const std = @import("std");
 const build_options = @import("build_options");
 const root = @import("root.zig");
 const config = @import("config.zig");
+const paths = @import("paths.zig");
 const Runtime = @import("runtime.zig").Runtime;
-const runtime = @import("runtime.zig");
 
 const ParsedArgs = struct {
     config_path: ?[]const u8 = null,
@@ -128,7 +128,7 @@ fn isGlobalCommand(command: []const u8) bool {
 fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
     const io = context.io orelse return error.MissingIo;
     const path = try absoluteConfigPath(context.gpa, io, if (parsed.config_path) |p| p else try projectConfigPath(context.gpa, parsed.project orelse return error.ProjectRequired));
-    const cfg = try config.loadPath(context.gpa, io, path, runtime.home());
+    const cfg = try config.loadPath(context.gpa, io, path, paths.home());
     return .{
         .gpa = context.gpa,
         .io = io,
@@ -139,7 +139,7 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
 }
 
 fn projectConfigPath(gpa: std.mem.Allocator, project: []const u8) ![]const u8 {
-    return std.fs.path.join(gpa, &.{ try runtime.configBase(gpa), project, "config.json" });
+    return std.fs.path.join(gpa, &.{ try paths.configBase(gpa), project, "config.json" });
 }
 
 fn absoluteConfigPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {

@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("config.zig");
+const proc_runner = @import("runner.zig");
 
 const clearScreen = "\x1b[2J\x1b[H";
 const reset = "\x1b[0m";
@@ -13,8 +14,8 @@ const cyan = "\x1b[36m";
 
 const Context = struct {
     gpa: std.mem.Allocator,
-    io: std.Io,
     cfg: config.Config,
+    runner: proc_runner.Runner,
 };
 
 const MonitorStatus = enum {
@@ -74,21 +75,21 @@ const PaneInfo = struct {
 };
 
 pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.Io.Writer) !void {
-    const ctx: Context = .{ .gpa = gpa, .io = io, .cfg = cfg };
+    const ctx: Context = .{ .gpa = gpa, .cfg = cfg, .runner = .{ .gpa = gpa, .io = io } };
     try writer.writeAll(clearScreen);
     try renderLauncher(ctx, writer);
     try writer.flush();
     const shell = if (std.c.getenv("SHELL")) |value| std.mem.span(value) else "sh";
-    _ = try runInteractive(io, &.{shell});
+    _ = try ctx.runner.runInteractive(&.{shell});
 }
 
 pub fn runMonitor(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.Io.Writer) !void {
-    const ctx: Context = .{ .gpa = gpa, .io = io, .cfg = cfg };
+    const ctx: Context = .{ .gpa = gpa, .cfg = cfg, .runner = .{ .gpa = gpa, .io = io } };
     while (true) {
         try writer.writeAll(clearScreen);
         try renderMonitor(ctx, writer);
         try writer.flush();
-        _ = run(gpa, io, &.{ "sleep", "1" }) catch {};
+        _ = ctx.runner.run(&.{ "sleep", "1" }) catch {};
     }
 }
 
@@ -196,7 +197,7 @@ fn serviceGroups(ctx: Context) ![][]const u8 {
 }
 
 fn dashboardMode(ctx: Context) ![]const u8 {
-    const result = run(ctx.gpa, ctx.io, &.{ "tmux", "show-option", "-qv", "@mux_dash_mode" }) catch return "all";
+    const result = ctx.runner.run(&.{ "tmux", "show-option", "-qv", "@mux_dash_mode" }) catch return "all";
     defer ctx.gpa.free(result.stdout);
     defer ctx.gpa.free(result.stderr);
     const value = std.mem.trim(u8, result.stdout, " \t\r\n");
@@ -236,14 +237,14 @@ fn dockerMonitorRow(ctx: Context) !MonitorRow {
 
 fn healthStatus(ctx: Context, service: std.json.Value) !MonitorStatus {
     const port = config.Config.servicePort(service) orelse return .live;
-    const result = run(ctx.gpa, ctx.io, &.{ "nc", "-z", "localhost", try std.fmt.allocPrint(ctx.gpa, "{d}", .{port}) }) catch return .ready;
+    const result = ctx.runner.run(&.{ "nc", "-z", "localhost", try std.fmt.allocPrint(ctx.gpa, "{d}", .{port}) }) catch return .ready;
     defer ctx.gpa.free(result.stdout);
     defer ctx.gpa.free(result.stderr);
     return if (result.term == .exited and result.term.exited == 0) .live else .ready;
 }
 
 fn dockerRunning(ctx: Context) !bool {
-    const result = runCwd(ctx.gpa, ctx.io, &.{ "docker", "compose", "-f", ctx.cfg.dockerComposeFile(), "ps", "--status", "running" }, try ctx.cfg.dockerDir(ctx.gpa)) catch return false;
+    const result = ctx.runner.runCwd(&.{ "docker", "compose", "-f", ctx.cfg.dockerComposeFile(), "ps", "--status", "running" }, try ctx.cfg.dockerDir(ctx.gpa)) catch return false;
     defer ctx.gpa.free(result.stdout);
     defer ctx.gpa.free(result.stderr);
     return result.stdout.len > 0;
@@ -251,7 +252,7 @@ fn dockerRunning(ctx: Context) !bool {
 
 fn paneInfo(ctx: Context, window: []const u8) !PaneInfo {
     const target = try std.fmt.allocPrint(ctx.gpa, "{s}:{s}", .{ try ctx.cfg.sessionName(), window });
-    const result = run(ctx.gpa, ctx.io, &.{ "tmux", "list-panes", "-t", target, "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}" }) catch return .{};
+    const result = ctx.runner.run(&.{ "tmux", "list-panes", "-t", target, "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}" }) catch return .{};
     defer ctx.gpa.free(result.stdout);
     defer ctx.gpa.free(result.stderr);
 
@@ -286,7 +287,7 @@ fn writeMonitorRow(ctx: Context, writer: *std.Io.Writer, row: MonitorRow, show_l
 
 fn lastLogLine(ctx: Context, window: []const u8) ![]const u8 {
     const script = try std.fmt.allocPrint(ctx.gpa, "tmux capture-pane -t '{s}:{s}' -p 2>/dev/null | tr -d '\\0' | sed 's/\\x1b\\[[0-9;]*m//g' | tr -s ' ' | sed '/^[[:space:]]*$/d' | tail -1", .{ try ctx.cfg.sessionName(), window });
-    const result = run(ctx.gpa, ctx.io, &.{ "bash", "-c", script }) catch return "";
+    const result = ctx.runner.run(&.{ "bash", "-c", script }) catch return "";
     defer ctx.gpa.free(result.stderr);
     return std.mem.trim(u8, result.stdout, " \t\r\n");
 }
@@ -329,17 +330,4 @@ fn writeSpaces(writer: *std.Io.Writer, count: usize) !void {
 fn truncate(text: []const u8, width: usize) []const u8 {
     if (text.len <= width) return text;
     return text[0..width];
-}
-
-fn run(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8) !std.process.RunResult {
-    return std.process.run(gpa, io, .{ .argv = argv, .stdout_limit = .limited(1024 * 1024), .stderr_limit = .limited(1024 * 1024) });
-}
-
-fn runCwd(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8, cwd: []const u8) !std.process.RunResult {
-    return std.process.run(gpa, io, .{ .argv = argv, .cwd = .{ .path = cwd }, .stdout_limit = .limited(1024 * 1024), .stderr_limit = .limited(1024 * 1024) });
-}
-
-fn runInteractive(io: std.Io, argv: []const []const u8) !std.process.Child.Term {
-    var child = try std.process.spawn(io, .{ .argv = argv });
-    return child.wait(io);
 }
