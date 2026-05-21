@@ -68,6 +68,10 @@ test "renders service and docker windows" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     try renderTmuxp(cfg, arena.allocator(), &out.writer, "zask", "/tmp/demo.json");
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "window_name: dashboard") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "zask --config /tmp/demo.json dashboard") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "zask --config /tmp/demo.json monitor") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "window_name: api") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "start_directory: /tmp/demo/backend") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "window_name: docker") != null);
 }

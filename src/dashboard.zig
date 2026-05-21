@@ -331,3 +331,35 @@ fn truncate(text: []const u8, width: usize) []const u8 {
     if (text.len <= width) return text;
     return text[0..width];
 }
+
+test "renders launcher frame with grouped services" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"enabled": true},
+        \\  "services": [
+        \\    {"name":"api","dir":"backend","command":"serve","group":"backend","port":18080},
+        \\    {"name":"web","dir":"frontend","runtime":"npm","command":"run dev","group":"frontend"}
+        \\  ]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const ctx: Context = .{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = .{ .gpa = arena.allocator(), .io = std.Io.null },
+    };
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    try renderLauncher(ctx, &out.writer);
+    const body = out.writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, body, "demo - Development TUI") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "[docker]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "[backend]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "api") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, ":18080") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "npm run dev") != null);
+}
