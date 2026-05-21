@@ -188,3 +188,34 @@ test "parses project command form" {
     try std.testing.expectEqualStrings("demo", parsed.project.?);
     try std.testing.expectEqualStrings("list", parsed.command);
 }
+
+test "parses explicit config command form" {
+    const parsed = try parseArgs(.{ .gpa = std.testing.allocator }, &.{ "--config", "demo.json", "list" });
+    try std.testing.expectEqualStrings("demo.json", parsed.config_path.?);
+    try std.testing.expectEqualStrings("list", parsed.command);
+    try std.testing.expectEqual(@as(usize, 0), parsed.args.len);
+}
+
+test "parses argv0 project alias form" {
+    const parsed = try parseArgs(.{ .gpa = std.testing.allocator, .argv0 = "nodex" }, &.{"hello"});
+    try std.testing.expectEqualStrings("nodex", parsed.project.?);
+    try std.testing.expectEqualStrings("hello", parsed.command);
+}
+
+test "resolves hello profiles" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": [],
+        \\  "start_profiles": {"api": {"profile": "backend"}}
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+
+    try std.testing.expectEqualStrings("all", try resolveHelloProfile(cfg, &.{}));
+    try std.testing.expectEqualStrings("docker", try resolveHelloProfile(cfg, &.{"--docker"}));
+    try std.testing.expectEqualStrings("backend", try resolveHelloProfile(cfg, &.{"--api"}));
+    try std.testing.expectError(error.InvalidArguments, resolveHelloProfile(cfg, &.{"--missing"}));
+}

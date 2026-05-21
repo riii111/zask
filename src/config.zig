@@ -289,3 +289,51 @@ test "loads defaults and resolves paths" {
     const group = try cfg.resolveGroup(arena.allocator(), "all");
     try std.testing.expectEqualStrings("api", group[0]);
 }
+
+test "resolves profiles and phase group overrides" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": [
+        \\    {"name":"api","dir":"backend","command":"serve","group":"backend"},
+        \\    {"name":"worker","dir":"backend","command":"work","group":"backend"}
+        \\  ],
+        \\  "group_aliases": {"core-backend":["api"]},
+        \\  "start_profiles": {
+        \\    "core": {
+        \\      "profile": "core",
+        \\      "label": "core services",
+        \\      "group_overrides": {"backend":"core-backend"}
+        \\    }
+        \\  },
+        \\  "docker": {"exec_defaults": {"db": "psql"}}
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+
+    try std.testing.expectEqualStrings("core", cfg.resolveStartProfileOption("--core").?);
+    try std.testing.expectEqualStrings("core services", cfg.startProfileLabel("core"));
+    try std.testing.expectEqualStrings("core-backend", cfg.resolvePhaseGroup("core", "backend"));
+    try std.testing.expectEqualStrings("psql", cfg.dockerExecDefault("db"));
+
+    const group = try cfg.resolveGroup(arena.allocator(), "backend");
+    try std.testing.expectEqual(@as(usize, 2), group.len);
+}
+
+test "rejects unknown runtimes and missing services" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": [{"name":"api","dir":"backend","runtime":"unknown","command":"serve","group":"backend"}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+
+    try std.testing.expectError(error.UnknownRuntime, cfg.serviceStartCommand(arena.allocator(), try cfg.findService("api")));
+    try std.testing.expectError(error.UnknownService, cfg.findService("missing"));
+    try std.testing.expectError(error.UnknownGroup, cfg.resolveGroup(arena.allocator(), "missing"));
+}
