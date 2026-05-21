@@ -1,0 +1,86 @@
+{
+  "project": {
+    "name": "demo",
+    "root": "/tmp/zask-demo",
+    "session_name": "demo"
+  },
+  "docker": {
+    "enabled": true,
+    "dir": "infra",
+    "compose_file": "compose.yaml",
+    "wait_timeout": 5,
+    "exec_defaults": {
+      "db": "psql"
+    }
+  },
+  "start_profiles": {
+    "core": {
+      "profile": "core",
+      "label": "core services",
+      "group_overrides": {
+        "backend": "core-backend"
+      }
+    }
+  },
+  "phases": [
+    {
+      "name": "Docker",
+      "type": "docker"
+    },
+    {
+      "name": "Backend",
+      "groups": [
+        "backend"
+      ],
+      "wait_ports": [
+        18080
+      ]
+    },
+    {
+      "name": "Frontend",
+      "groups": [
+        "frontend"
+      ]
+    }
+  ],
+  "group_aliases": {
+    "backend": [
+      "api",
+      "worker"
+    ],
+    "core-backend": [
+      "api"
+    ],
+    "frontend": [
+      "web"
+    ]
+  },
+  "services": [
+    {
+      "name": "api",
+      "dir": "backend",
+      "command": "serve",
+      "port": 18080,
+      "group": "backend"
+    },
+    {
+      "name": "worker",
+      "dir": "backend",
+      "command": "work",
+      "group": "backend"
+    },
+    {
+      "name": "web",
+      "dir": "frontend",
+      "runtime": "npm",
+      "command": "run dev",
+      "port": 15173,
+      "group": "frontend"
+    }
+  ],
+  "options": {
+    "log_keep_sessions": 2,
+    "popup_width": "80%",
+    "popup_height": "80%"
+  }
+}

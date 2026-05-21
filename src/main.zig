@@ -9,6 +9,6 @@ test "runs default command" {
     var buffer: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try zask.cli.runWithArgs(&.{}, &writer);
+    try zask.cli.runWithArgs(.{ .gpa = std.testing.allocator }, &.{}, &writer);
     try std.testing.expectEqualStrings("Hello from zask\n", writer.buffered());
 }
