@@ -2,6 +2,7 @@ const std = @import("std");
 const config = @import("config.zig");
 const dashboard_ui = @import("dashboard.zig");
 const docker_client = @import("docker.zig");
+const lifecycle_mod = @import("lifecycle.zig");
 const paths = @import("paths.zig");
 const render = @import("render.zig");
 const proc_runner = @import("runner.zig");
@@ -28,6 +29,16 @@ pub const Runtime = struct {
             .runner = self.runner(),
             .dir = try self.cfg.dockerDir(self.gpa),
             .file = self.cfg.dockerComposeFile(),
+        };
+    }
+
+    fn lifecycle(self: Runtime) !lifecycle_mod.Lifecycle {
+        return .{
+            .gpa = self.gpa,
+            .cfg = self.cfg,
+            .runner = self.runner(),
+            .tmux = try self.tmux(),
+            .docker = try self.docker(),
         };
     }
 
@@ -74,7 +85,7 @@ pub const Runtime = struct {
     }
 
     pub fn logs(self: Runtime, service: []const u8) !void {
-        try self.validateService(service);
+        _ = try self.cfg.findService(service);
         if (try self.inTmux()) {
             try (try self.tmux()).switchClient();
         }
@@ -83,7 +94,7 @@ pub const Runtime = struct {
     }
 
     pub fn follow(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
-        try self.validateService(service);
+        _ = try self.cfg.findService(service);
         const log_file = try std.fs.path.join(self.gpa, &.{ try self.logDir(), try std.fmt.allocPrint(self.gpa, "{s}.log", .{service}) });
         if (!try self.pathExists(log_file)) try writer.print("Warning: Log file not found yet: {s}\n", .{log_file});
         _ = try self.run(&.{ "tmux", "popup", "-w", self.cfg.popupWidth(), "-h", self.cfg.popupHeight(), "-E", try std.fmt.allocPrint(self.gpa, "nvim -c 'terminal tail -F {s}'", .{log_file}) });
@@ -91,7 +102,7 @@ pub const Runtime = struct {
 
     pub fn hello(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
         if (try self.sessionExists()) {
-            try self.startAll(profile, writer);
+            try (try self.lifecycle()).startAll(profile, writer);
             try self.attach();
             return;
         }
@@ -105,7 +116,7 @@ pub const Runtime = struct {
         try tx.bindRunShell("f", try std.fmt.allocPrint(self.gpa, "{s} --config {s} follow \"#{{window_name}}\"", .{ self.zask_path, self.config_path }));
         try self.initLogDir();
         try self.setupPipePane();
-        try self.startAll(profile, writer);
+        try (try self.lifecycle()).startAll(profile, writer);
         try self.attach();
     }
 
@@ -114,13 +125,13 @@ pub const Runtime = struct {
             try writer.writeAll("Session not running\n");
             return;
         }
-        try self.stopAll(writer);
+        try (try self.lifecycle()).stopAll(writer);
         try self.cleanupPipePane();
         try (try self.tmux()).killSession();
     }
 
     pub fn kill(self: Runtime, writer: *std.Io.Writer) !void {
-        try self.stopDocker();
+        try (try self.lifecycle()).stopTarget("docker", writer);
         try self.cleanupPipePane();
         if (try self.sessionExists()) {
             try (try self.tmux()).killSession();
@@ -130,32 +141,15 @@ pub const Runtime = struct {
     }
 
     pub fn up(self: Runtime, target: ?[]const u8, writer: *std.Io.Writer) !void {
-        const t = target orelse "--all";
-        if (std.mem.eql(u8, t, "--all")) return self.startAll("all", writer);
-        if (std.mem.eql(u8, t, "docker")) return self.startDocker();
-        if (self.cfg.resolveGroup(self.gpa, t)) |services| {
-            for (services) |svc| try self.startService(svc, writer);
-        } else |_| try self.startService(t, writer);
+        try (try self.lifecycle()).startTarget(target, writer);
     }
 
     pub fn stop(self: Runtime, target: ?[]const u8, writer: *std.Io.Writer) !void {
-        const t = target orelse "--all";
-        if (std.mem.eql(u8, t, "--all")) return self.stopAll(writer);
-        if (std.mem.eql(u8, t, "docker")) return self.stopDocker();
-        if (self.cfg.resolveGroup(self.gpa, t)) |services| {
-            for (services) |svc| try self.stopService(svc, writer);
-        } else |_| try self.stopService(t, writer);
+        try (try self.lifecycle()).stopTarget(target, writer);
     }
 
     pub fn restart(self: Runtime, target: []const u8, writer: *std.Io.Writer) !void {
-        if (std.mem.eql(u8, target, "docker")) {
-            try self.stopDocker();
-            try self.startDocker();
-            return;
-        }
-        if (self.cfg.resolveGroup(self.gpa, target)) |services| {
-            for (services) |svc| try self.restartService(svc, writer);
-        } else |_| try self.restartService(target, writer);
+        try (try self.lifecycle()).restartTarget(target, writer);
     }
 
     pub fn exec(self: Runtime, container: []const u8, use_shell: bool, writer: *std.Io.Writer) !void {
@@ -178,114 +172,6 @@ pub const Runtime = struct {
 
     pub fn monitorOnce(self: Runtime, writer: *std.Io.Writer) !void {
         try dashboard_ui.runMonitor(self.gpa, self.io, self.cfg, writer);
-    }
-
-    fn startAll(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
-        try self.runPrechecks(writer);
-        if (self.cfg.dockerEnabled()) {
-            try self.startDocker();
-            self.waitForDocker(writer) catch {
-                try writer.writeAll("Error: Docker failed to start\n");
-                return error.DockerFailed;
-            };
-        }
-        if (std.mem.eql(u8, profile, "docker")) return;
-        const phases = self.cfg.phases();
-        if (phases.len == 0) {
-            for (try self.cfg.services()) |service| try self.startService(try config.Config.serviceName(service), writer);
-            return;
-        }
-        for (phases) |phase| {
-            if (phase != .object) continue;
-            const phase_type = optionalObjectString(phase, "type", "");
-            if (std.mem.eql(u8, phase_type, "docker")) continue;
-            if (std.mem.eql(u8, phase_type, "command")) {
-                try self.runCommandPhase(phase, profile, writer);
-                continue;
-            }
-            if (phase.object.get("groups")) |groups| if (groups == .array) {
-                for (groups.array.items) |group_value| {
-                    if (group_value != .string) continue;
-                    const group = self.cfg.resolvePhaseGroup(profile, group_value.string);
-                    for (try self.cfg.resolveGroup(self.gpa, group)) |svc| try self.startService(svc, writer);
-                }
-            };
-            if (phase.object.get("wait_ports")) |ports| if (ports == .array) {
-                for (ports.array.items) |port_value| if (port_value == .integer) try self.waitForPort(port_value.integer, 120);
-            };
-        }
-    }
-
-    fn stopAll(self: Runtime, writer: *std.Io.Writer) !void {
-        const services = try self.cfg.services();
-        var i = services.len;
-        while (i > 0) {
-            i -= 1;
-            try self.stopService(try config.Config.serviceName(services[i]), writer);
-        }
-        try self.stopDocker();
-    }
-
-    fn startService(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
-        const value = try self.cfg.findService(service);
-        const target = try std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ try self.cfg.sessionName(), service });
-        const cmd = try std.fmt.allocPrint(self.gpa, "cd '{s}' && {s}", .{ try self.cfg.serviceDir(self.gpa, value), try self.cfg.serviceStartCommand(self.gpa, value) });
-        try writer.print("Starting {s}...\n", .{service});
-        try (try self.tmux()).sendKeys(target, &.{ cmd, "Enter" });
-    }
-
-    fn stopService(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
-        try self.validateService(service);
-        try writer.print("Stopping {s}...\n", .{service});
-        try (try self.tmux()).sendKeys(try std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ try self.cfg.sessionName(), service }), &.{"C-c"});
-    }
-
-    fn restartService(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
-        try self.stopService(service, writer);
-        try self.startService(service, writer);
-    }
-
-    fn startDocker(self: Runtime) !void {
-        if (!self.cfg.dockerEnabled()) return;
-        try (try self.tmux()).sendKeys(try std.fmt.allocPrint(self.gpa, "{s}:docker", .{try self.cfg.sessionName()}), &.{ try std.fmt.allocPrint(self.gpa, "cd '{s}' && docker compose -f '{s}' up", .{ try self.cfg.dockerDir(self.gpa), self.cfg.dockerComposeFile() }), "Enter" });
-    }
-
-    fn stopDocker(self: Runtime) !void {
-        if (!self.cfg.dockerEnabled()) return;
-        if (try self.sessionExists()) try (try self.tmux()).sendKeys(try std.fmt.allocPrint(self.gpa, "{s}:docker", .{try self.cfg.sessionName()}), &.{"C-c"});
-        (try self.docker()).down() catch {};
-    }
-
-    fn runPrechecks(self: Runtime, writer: *std.Io.Writer) !void {
-        const prechecks = self.cfg.value.object.get("prechecks") orelse return;
-        if (prechecks != .array) return;
-        for (prechecks.array.items) |check| {
-            const name = optionalObjectString(check, "name", "precheck");
-            const command = try requiredObjectString(check, "command");
-            const on_fail = optionalObjectString(check, "on_fail", "warn");
-            const dir = optionalObjectString(check, "dir", "");
-            const cwd = if (dir.len == 0) try self.cfg.projectRoot(self.gpa) else try std.fs.path.join(self.gpa, &.{ try self.cfg.projectRoot(self.gpa), dir });
-            const result = self.runCwd(&.{ "bash", "-c", command }, cwd) catch {
-                if (std.mem.eql(u8, on_fail, "abort")) return error.PrecheckFailed;
-                try writer.print("Warning: {s} check failed\n", .{name});
-                continue;
-            };
-            self.gpa.free(result.stdout);
-            self.gpa.free(result.stderr);
-        }
-    }
-
-    fn runCommandPhase(self: Runtime, phase: std.json.Value, profile: []const u8, writer: *std.Io.Writer) !void {
-        const command = try self.cfg.commandPhaseCommand(phase, profile);
-        const dir = optionalObjectString(phase, "dir", "");
-        const cwd = if (dir.len == 0) try self.cfg.projectRoot(self.gpa) else try std.fs.path.join(self.gpa, &.{ try self.cfg.projectRoot(self.gpa), dir });
-        const result = self.runCwd(&.{ "bash", "-c", command }, cwd) catch {
-            if (std.mem.eql(u8, optionalObjectString(phase, "on_fail", "abort"), "abort")) return error.CommandPhaseFailed;
-            try writer.writeAll("Warning: command phase failed\n");
-            return;
-        };
-        self.gpa.free(result.stdout);
-        self.gpa.free(result.stderr);
     }
 
     fn writeSessionFile(self: Runtime) ![]const u8 {
@@ -325,35 +211,6 @@ pub const Runtime = struct {
         }
     }
 
-    fn waitForDocker(self: Runtime, writer: *std.Io.Writer) !void {
-        try writer.writeAll("Waiting for Docker containers...\n");
-        var attempt: i64 = 0;
-        const max_attempts = self.cfg.dockerWaitTimeout();
-        while (attempt < max_attempts) : (attempt += 1) {
-            const result = (try self.docker()).runningTable() catch {
-                _ = self.run(&.{ "sleep", "1" }) catch {};
-                continue;
-            };
-            defer self.gpa.free(result.stdout);
-            defer self.gpa.free(result.stderr);
-
-            if (result.term == .exited and result.term.exited == 0 and runningContainerCount(result.stdout) > 0) {
-                try writer.writeAll("Docker containers ready\n");
-                return;
-            }
-            _ = self.run(&.{ "sleep", "1" }) catch {};
-        }
-        return error.DockerNotReady;
-    }
-
-    fn waitForPort(self: Runtime, port: i64, timeout: i64) !void {
-        var elapsed: i64 = 0;
-        while (elapsed < timeout) : (elapsed += 2) {
-            if ((self.run(&.{ "nc", "-z", "localhost", try std.fmt.allocPrint(self.gpa, "{d}", .{port}) }) catch null) != null) return;
-            _ = self.run(&.{ "sleep", "2" }) catch {};
-        }
-    }
-
     fn sessionExists(self: Runtime) !bool {
         return (try self.tmux()).hasSession();
     }
@@ -372,10 +229,6 @@ pub const Runtime = struct {
         return std.c.getenv("TMUX") != null;
     }
 
-    fn validateService(self: Runtime, service: []const u8) !void {
-        _ = try self.cfg.findService(service);
-    }
-
     fn logDir(self: Runtime) ![]const u8 {
         return std.fs.path.join(self.gpa, &.{ try paths.dataBase(self.gpa), try self.cfg.projectName(), "logs", "current" });
     }
@@ -388,44 +241,7 @@ pub const Runtime = struct {
         return try self.runner().run(argv);
     }
 
-    fn runCwd(self: Runtime, argv: []const []const u8, cwd: []const u8) !std.process.RunResult {
-        return try self.runner().runCwd(argv, cwd);
-    }
-
     fn runInteractive(self: Runtime, argv: []const []const u8) !std.process.Child.Term {
         return try self.runner().runInteractive(argv);
     }
-
-    fn runInteractiveCwd(self: Runtime, argv: []const []const u8, cwd: []const u8) !std.process.Child.Term {
-        return try self.runner().runInteractiveCwd(argv, cwd);
-    }
 };
-
-fn requiredObjectString(node: std.json.Value, key: []const u8) ![]const u8 {
-    if (node != .object) return error.InvalidConfig;
-    const value = node.object.get(key) orelse return error.InvalidConfig;
-    if (value != .string) return error.InvalidConfig;
-    return value.string;
-}
-
-fn optionalObjectString(node: std.json.Value, key: []const u8, default: []const u8) []const u8 {
-    if (node != .object) return default;
-    const value = node.object.get(key) orelse return default;
-    return if (value == .string) value.string else default;
-}
-
-fn runningContainerCount(output: []const u8) usize {
-    var count: usize = 0;
-    var lines = std.mem.splitScalar(u8, output, '\n');
-    while (lines.next()) |line| {
-        if (std.mem.trim(u8, line, " \t\r").len > 0) count += 1;
-    }
-    if (count == 0) return 0;
-    return count - 1;
-}
-
-test "counts running docker compose rows" {
-    try std.testing.expectEqual(@as(usize, 0), runningContainerCount(""));
-    try std.testing.expectEqual(@as(usize, 0), runningContainerCount("NAME SERVICE STATUS\n"));
-    try std.testing.expectEqual(@as(usize, 2), runningContainerCount("NAME SERVICE STATUS\none api running\ntwo db running\n"));
-}
