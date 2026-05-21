@@ -39,7 +39,7 @@ pub const Runtime = struct {
         if (try self.inTmux()) {
             _ = try self.run(&.{ "tmux", "switch-client", "-t", try self.cfg.sessionName() });
         } else {
-            _ = try self.run(&.{ "tmux", "attach-session", "-t", try self.cfg.sessionName() });
+            _ = try self.runInteractive(&.{ "tmux", "attach-session", "-t", try self.cfg.sessionName() });
         }
     }
 
@@ -149,7 +149,7 @@ pub const Runtime = struct {
         try argv.appendSlice(&.{ "docker", "compose", "-f", self.cfg.dockerComposeFile(), "exec", container });
         var parts = std.mem.tokenizeScalar(u8, exec_cmd, ' ');
         while (parts.next()) |part| try argv.append(part);
-        _ = try self.runCwd(argv.items, try self.cfg.dockerDir(self.gpa));
+        _ = try self.runInteractiveCwd(argv.items, try self.cfg.dockerDir(self.gpa));
     }
 
     pub fn dashboard(self: Runtime, writer: *std.Io.Writer) !void {
@@ -383,6 +383,16 @@ pub const Runtime = struct {
 
     fn runCwd(self: Runtime, argv: []const []const u8, cwd: []const u8) !std.process.RunResult {
         return std.process.run(self.gpa, self.io, .{ .argv = argv, .cwd = .{ .path = cwd }, .stdout_limit = .limited(1024 * 1024), .stderr_limit = .limited(1024 * 1024) });
+    }
+
+    fn runInteractive(self: Runtime, argv: []const []const u8) !std.process.Child.Term {
+        var child = try std.process.spawn(self.io, .{ .argv = argv });
+        return child.wait(self.io);
+    }
+
+    fn runInteractiveCwd(self: Runtime, argv: []const []const u8, cwd: []const u8) !std.process.Child.Term {
+        var child = try std.process.spawn(self.io, .{ .argv = argv, .cwd = .{ .path = cwd } });
+        return child.wait(self.io);
     }
 };
 
