@@ -1,4 +1,5 @@
 const std = @import("std");
+const config_value = @import("config_value.zig");
 
 const Value = std.json.Value;
 
@@ -186,40 +187,31 @@ pub const Config = struct {
     }
 
     pub fn requiredString(self: Config, path: []const []const u8) ![]const u8 {
-        const node = try self.required(path);
-        if (node != .string) return error.InvalidConfig;
-        return node.string;
+        return self.view().requiredString(path);
     }
 
     fn required(self: Config, path: []const []const u8) !Value {
-        return self.get(path) orelse error.InvalidConfig;
+        return self.view().required(path);
     }
 
     fn get(self: Config, path: []const []const u8) ?Value {
-        var node = self.value;
-        for (path) |part| {
-            if (node != .object) return null;
-            node = node.object.get(part) orelse return null;
-        }
-        return node;
+        return self.view().get(path);
     }
 
     fn optionalString(self: Config, path: []const []const u8, default: []const u8) []const u8 {
-        const node = self.get(path) orelse return default;
-        return if (node == .string) node.string else default;
+        return self.view().optionalString(path, default);
     }
 
     fn optionalBool(self: Config, path: []const []const u8, default: bool) bool {
-        const node = self.get(path) orelse return default;
-        return if (node == .bool) node.bool else default;
+        return self.view().optionalBool(path, default);
     }
 
     fn optionalInt(self: Config, path: []const []const u8, default: i64) i64 {
-        const node = self.get(path) orelse return default;
-        return switch (node) {
-            .integer => |v| v,
-            else => default,
-        };
+        return self.view().optionalInt(path, default);
+    }
+
+    fn view(self: Config) config_value.View {
+        return .{ .value = self.value };
     }
 
     fn expandHome(self: Config, gpa: std.mem.Allocator, path: []const u8) ![]const u8 {
@@ -244,28 +236,19 @@ fn readFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
 }
 
 fn requiredObjectString(node: Value, key: []const u8) ![]const u8 {
-    if (node != .object) return error.InvalidConfig;
-    const value = node.object.get(key) orelse return error.InvalidConfig;
-    if (value != .string) return error.InvalidConfig;
-    return value.string;
+    return config_value.requiredObjectString(node, key);
 }
 
 fn optionalObjectString(node: Value, key: []const u8, default: []const u8) []const u8 {
-    if (node != .object) return default;
-    const value = node.object.get(key) orelse return default;
-    return if (value == .string) value.string else default;
+    return config_value.optionalObjectString(node, key, default);
 }
 
 fn optionalObjectBool(node: Value, key: []const u8, default: bool) bool {
-    if (node != .object) return default;
-    const value = node.object.get(key) orelse return default;
-    return if (value == .bool) value.bool else default;
+    return config_value.optionalObjectBool(node, key, default);
 }
 
 fn optionalObjectInt(node: Value, key: []const u8) ?i64 {
-    if (node != .object) return null;
-    const value = node.object.get(key) orelse return null;
-    return if (value == .integer) value.integer else null;
+    return config_value.optionalObjectInt(node, key);
 }
 
 fn stringArray(gpa: std.mem.Allocator, values: []const Value) ![][]const u8 {
