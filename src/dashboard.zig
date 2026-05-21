@@ -2,6 +2,25 @@ const std = @import("std");
 const config = @import("config.zig");
 const proc_runner = @import("runner.zig");
 
+pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.Io.Writer) !void {
+    const ctx: Context = .{ .gpa = gpa, .cfg = cfg, .runner = .{ .gpa = gpa, .io = io } };
+    try writer.writeAll(clearScreen);
+    try renderLauncher(ctx, writer);
+    try writer.flush();
+    const shell = if (std.c.getenv("SHELL")) |value| std.mem.span(value) else "sh";
+    _ = try ctx.runner.runInteractive(&.{shell});
+}
+
+pub fn runMonitor(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.Io.Writer) !void {
+    const ctx: Context = .{ .gpa = gpa, .cfg = cfg, .runner = .{ .gpa = gpa, .io = io } };
+    while (true) {
+        try writer.writeAll(clearScreen);
+        try renderMonitor(ctx, writer);
+        try writer.flush();
+        _ = ctx.runner.run(&.{ "sleep", "1" }) catch {};
+    }
+}
+
 const clearScreen = "\x1b[2J\x1b[H";
 const reset = "\x1b[0m";
 const bold = "\x1b[1m";
@@ -73,25 +92,6 @@ const PaneInfo = struct {
     exit_code: []const u8 = "0",
     command: []const u8 = "",
 };
-
-pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.Io.Writer) !void {
-    const ctx: Context = .{ .gpa = gpa, .cfg = cfg, .runner = .{ .gpa = gpa, .io = io } };
-    try writer.writeAll(clearScreen);
-    try renderLauncher(ctx, writer);
-    try writer.flush();
-    const shell = if (std.c.getenv("SHELL")) |value| std.mem.span(value) else "sh";
-    _ = try ctx.runner.runInteractive(&.{shell});
-}
-
-pub fn runMonitor(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.Io.Writer) !void {
-    const ctx: Context = .{ .gpa = gpa, .cfg = cfg, .runner = .{ .gpa = gpa, .io = io } };
-    while (true) {
-        try writer.writeAll(clearScreen);
-        try renderMonitor(ctx, writer);
-        try writer.flush();
-        _ = ctx.runner.run(&.{ "sleep", "1" }) catch {};
-    }
-}
 
 fn renderLauncher(ctx: Context, writer: *std.Io.Writer) !void {
     try writer.writeAll("\n");

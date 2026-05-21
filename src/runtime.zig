@@ -15,33 +15,6 @@ pub const Runtime = struct {
     config_path: []const u8,
     zask_path: []const u8,
 
-    fn runner(self: Runtime) proc_runner.Runner {
-        return .{ .gpa = self.gpa, .io = self.io };
-    }
-
-    fn tmux(self: Runtime) !tmux_client.Client {
-        return .{ .gpa = self.gpa, .runner = self.runner(), .session = try self.cfg.sessionName() };
-    }
-
-    fn docker(self: Runtime) !docker_client.Compose {
-        return .{
-            .gpa = self.gpa,
-            .runner = self.runner(),
-            .dir = try self.cfg.dockerDir(self.gpa),
-            .file = self.cfg.dockerComposeFile(),
-        };
-    }
-
-    fn lifecycle(self: Runtime) !lifecycle_mod.Lifecycle {
-        return .{
-            .gpa = self.gpa,
-            .cfg = self.cfg,
-            .runner = self.runner(),
-            .tmux = try self.tmux(),
-            .docker = try self.docker(),
-        };
-    }
-
     pub fn renderSession(self: Runtime, writer: *std.Io.Writer) !void {
         try render.renderTmuxp(self.cfg, self.gpa, writer, self.zask_path, self.config_path);
     }
@@ -172,6 +145,33 @@ pub const Runtime = struct {
 
     pub fn monitorOnce(self: Runtime, writer: *std.Io.Writer) !void {
         try dashboard_ui.runMonitor(self.gpa, self.io, self.cfg, writer);
+    }
+
+    fn runner(self: Runtime) proc_runner.Runner {
+        return .{ .gpa = self.gpa, .io = self.io };
+    }
+
+    fn tmux(self: Runtime) !tmux_client.Client {
+        return .{ .gpa = self.gpa, .runner = self.runner(), .session = try self.cfg.sessionName() };
+    }
+
+    fn docker(self: Runtime) !docker_client.Compose {
+        return .{
+            .gpa = self.gpa,
+            .runner = self.runner(),
+            .dir = try self.cfg.dockerDir(self.gpa),
+            .file = self.cfg.dockerComposeFile(),
+        };
+    }
+
+    fn lifecycle(self: Runtime) !lifecycle_mod.Lifecycle {
+        return .{
+            .gpa = self.gpa,
+            .cfg = self.cfg,
+            .runner = self.runner(),
+            .tmux = try self.tmux(),
+            .docker = try self.docker(),
+        };
     }
 
     fn writeSessionFile(self: Runtime) ![]const u8 {
