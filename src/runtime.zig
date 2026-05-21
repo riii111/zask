@@ -1,9 +1,11 @@
 const std = @import("std");
 const config = @import("config.zig");
 const dashboard_ui = @import("dashboard.zig");
+const docker_client = @import("docker.zig");
 const paths = @import("paths.zig");
 const render = @import("render.zig");
 const proc_runner = @import("runner.zig");
+const tmux_client = @import("tmux.zig");
 
 pub const Runtime = struct {
     gpa: std.mem.Allocator,
@@ -14,6 +16,19 @@ pub const Runtime = struct {
 
     fn runner(self: Runtime) proc_runner.Runner {
         return .{ .gpa = self.gpa, .io = self.io };
+    }
+
+    fn tmux(self: Runtime) !tmux_client.Client {
+        return .{ .gpa = self.gpa, .runner = self.runner(), .session = try self.cfg.sessionName() };
+    }
+
+    fn docker(self: Runtime) !docker_client.Compose {
+        return .{
+            .gpa = self.gpa,
+            .runner = self.runner(),
+            .dir = try self.cfg.dockerDir(self.gpa),
+            .file = self.cfg.dockerComposeFile(),
+        };
     }
 
     pub fn renderSession(self: Runtime, writer: *std.Io.Writer) !void {
@@ -44,15 +59,15 @@ pub const Runtime = struct {
 
     pub fn attach(self: Runtime) !void {
         if (try self.inTmux()) {
-            _ = try self.run(&.{ "tmux", "switch-client", "-t", try self.cfg.sessionName() });
+            try (try self.tmux()).switchClient();
         } else {
-            _ = try self.runInteractive(&.{ "tmux", "attach-session", "-t", try self.cfg.sessionName() });
+            try (try self.tmux()).attachSession();
         }
     }
 
     pub fn detach(self: Runtime, writer: *std.Io.Writer) !void {
         if (try self.inTmux()) {
-            _ = try self.run(&.{ "tmux", "detach-client" });
+            try (try self.tmux()).detachClient();
         } else {
             try writer.writeAll("Not in tmux session\n");
         }
@@ -61,9 +76,9 @@ pub const Runtime = struct {
     pub fn logs(self: Runtime, service: []const u8) !void {
         try self.validateService(service);
         if (try self.inTmux()) {
-            _ = try self.run(&.{ "tmux", "switch-client", "-t", try self.cfg.sessionName() });
+            try (try self.tmux()).switchClient();
         }
-        _ = try self.run(&.{ "tmux", "select-window", "-t", try std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ try self.cfg.sessionName(), service }) });
+        try (try self.tmux()).selectWindow(service);
         if (!try self.inTmux()) try self.attach();
     }
 
@@ -82,11 +97,12 @@ pub const Runtime = struct {
         }
         const session_file = try self.writeSessionFile();
         _ = try self.run(&.{ "tmuxp", "load", "-d", session_file });
-        _ = try self.run(&.{ "tmux", "set-option", "-t", try self.cfg.sessionName(), "prefix", "C-q" });
-        _ = try self.run(&.{ "tmux", "set-option", "-t", try self.cfg.sessionName(), "status-format[0]", "#[align=left]#{T;=/#{status-left-length}:status-left}#[align=right]#{T;=/#{status-right-length}:status-right}" });
-        _ = try self.run(&.{ "tmux", "set-option", "-t", try self.cfg.sessionName(), "@mux_dash_mode", "all" });
-        _ = try self.run(&.{ "tmux", "bind-key", "-T", "prefix", "m", "run-shell", "mode=$(tmux show-option -qv @mux_dash_mode); if [ \"$mode\" = \"all\" ]; then tmux set-option @mux_dash_mode bad; else tmux set-option @mux_dash_mode all; fi" });
-        _ = try self.run(&.{ "tmux", "bind-key", "-T", "prefix", "f", "run-shell", try std.fmt.allocPrint(self.gpa, "{s} --config {s} follow \"#{{window_name}}\"", .{ self.zask_path, self.config_path }) });
+        const tx = try self.tmux();
+        try tx.setOption("prefix", "C-q");
+        try tx.setOption("status-format[0]", "#[align=left]#{T;=/#{status-left-length}:status-left}#[align=right]#{T;=/#{status-right-length}:status-right}");
+        try tx.setOption("@mux_dash_mode", "all");
+        try tx.bindRunShell("m", "mode=$(tmux show-option -qv @mux_dash_mode); if [ \"$mode\" = \"all\" ]; then tmux set-option @mux_dash_mode bad; else tmux set-option @mux_dash_mode all; fi");
+        try tx.bindRunShell("f", try std.fmt.allocPrint(self.gpa, "{s} --config {s} follow \"#{{window_name}}\"", .{ self.zask_path, self.config_path }));
         try self.initLogDir();
         try self.setupPipePane();
         try self.startAll(profile, writer);
@@ -100,14 +116,14 @@ pub const Runtime = struct {
         }
         try self.stopAll(writer);
         try self.cleanupPipePane();
-        _ = try self.run(&.{ "tmux", "kill-session", "-t", try self.cfg.sessionName() });
+        try (try self.tmux()).killSession();
     }
 
     pub fn kill(self: Runtime, writer: *std.Io.Writer) !void {
         try self.stopDocker();
         try self.cleanupPipePane();
         if (try self.sessionExists()) {
-            _ = try self.run(&.{ "tmux", "kill-session", "-t", try self.cfg.sessionName() });
+            try (try self.tmux()).killSession();
         } else {
             try writer.writeAll("Session not running\n");
         }
@@ -144,7 +160,8 @@ pub const Runtime = struct {
 
     pub fn exec(self: Runtime, container: []const u8, use_shell: bool, writer: *std.Io.Writer) !void {
         if (!self.cfg.dockerEnabled()) return error.DockerDisabled;
-        const running = try self.run(&.{ "docker", "compose", "-f", self.cfg.dockerComposeFile(), "ps", "--status", "running", "--format", "{{.Service}}" });
+        const dc = try self.docker();
+        const running = try dc.runningServices();
         defer self.gpa.free(running.stdout);
         defer self.gpa.free(running.stderr);
         if (std.mem.indexOf(u8, running.stdout, container) == null) {
@@ -152,11 +169,7 @@ pub const Runtime = struct {
             return error.ContainerNotRunning;
         }
         const exec_cmd = if (use_shell) "bash" else self.cfg.dockerExecDefault(container);
-        var argv = std.array_list.Managed([]const u8).init(self.gpa);
-        try argv.appendSlice(&.{ "docker", "compose", "-f", self.cfg.dockerComposeFile(), "exec", container });
-        var parts = std.mem.tokenizeScalar(u8, exec_cmd, ' ');
-        while (parts.next()) |part| try argv.append(part);
-        _ = try self.runInteractiveCwd(argv.items, try self.cfg.dockerDir(self.gpa));
+        try dc.execInteractive(container, exec_cmd);
     }
 
     pub fn dashboard(self: Runtime, writer: *std.Io.Writer) !void {
@@ -218,13 +231,13 @@ pub const Runtime = struct {
         const target = try std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ try self.cfg.sessionName(), service });
         const cmd = try std.fmt.allocPrint(self.gpa, "cd '{s}' && {s}", .{ try self.cfg.serviceDir(self.gpa, value), try self.cfg.serviceStartCommand(self.gpa, value) });
         try writer.print("Starting {s}...\n", .{service});
-        _ = try self.run(&.{ "tmux", "send-keys", "-t", target, cmd, "Enter" });
+        try (try self.tmux()).sendKeys(target, &.{ cmd, "Enter" });
     }
 
     fn stopService(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
         try self.validateService(service);
         try writer.print("Stopping {s}...\n", .{service});
-        _ = try self.run(&.{ "tmux", "send-keys", "-t", try std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ try self.cfg.sessionName(), service }), "C-c" });
+        try (try self.tmux()).sendKeys(try std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ try self.cfg.sessionName(), service }), &.{"C-c"});
     }
 
     fn restartService(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
@@ -234,13 +247,13 @@ pub const Runtime = struct {
 
     fn startDocker(self: Runtime) !void {
         if (!self.cfg.dockerEnabled()) return;
-        _ = try self.run(&.{ "tmux", "send-keys", "-t", try std.fmt.allocPrint(self.gpa, "{s}:docker", .{try self.cfg.sessionName()}), try std.fmt.allocPrint(self.gpa, "cd '{s}' && docker compose -f '{s}' up", .{ try self.cfg.dockerDir(self.gpa), self.cfg.dockerComposeFile() }), "Enter" });
+        try (try self.tmux()).sendKeys(try std.fmt.allocPrint(self.gpa, "{s}:docker", .{try self.cfg.sessionName()}), &.{ try std.fmt.allocPrint(self.gpa, "cd '{s}' && docker compose -f '{s}' up", .{ try self.cfg.dockerDir(self.gpa), self.cfg.dockerComposeFile() }), "Enter" });
     }
 
     fn stopDocker(self: Runtime) !void {
         if (!self.cfg.dockerEnabled()) return;
-        if (try self.sessionExists()) _ = try self.run(&.{ "tmux", "send-keys", "-t", try std.fmt.allocPrint(self.gpa, "{s}:docker", .{try self.cfg.sessionName()}), "C-c" });
-        _ = self.runCwd(&.{ "docker", "compose", "-f", self.cfg.dockerComposeFile(), "down" }, try self.cfg.dockerDir(self.gpa)) catch {};
+        if (try self.sessionExists()) try (try self.tmux()).sendKeys(try std.fmt.allocPrint(self.gpa, "{s}:docker", .{try self.cfg.sessionName()}), &.{"C-c"});
+        (try self.docker()).down() catch {};
     }
 
     fn runPrechecks(self: Runtime, writer: *std.Io.Writer) !void {
@@ -317,7 +330,7 @@ pub const Runtime = struct {
         var attempt: i64 = 0;
         const max_attempts = self.cfg.dockerWaitTimeout();
         while (attempt < max_attempts) : (attempt += 1) {
-            const result = self.runCwd(&.{ "docker", "compose", "-f", self.cfg.dockerComposeFile(), "ps", "--status", "running" }, try self.cfg.dockerDir(self.gpa)) catch {
+            const result = (try self.docker()).runningTable() catch {
                 _ = self.run(&.{ "sleep", "1" }) catch {};
                 continue;
             };
@@ -342,24 +355,16 @@ pub const Runtime = struct {
     }
 
     fn sessionExists(self: Runtime) !bool {
-        const result = self.run(&.{ "tmux", "has-session", "-t", try self.cfg.sessionName() }) catch return false;
-        defer self.gpa.free(result.stdout);
-        defer self.gpa.free(result.stderr);
-        return result.term == .exited and result.term.exited == 0;
+        return (try self.tmux()).hasSession();
     }
 
     fn serviceRunning(self: Runtime, service: []const u8) !bool {
-        const result = self.run(&.{ "tmux", "list-panes", "-t", try std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ try self.cfg.sessionName(), service }), "-F", "#{pane_pid}" }) catch return false;
-        defer self.gpa.free(result.stdout);
-        defer self.gpa.free(result.stderr);
-        return result.stdout.len > 0;
+        const pid = try (try self.tmux()).panePid(try std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ try self.cfg.sessionName(), service }));
+        return if (pid) |value| value.len > 0 else false;
     }
 
     fn dockerRunning(self: Runtime) !bool {
-        const result = self.runCwd(&.{ "docker", "compose", "-f", self.cfg.dockerComposeFile(), "ps", "--status", "running" }, try self.cfg.dockerDir(self.gpa)) catch return false;
-        defer self.gpa.free(result.stdout);
-        defer self.gpa.free(result.stderr);
-        return result.stdout.len > 0;
+        return (try self.docker()).running();
     }
 
     fn inTmux(self: Runtime) !bool {
