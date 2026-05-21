@@ -127,19 +127,32 @@ fn isGlobalCommand(command: []const u8) bool {
 
 fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
     const io = context.io orelse return error.MissingIo;
-    const path = if (parsed.config_path) |p| p else try projectConfigPath(context.gpa, parsed.project orelse return error.ProjectRequired);
+    const path = try absoluteConfigPath(context.gpa, io, if (parsed.config_path) |p| p else try projectConfigPath(context.gpa, parsed.project orelse return error.ProjectRequired));
     const cfg = try config.loadPath(context.gpa, io, path, runtime.home());
     return .{
         .gpa = context.gpa,
         .io = io,
         .cfg = cfg,
         .config_path = path,
-        .zask_path = "zask",
+        .zask_path = try absoluteExePath(context.gpa, io, context.argv0),
     };
 }
 
 fn projectConfigPath(gpa: std.mem.Allocator, project: []const u8) ![]const u8 {
     return std.fs.path.join(gpa, &.{ try runtime.configBase(gpa), project, "config.json" });
+}
+
+fn absoluteConfigPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
+    if (std.fs.path.isAbsolute(path)) return path;
+    return std.Io.Dir.cwd().realPathFileAlloc(io, path, gpa);
+}
+
+fn absoluteExePath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
+    if (std.fs.path.isAbsolute(path)) return path;
+    if (std.mem.indexOfScalar(u8, path, '/') != null) {
+        return std.Io.Dir.cwd().realPathFileAlloc(io, path, gpa);
+    }
+    return path;
 }
 
 fn oneArg(args: []const []const u8, command: []const u8) ![]const u8 {
