@@ -2,14 +2,13 @@ const std = @import("std");
 const zask = @import("zask");
 
 pub fn main(init: std.process.Init) !void {
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_file_writer: std.Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);
-    const stdout = &stdout_file_writer.interface;
-
-    try stdout.print("{s}\n", .{zask.greeting()});
-    try stdout.flush();
+    try zask.cli.run(init);
 }
 
-test "prints the greeting text" {
-    try std.testing.expectEqualStrings("Hello from zask", zask.greeting());
+test "runs default command" {
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try zask.cli.runWithArgs(&.{}, &writer);
+    try std.testing.expectEqualStrings("Hello from zask\n", writer.buffered());
 }

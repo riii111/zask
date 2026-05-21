@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const version = "0.0.0";
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -9,6 +11,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", version);
+    zask_mod.addOptions("build_options", options);
 
     const exe = b.addExecutable(.{
         .name = "zask",
@@ -21,6 +26,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    exe.root_module.addOptions("build_options", options);
 
     b.installArtifact(exe);
 
