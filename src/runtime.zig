@@ -168,7 +168,10 @@ pub const Runtime = struct {
         try self.runPrechecks(writer);
         if (self.cfg.dockerEnabled()) {
             try self.startDocker();
-            try self.waitForDocker(writer);
+            self.waitForDocker(writer) catch {
+                try writer.writeAll("Error: Docker failed to start\n");
+                return error.DockerFailed;
+            };
         }
         if (std.mem.eql(u8, profile, "docker")) return;
         const phases = self.cfg.phases();
@@ -307,8 +310,24 @@ pub const Runtime = struct {
     }
 
     fn waitForDocker(self: Runtime, writer: *std.Io.Writer) !void {
-        _ = self;
         try writer.writeAll("Waiting for Docker containers...\n");
+        var attempt: i64 = 0;
+        const max_attempts = self.cfg.dockerWaitTimeout();
+        while (attempt < max_attempts) : (attempt += 1) {
+            const result = self.runCwd(&.{ "docker", "compose", "-f", self.cfg.dockerComposeFile(), "ps", "--status", "running" }, try self.cfg.dockerDir(self.gpa)) catch {
+                _ = self.run(&.{ "sleep", "1" }) catch {};
+                continue;
+            };
+            defer self.gpa.free(result.stdout);
+            defer self.gpa.free(result.stderr);
+
+            if (result.term == .exited and result.term.exited == 0 and runningContainerCount(result.stdout) > 0) {
+                try writer.writeAll("Docker containers ready\n");
+                return;
+            }
+            _ = self.run(&.{ "sleep", "1" }) catch {};
+        }
+        return error.DockerNotReady;
     }
 
     fn waitForPort(self: Runtime, port: i64, timeout: i64) !void {
@@ -380,6 +399,16 @@ fn optionalObjectString(node: std.json.Value, key: []const u8, default: []const 
     return if (value == .string) value.string else default;
 }
 
+fn runningContainerCount(output: []const u8) usize {
+    var count: usize = 0;
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.trim(u8, line, " \t\r").len > 0) count += 1;
+    }
+    if (count == 0) return 0;
+    return count - 1;
+}
+
 fn writeFile(io: std.Io, path: []const u8, contents: []const u8) !void {
     var file = if (std.fs.path.isAbsolute(path))
         try std.Io.Dir.createFileAbsolute(io, path, .{})
@@ -402,4 +431,10 @@ pub fn dataBase(gpa: std.mem.Allocator) ![]const u8 {
 pub fn home() []const u8 {
     if (std.c.getenv("HOME")) |value| return std.mem.span(value);
     return "";
+}
+
+test "counts running docker compose rows" {
+    try std.testing.expectEqual(@as(usize, 0), runningContainerCount(""));
+    try std.testing.expectEqual(@as(usize, 0), runningContainerCount("NAME SERVICE STATUS\n"));
+    try std.testing.expectEqual(@as(usize, 2), runningContainerCount("NAME SERVICE STATUS\none api running\ntwo db running\n"));
 }
