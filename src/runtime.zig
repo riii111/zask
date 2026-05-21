@@ -390,12 +390,12 @@ fn writeFile(io: std.Io, path: []const u8, contents: []const u8) !void {
 }
 
 pub fn configBase(gpa: std.mem.Allocator) ![]const u8 {
-    if (std.c.getenv("XDG_CONFIG_HOME")) |value| return std.mem.span(value);
+    if (std.c.getenv("XDG_CONFIG_HOME")) |value| return std.fs.path.join(gpa, &.{ std.mem.span(value), "zask" });
     return std.fs.path.join(gpa, &.{ home(), ".config", "zask" });
 }
 
 pub fn dataBase(gpa: std.mem.Allocator) ![]const u8 {
-    if (std.c.getenv("XDG_DATA_HOME")) |value| return std.mem.span(value);
+    if (std.c.getenv("XDG_DATA_HOME")) |value| return std.fs.path.join(gpa, &.{ std.mem.span(value), "zask" });
     return std.fs.path.join(gpa, &.{ home(), ".local", "share", "zask" });
 }
 
