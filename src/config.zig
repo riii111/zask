@@ -1,7 +1,9 @@
 const std = @import("std");
 const config_value = @import("config_value.zig");
+const validate = @import("validate.zig");
 
 const Value = std.json.Value;
+const max_config_bytes = 10 * 1024 * 1024;
 
 pub const Config = struct {
     value: Value,
@@ -15,11 +17,15 @@ pub const Config = struct {
     }
 
     pub fn projectName(self: Config) ![]const u8 {
-        return self.requiredString(&.{ "project", "name" });
+        const name = try self.requiredString(&.{ "project", "name" });
+        try validate.identifier(name);
+        return name;
     }
 
     pub fn sessionName(self: Config) ![]const u8 {
-        return self.requiredString(&.{ "project", "session_name" });
+        const name = try self.requiredString(&.{ "project", "session_name" });
+        try validate.identifier(name);
+        return name;
     }
 
     pub fn projectRoot(self: Config, gpa: std.mem.Allocator) ![]const u8 {
@@ -68,20 +74,22 @@ pub const Config = struct {
     }
 
     pub fn serviceName(service: Value) ![]const u8 {
-        return requiredObjectString(service, "name");
+        const name = try config_value.requiredObjectString(service, "name");
+        try validate.identifier(name);
+        return name;
     }
 
     pub fn serviceGroup(service: Value) []const u8 {
-        return optionalObjectString(service, "group", "");
+        return config_value.optionalObjectString(service, "group", "");
     }
 
     pub fn servicePort(service: Value) ?i64 {
-        return optionalObjectInt(service, "port");
+        return config_value.optionalObjectInt(service, "port");
     }
 
     pub fn serviceDir(self: Config, gpa: std.mem.Allocator, service: Value) ![]const u8 {
-        const dir = optionalObjectString(service, "dir", ".");
-        const external = optionalObjectBool(service, "external", false);
+        const dir = config_value.optionalObjectString(service, "dir", ".");
+        const external = config_value.optionalObjectBool(service, "external", false);
         if (external or std.fs.path.isAbsolute(dir) or std.mem.startsWith(u8, dir, "~")) {
             return self.expandHome(gpa, dir);
         }
@@ -89,8 +97,8 @@ pub const Config = struct {
     }
 
     pub fn serviceCommand(service: Value) ![]const u8 {
-        const command = requiredObjectString(service, "command") catch "";
-        const runtime = optionalObjectString(service, "runtime", "");
+        const command = config_value.requiredObjectString(service, "command") catch "";
+        const runtime = config_value.optionalObjectString(service, "runtime", "");
         if (runtime.len == 0) return command;
         if (!isAllowedRuntime(runtime)) return error.UnknownRuntime;
         return command;
@@ -98,8 +106,8 @@ pub const Config = struct {
 
     pub fn serviceStartCommand(self: Config, gpa: std.mem.Allocator, service: Value) ![]const u8 {
         _ = self;
-        const command = try requiredObjectString(service, "command");
-        const runtime = optionalObjectString(service, "runtime", "");
+        const command = try config_value.requiredObjectString(service, "command");
+        const runtime = config_value.optionalObjectString(service, "runtime", "");
         if (runtime.len == 0) return command;
         if (!isAllowedRuntime(runtime)) return error.UnknownRuntime;
         return std.fmt.allocPrint(gpa, "{s} {s}", .{ runtime, command });
@@ -178,7 +186,7 @@ pub const Config = struct {
                 }
             }
         }
-        return requiredObjectString(phase, "command");
+        return config_value.requiredObjectString(phase, "command");
     }
 
     pub fn dockerExecDefault(self: Config, container: []const u8) []const u8 {
@@ -229,26 +237,7 @@ pub fn loadPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []co
 }
 
 fn readFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
-    if (std.fs.path.isAbsolute(path)) {
-        return std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(10 * 1024 * 1024));
-    }
-    return std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(10 * 1024 * 1024));
-}
-
-fn requiredObjectString(node: Value, key: []const u8) ![]const u8 {
-    return config_value.requiredObjectString(node, key);
-}
-
-fn optionalObjectString(node: Value, key: []const u8, default: []const u8) []const u8 {
-    return config_value.optionalObjectString(node, key, default);
-}
-
-fn optionalObjectBool(node: Value, key: []const u8, default: bool) bool {
-    return config_value.optionalObjectBool(node, key, default);
-}
-
-fn optionalObjectInt(node: Value, key: []const u8) ?i64 {
-    return config_value.optionalObjectInt(node, key);
+    return std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(max_config_bytes));
 }
 
 fn stringArray(gpa: std.mem.Allocator, values: []const Value) ![][]const u8 {

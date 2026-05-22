@@ -3,6 +3,7 @@ const build_options = @import("build_options");
 const root = @import("root.zig");
 const config = @import("config.zig");
 const paths = @import("paths.zig");
+const validate = @import("validate.zig");
 const Runtime = @import("runtime.zig").Runtime;
 
 const ParsedArgs = struct {
@@ -139,6 +140,7 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
 }
 
 fn projectConfigPath(gpa: std.mem.Allocator, project: []const u8) ![]const u8 {
+    try validate.identifier(project);
     return std.fs.path.join(gpa, &.{ try paths.configBase(gpa), project, "config.json" });
 }
 

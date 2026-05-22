@@ -1,7 +1,9 @@
 const std = @import("std");
 const config = @import("config.zig");
+const config_value = @import("config_value.zig");
 const docker_client = @import("docker.zig");
 const proc_runner = @import("runner.zig");
+const shell = @import("shell.zig");
 const tmux_client = @import("tmux.zig");
 
 pub const Lifecycle = struct {
@@ -28,7 +30,7 @@ pub const Lifecycle = struct {
         }
         for (phases) |phase| {
             if (phase != .object) continue;
-            const phase_type = optionalObjectString(phase, "type", "");
+            const phase_type = config_value.optionalObjectString(phase, "type", "");
             if (std.mem.eql(u8, phase_type, "docker")) continue;
             if (std.mem.eql(u8, phase_type, "command")) {
                 try self.runCommandPhase(phase, profile, writer);
@@ -98,7 +100,7 @@ pub const Lifecycle = struct {
             return;
         }
         const target = try self.tmux.target(service);
-        const cmd = try std.fmt.allocPrint(self.gpa, "cd '{s}' && {s}", .{ try self.cfg.serviceDir(self.gpa, value), try self.cfg.serviceStartCommand(self.gpa, value) });
+        const cmd = try std.fmt.allocPrint(self.gpa, "cd {s} && {s}", .{ try shell.quote(self.gpa, try self.cfg.serviceDir(self.gpa, value)), try self.cfg.serviceStartCommand(self.gpa, value) });
         try writer.print("Starting {s}...\n", .{service});
         try self.tmux.sendKeys(target, &.{ cmd, "Enter" });
     }
@@ -118,7 +120,7 @@ pub const Lifecycle = struct {
     fn startDocker(self: Lifecycle) !void {
         if (!self.cfg.dockerEnabled()) return;
         try self.waitForWindow("docker");
-        try self.tmux.sendKeys(try self.tmux.target("docker"), &.{ try std.fmt.allocPrint(self.gpa, "cd '{s}' && docker compose -f '{s}' up", .{ try self.cfg.dockerDir(self.gpa), self.cfg.dockerComposeFile() }), "Enter" });
+        try self.tmux.sendKeys(try self.tmux.target("docker"), &.{ try std.fmt.allocPrint(self.gpa, "cd {s} && docker compose -f {s} up", .{ try shell.quote(self.gpa, try self.cfg.dockerDir(self.gpa)), try shell.quote(self.gpa, self.cfg.dockerComposeFile()) }), "Enter" });
     }
 
     fn stopDocker(self: Lifecycle) !void {
@@ -131,10 +133,10 @@ pub const Lifecycle = struct {
         const prechecks = self.cfg.value.object.get("prechecks") orelse return;
         if (prechecks != .array) return;
         for (prechecks.array.items) |check| {
-            const name = optionalObjectString(check, "name", "precheck");
-            const command = try requiredObjectString(check, "command");
-            const on_fail = optionalObjectString(check, "on_fail", "warn");
-            const dir = optionalObjectString(check, "dir", "");
+            const name = config_value.optionalObjectString(check, "name", "precheck");
+            const command = try config_value.requiredObjectString(check, "command");
+            const on_fail = config_value.optionalObjectString(check, "on_fail", "warn");
+            const dir = config_value.optionalObjectString(check, "dir", "");
             const cwd = if (dir.len == 0) try self.cfg.projectRoot(self.gpa) else try std.fs.path.join(self.gpa, &.{ try self.cfg.projectRoot(self.gpa), dir });
             const result = self.runner.runCwd(&.{ "bash", "-c", command }, cwd) catch {
                 if (std.mem.eql(u8, on_fail, "abort")) return error.PrecheckFailed;
@@ -148,10 +150,10 @@ pub const Lifecycle = struct {
 
     fn runCommandPhase(self: Lifecycle, phase: std.json.Value, profile: []const u8, writer: *std.Io.Writer) !void {
         const command = try self.cfg.commandPhaseCommand(phase, profile);
-        const dir = optionalObjectString(phase, "dir", "");
+        const dir = config_value.optionalObjectString(phase, "dir", "");
         const cwd = if (dir.len == 0) try self.cfg.projectRoot(self.gpa) else try std.fs.path.join(self.gpa, &.{ try self.cfg.projectRoot(self.gpa), dir });
         const result = self.runner.runCwd(&.{ "bash", "-c", command }, cwd) catch {
-            if (std.mem.eql(u8, optionalObjectString(phase, "on_fail", "abort"), "abort")) return error.CommandPhaseFailed;
+            if (std.mem.eql(u8, config_value.optionalObjectString(phase, "on_fail", "abort"), "abort")) return error.CommandPhaseFailed;
             try writer.writeAll("Warning: command phase failed\n");
             return;
         };
@@ -206,19 +208,6 @@ pub const Lifecycle = struct {
         }
     }
 };
-
-fn requiredObjectString(node: std.json.Value, key: []const u8) ![]const u8 {
-    if (node != .object) return error.InvalidConfig;
-    const value = node.object.get(key) orelse return error.InvalidConfig;
-    if (value != .string) return error.InvalidConfig;
-    return value.string;
-}
-
-fn optionalObjectString(node: std.json.Value, key: []const u8, default: []const u8) []const u8 {
-    if (node != .object) return default;
-    const value = node.object.get(key) orelse return default;
-    return if (value == .string) value.string else default;
-}
 
 fn runningContainerCount(output: []const u8) usize {
     var count: usize = 0;
