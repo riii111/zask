@@ -13,6 +13,28 @@ const ParsedArgs = struct {
     args: []const []const u8,
 };
 
+const Command = enum {
+    version,
+    help,
+    render_session,
+    list,
+    status,
+    attach,
+    detach,
+    logs,
+    follow,
+    hello,
+    bye,
+    kill,
+    re,
+    up,
+    stop,
+    restart,
+    exec,
+    dashboard,
+    monitor,
+};
+
 pub const CommandContext = struct {
     gpa: std.mem.Allocator,
     io: ?std.Io = null,
@@ -42,33 +64,34 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
     }
 
     const parsed = try parseArgs(context, args);
-    const command = parsed.command;
-    if (std.mem.eql(u8, command, "version")) {
+    const command = parseCommand(parsed.command) orelse return error.UnknownCommand;
+    if (command == .version) {
         return printVersion(writer);
     }
-    if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
+    if (command == .help) {
         return printHelp(writer);
     }
     const rt = try loadRuntime(context, parsed);
-    if (std.mem.eql(u8, command, "render-session")) return rt.renderSession(writer);
-    if (std.mem.eql(u8, command, "list")) return rt.list(writer);
-    if (std.mem.eql(u8, command, "status")) return rt.status(writer);
-    if (std.mem.eql(u8, command, "attach")) return rt.attach();
-    if (std.mem.eql(u8, command, "detach")) return rt.detach(writer);
-    if (std.mem.eql(u8, command, "logs")) return rt.logs(try oneArg(parsed.args));
-    if (std.mem.eql(u8, command, "follow")) return rt.follow(try oneArg(parsed.args), writer);
-    if (std.mem.eql(u8, command, "hello")) return rt.hello(try resolveHelloProfile(rt.cfg, parsed.args), writer);
-    if (std.mem.eql(u8, command, "bye")) return rt.bye(writer);
-    if (std.mem.eql(u8, command, "kill")) return rt.kill(writer);
-    if (std.mem.eql(u8, command, "re")) return rt.re(writer);
-    if (std.mem.eql(u8, command, "up")) return rt.up(if (parsed.args.len > 0) parsed.args[0] else null, writer);
-    if (std.mem.eql(u8, command, "stop")) return rt.stop(if (parsed.args.len > 0) parsed.args[0] else null, writer);
-    if (std.mem.eql(u8, command, "restart")) return rt.restart(try oneArg(parsed.args), writer);
-    if (std.mem.eql(u8, command, "exec")) return rt.exec(try oneArg(parsed.args), parsed.args.len > 1 and std.mem.eql(u8, parsed.args[1], "--shell"), writer);
-    if (std.mem.eql(u8, command, "dashboard")) return rt.dashboard(writer);
-    if (std.mem.eql(u8, command, "monitor")) return rt.monitorOnce(writer);
-
-    return error.UnknownCommand;
+    return switch (command) {
+        .version, .help => unreachable,
+        .render_session => rt.renderSession(writer),
+        .list => rt.list(writer),
+        .status => rt.status(writer),
+        .attach => rt.attach(),
+        .detach => rt.detach(writer),
+        .logs => rt.logs(try oneArg(parsed.args)),
+        .follow => rt.follow(try oneArg(parsed.args), writer),
+        .hello => rt.hello(try resolveHelloProfile(rt.cfg, parsed.args), writer),
+        .bye => rt.bye(writer),
+        .kill => rt.kill(writer),
+        .re => rt.re(writer),
+        .up => rt.up(if (parsed.args.len > 0) parsed.args[0] else null, writer),
+        .stop => rt.stop(if (parsed.args.len > 0) parsed.args[0] else null, writer),
+        .restart => rt.restart(try oneArg(parsed.args), writer),
+        .exec => rt.exec(try oneArg(parsed.args), parsed.args.len > 1 and std.mem.eql(u8, parsed.args[1], "--shell"), writer),
+        .dashboard => rt.dashboard(writer),
+        .monitor => rt.monitorOnce(writer),
+    };
 }
 
 fn printGreeting(writer: *std.Io.Writer) !void {
@@ -117,10 +140,31 @@ fn parseArgs(context: CommandContext, args: []const []const u8) !ParsedArgs {
 }
 
 fn isGlobalCommand(command: []const u8) bool {
-    return std.mem.eql(u8, command, "version") or
-        std.mem.eql(u8, command, "help") or
-        std.mem.eql(u8, command, "--help") or
-        std.mem.eql(u8, command, "-h");
+    const parsed = parseCommand(command) orelse return false;
+    return parsed == .version or parsed == .help;
+}
+
+fn parseCommand(command: []const u8) ?Command {
+    if (std.mem.eql(u8, command, "version")) return .version;
+    if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) return .help;
+    if (std.mem.eql(u8, command, "render-session")) return .render_session;
+    if (std.mem.eql(u8, command, "list")) return .list;
+    if (std.mem.eql(u8, command, "status")) return .status;
+    if (std.mem.eql(u8, command, "attach")) return .attach;
+    if (std.mem.eql(u8, command, "detach")) return .detach;
+    if (std.mem.eql(u8, command, "logs")) return .logs;
+    if (std.mem.eql(u8, command, "follow")) return .follow;
+    if (std.mem.eql(u8, command, "hello")) return .hello;
+    if (std.mem.eql(u8, command, "bye")) return .bye;
+    if (std.mem.eql(u8, command, "kill")) return .kill;
+    if (std.mem.eql(u8, command, "re")) return .re;
+    if (std.mem.eql(u8, command, "up")) return .up;
+    if (std.mem.eql(u8, command, "stop")) return .stop;
+    if (std.mem.eql(u8, command, "restart")) return .restart;
+    if (std.mem.eql(u8, command, "exec")) return .exec;
+    if (std.mem.eql(u8, command, "dashboard")) return .dashboard;
+    if (std.mem.eql(u8, command, "monitor")) return .monitor;
+    return null;
 }
 
 fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
