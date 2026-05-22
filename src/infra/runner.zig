@@ -14,6 +14,12 @@ pub const Runner = struct {
         });
     }
 
+    pub fn runDiscard(self: Runner, argv: []const []const u8) !void {
+        const result = try self.run(argv);
+        self.gpa.free(result.stdout);
+        self.gpa.free(result.stderr);
+    }
+
     pub fn runCwd(self: Runner, argv: []const []const u8, cwd: []const u8) !std.process.RunResult {
         if (self.recorder) |recorder| return recorder.record(argv, cwd, false);
         return std.process.run(self.gpa, self.io, .{
@@ -45,13 +51,14 @@ pub const Runner = struct {
 
 pub const Recorder = struct {
     gpa: std.mem.Allocator,
-    commands: std.array_list.Managed(RecordedCommand),
+    commands: std.ArrayList(RecordedCommand),
+    responses: std.ArrayList(RecordedResponse),
     stdout: []const u8 = "",
     stderr: []const u8 = "",
     term: std.process.Child.Term = .{ .exited = 0 },
 
     pub fn init(gpa: std.mem.Allocator) Recorder {
-        return .{ .gpa = gpa, .commands = .init(gpa) };
+        return .{ .gpa = gpa, .commands = .empty, .responses = .empty };
     }
 
     pub fn deinit(self: *Recorder) void {
@@ -60,17 +67,40 @@ pub const Recorder = struct {
             self.gpa.free(command.argv);
             if (command.cwd) |cwd| self.gpa.free(cwd);
         }
-        self.commands.deinit();
+        self.commands.deinit(self.gpa);
+        for (self.responses.items) |response| {
+            self.gpa.free(response.stdout);
+            self.gpa.free(response.stderr);
+        }
+        self.responses.deinit(self.gpa);
+    }
+
+    pub fn enqueue(self: *Recorder, stdout: []const u8, stderr: []const u8, term: std.process.Child.Term) !void {
+        try self.responses.append(self.gpa, .{
+            .stdout = try self.gpa.dupe(u8, stdout),
+            .stderr = try self.gpa.dupe(u8, stderr),
+            .term = term,
+        });
     }
 
     fn record(self: *Recorder, argv: []const []const u8, cwd: ?[]const u8, interactive: bool) !std.process.RunResult {
         const owned_argv = try self.gpa.alloc([]const u8, argv.len);
         for (argv, 0..) |arg, index| owned_argv[index] = try self.gpa.dupe(u8, arg);
-        try self.commands.append(.{
+        try self.commands.append(self.gpa, .{
             .argv = owned_argv,
             .cwd = if (cwd) |value| try self.gpa.dupe(u8, value) else null,
             .interactive = interactive,
         });
+        if (self.responses.items.len > 0) {
+            const response = self.responses.orderedRemove(0);
+            defer self.gpa.free(response.stdout);
+            defer self.gpa.free(response.stderr);
+            return .{
+                .term = response.term,
+                .stdout = try self.gpa.dupe(u8, response.stdout),
+                .stderr = try self.gpa.dupe(u8, response.stderr),
+            };
+        }
         return .{
             .term = self.term,
             .stdout = try self.gpa.dupe(u8, self.stdout),
@@ -83,6 +113,12 @@ pub const RecordedCommand = struct {
     argv: []const []const u8,
     cwd: ?[]const u8,
     interactive: bool,
+};
+
+const RecordedResponse = struct {
+    stdout: []const u8,
+    stderr: []const u8,
+    term: std.process.Child.Term,
 };
 
 test "recorder captures commands without spawning processes" {
@@ -101,4 +137,24 @@ test "recorder captures commands without spawning processes" {
 
     _ = try run.runInteractive(&.{"zsh"});
     try std.testing.expect(recorder.commands.items[1].interactive);
+}
+
+test "recorder returns queued responses in order" {
+    var recorder = Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("first", "", .{ .exited = 0 });
+    try recorder.enqueue("second", "warn", .{ .exited = 1 });
+    const run = Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
+
+    const first = try run.run(&.{"one"});
+    defer std.testing.allocator.free(first.stdout);
+    defer std.testing.allocator.free(first.stderr);
+    const second = try run.run(&.{"two"});
+    defer std.testing.allocator.free(second.stdout);
+    defer std.testing.allocator.free(second.stderr);
+
+    try std.testing.expectEqualStrings("first", first.stdout);
+    try std.testing.expectEqualStrings("second", second.stdout);
+    try std.testing.expectEqualStrings("warn", second.stderr);
+    try std.testing.expectEqual(@as(u8, 1), second.term.exited);
 }

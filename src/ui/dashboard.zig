@@ -32,7 +32,7 @@ pub fn runMonitor(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer
             previous = try gpa.dupe(u8, output);
         }
         const outer_runner: proc_runner.Runner = .{ .gpa = gpa, .io = io };
-        _ = outer_runner.run(&.{ "sleep", "1" }) catch {};
+        outer_runner.runDiscard(&.{ "sleep", "1" }) catch {};
     }
 }
 

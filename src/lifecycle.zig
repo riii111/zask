@@ -167,18 +167,18 @@ pub const Lifecycle = struct {
         const max_attempts = self.cfg.dockerWaitTimeout();
         while (attempt < max_attempts) : (attempt += 1) {
             const result = self.docker.runningTable() catch {
-                _ = self.runner.run(&.{ "sleep", "1" }) catch {};
+                self.runner.runDiscard(&.{ "sleep", "1" }) catch {};
                 continue;
             };
             defer self.gpa.free(result.stdout);
             defer self.gpa.free(result.stderr);
 
             if (result.term == .exited and result.term.exited == 0 and runningContainerCount(result.stdout) > 0) {
-                _ = self.runner.run(&.{ "sleep", "2" }) catch {};
+                self.runner.runDiscard(&.{ "sleep", "2" }) catch {};
                 try writer.writeAll("Docker containers ready\n");
                 return;
             }
-            _ = self.runner.run(&.{ "sleep", "1" }) catch {};
+            self.runner.runDiscard(&.{ "sleep", "1" }) catch {};
         }
         return error.DockerNotReady;
     }
@@ -186,8 +186,8 @@ pub const Lifecycle = struct {
     fn waitForPort(self: Lifecycle, port: i64, timeout: i64) !void {
         var elapsed: i64 = 0;
         while (elapsed < timeout) : (elapsed += 2) {
-            if ((self.runner.run(&.{ "nc", "-z", "localhost", try std.fmt.allocPrint(self.gpa, "{d}", .{port}) }) catch null) != null) return;
-            _ = self.runner.run(&.{ "sleep", "2" }) catch {};
+            if (self.runner.runDiscard(&.{ "nc", "-z", "localhost", try std.fmt.allocPrint(self.gpa, "{d}", .{port}) })) |_| return else |_| {}
+            self.runner.runDiscard(&.{ "sleep", "2" }) catch {};
         }
     }
 
@@ -195,7 +195,7 @@ pub const Lifecycle = struct {
         var attempt: usize = 0;
         while (attempt < 20) : (attempt += 1) {
             if (self.tmux.windowExists(window)) return;
-            _ = self.runner.run(&.{ "sleep", "0.3" }) catch {};
+            self.runner.runDiscard(&.{ "sleep", "0.3" }) catch {};
         }
         return error.WindowNotReady;
     }
@@ -204,7 +204,7 @@ pub const Lifecycle = struct {
         var attempt: usize = 0;
         while (attempt < 10) : (attempt += 1) {
             if (!self.tmux.paneRunning(service)) return;
-            _ = self.runner.run(&.{ "sleep", "0.5" }) catch {};
+            self.runner.runDiscard(&.{ "sleep", "0.5" }) catch {};
         }
     }
 };
