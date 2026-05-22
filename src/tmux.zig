@@ -43,6 +43,7 @@ pub const Client = struct {
 
     pub fn showOption(self: Client, name: []const u8) !?[]const u8 {
         const result = self.runner.run(&.{ "tmux", "show-option", "-t", self.session, "-qv", name }) catch return null;
+        defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
         const value = std.mem.trim(u8, result.stdout, " \t\r\n");
         if (value.len == 0) return null;
@@ -91,6 +92,7 @@ pub const Client = struct {
 
     pub fn paneInfo(self: Client, window: []const u8) !PaneInfo {
         const result = self.runner.run(&.{ "tmux", "list-panes", "-t", try self.target(window), "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}" }) catch return .{};
+        defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
 
         var lines = std.mem.splitScalar(u8, result.stdout, '\n');
@@ -110,8 +112,15 @@ pub const Client = struct {
 
     pub fn panePid(self: Client, pane_target: []const u8) !?[]const u8 {
         const result = self.runner.run(&.{ "tmux", "list-panes", "-t", pane_target, "-F", "#{pane_pid}" }) catch return null;
+        defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
         return try self.gpa.dupe(u8, std.mem.trim(u8, result.stdout, " \t\r\n"));
+    }
+
+    pub fn capturePane(self: Client, window: []const u8) ![]const u8 {
+        const result = self.runner.run(&.{ "tmux", "capture-pane", "-t", try self.target(window), "-p" }) catch return "";
+        defer self.gpa.free(result.stderr);
+        return result.stdout;
     }
 
     pub fn target(self: Client, window: []const u8) ![]const u8 {

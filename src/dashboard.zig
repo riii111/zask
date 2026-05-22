@@ -1,9 +1,11 @@
 const std = @import("std");
 const config = @import("config.zig");
 const proc_runner = @import("runner.zig");
+const tmux_client = @import("tmux.zig");
 
 pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.Io.Writer) !void {
-    const ctx: Context = .{ .gpa = gpa, .cfg = cfg, .runner = .{ .gpa = gpa, .io = io } };
+    const run: proc_runner.Runner = .{ .gpa = gpa, .io = io };
+    const ctx: Context = .{ .gpa = gpa, .cfg = cfg, .runner = run, .tmux = .{ .gpa = gpa, .runner = run, .session = try cfg.sessionName() } };
     try writer.writeAll(clearScreen);
     try renderLauncher(ctx, writer);
     try writer.flush();
@@ -17,7 +19,8 @@ pub fn runMonitor(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer
         var frame_arena = std.heap.ArenaAllocator.init(gpa);
         defer frame_arena.deinit();
         const frame_gpa = frame_arena.allocator();
-        const ctx: Context = .{ .gpa = frame_gpa, .cfg = cfg, .runner = .{ .gpa = frame_gpa, .io = io } };
+        const run: proc_runner.Runner = .{ .gpa = frame_gpa, .io = io };
+        const ctx: Context = .{ .gpa = frame_gpa, .cfg = cfg, .runner = run, .tmux = .{ .gpa = frame_gpa, .runner = run, .session = try cfg.sessionName() } };
         var frame: std.Io.Writer.Allocating = .init(frame_gpa);
         try renderMonitor(ctx, &frame.writer);
         const output = frame.writer.buffered();
@@ -47,6 +50,7 @@ const Context = struct {
     gpa: std.mem.Allocator,
     cfg: config.Config,
     runner: proc_runner.Runner,
+    tmux: tmux_client.Client,
 };
 
 const MonitorStatus = enum {
@@ -97,12 +101,6 @@ const MonitorRow = struct {
     exit_code: []const u8,
     command: []const u8,
     port: []const u8,
-};
-
-const PaneInfo = struct {
-    dead: bool = false,
-    exit_code: []const u8 = "0",
-    command: []const u8 = "",
 };
 
 fn renderLauncher(ctx: Context, writer: *std.Io.Writer) !void {
@@ -209,19 +207,15 @@ fn serviceGroups(ctx: Context) ![][]const u8 {
 }
 
 fn dashboardMode(ctx: Context) ![]const u8 {
-    const result = ctx.runner.run(&.{ "tmux", "show-option", "-qv", "@mux_dash_mode" }) catch return "all";
-    defer ctx.gpa.free(result.stdout);
-    defer ctx.gpa.free(result.stderr);
-    const value = std.mem.trim(u8, result.stdout, " \t\r\n");
-    return if (value.len == 0) "all" else try ctx.gpa.dupe(u8, value);
+    return try ctx.tmux.showOption("@mux_dash_mode") orelse "all";
 }
 
 fn serviceMonitorRow(ctx: Context, service: std.json.Value) !MonitorRow {
     const name = try config.Config.serviceName(service);
-    const pane = try paneInfo(ctx, name);
+    const pane = try ctx.tmux.paneInfo(name);
     const state = if (pane.dead)
         MonitorStatus.dead
-    else if (isShellCommand(pane.command))
+    else if (tmux_client.isShellCommand(pane.command))
         MonitorStatus.stop
     else
         try healthStatus(ctx, service);
@@ -235,10 +229,10 @@ fn serviceMonitorRow(ctx: Context, service: std.json.Value) !MonitorRow {
 }
 
 fn dockerMonitorRow(ctx: Context) !MonitorRow {
-    const pane = try paneInfo(ctx, "docker");
+    const pane = try ctx.tmux.paneInfo("docker");
     const state = if (pane.dead)
         MonitorStatus.dead
-    else if (isShellCommand(pane.command))
+    else if (tmux_client.isShellCommand(pane.command))
         MonitorStatus.stop
     else if (try dockerRunning(ctx))
         MonitorStatus.live
@@ -269,26 +263,6 @@ fn dockerRunning(ctx: Context) !bool {
     return result.stdout.len > 0;
 }
 
-fn paneInfo(ctx: Context, window: []const u8) !PaneInfo {
-    const target = try std.fmt.allocPrint(ctx.gpa, "{s}:{s}", .{ try ctx.cfg.sessionName(), window });
-    const result = ctx.runner.run(&.{ "tmux", "list-panes", "-t", target, "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}" }) catch return .{};
-    defer ctx.gpa.free(result.stdout);
-    defer ctx.gpa.free(result.stderr);
-
-    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
-    const line = lines.next() orelse return .{};
-    var fields = std.mem.splitScalar(u8, line, '|');
-    const dead = fields.next() orelse "0";
-    const exit_code = fields.next() orelse "0";
-    _ = fields.next() orelse "0";
-    const command = fields.next() orelse "";
-    return .{
-        .dead = std.mem.eql(u8, dead, "1"),
-        .exit_code = exit_code,
-        .command = command,
-    };
-}
-
 fn writeMonitorRow(ctx: Context, writer: *std.Io.Writer, row: MonitorRow, show_log: bool) !void {
     const color = row.status.color();
     try writer.print("{s}{s}{s} ", .{ color, row.status.icon(), reset });
@@ -305,10 +279,14 @@ fn writeMonitorRow(ctx: Context, writer: *std.Io.Writer, row: MonitorRow, show_l
 }
 
 fn lastLogLine(ctx: Context, window: []const u8) ![]const u8 {
-    const script = try std.fmt.allocPrint(ctx.gpa, "tmux capture-pane -t '{s}:{s}' -p 2>/dev/null | tr -d '\\0' | sed 's/\\x1b\\[[0-9;]*m//g' | tr -s ' ' | sed '/^[[:space:]]*$/d' | tail -1", .{ try ctx.cfg.sessionName(), window });
-    const result = ctx.runner.run(&.{ "bash", "-c", script }) catch return "";
-    defer ctx.gpa.free(result.stderr);
-    return std.mem.trim(u8, result.stdout, " \t\r\n");
+    const pane = try ctx.tmux.capturePane(window);
+    var lines = std.mem.splitScalar(u8, pane, '\n');
+    var latest: []const u8 = "";
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n\x00");
+        if (trimmed.len > 0) latest = trimmed;
+    }
+    return latest;
 }
 
 fn countMonitorRow(row: MonitorRow, live_count: *usize, warn_count: *usize, dead_count: *usize) void {
@@ -317,10 +295,6 @@ fn countMonitorRow(row: MonitorRow, live_count: *usize, warn_count: *usize, dead
         .dead => dead_count.* += 1,
         else => warn_count.* += 1,
     }
-}
-
-fn isShellCommand(command: []const u8) bool {
-    return std.mem.eql(u8, command, "zsh") or std.mem.eql(u8, command, "bash") or std.mem.eql(u8, command, "sh") or command.len == 0;
 }
 
 fn writeCentered(writer: *std.Io.Writer, text: []const u8, width: usize) !void {
@@ -369,6 +343,7 @@ test "renders launcher frame with grouped services" {
         .gpa = arena.allocator(),
         .cfg = cfg,
         .runner = .{ .gpa = arena.allocator(), .io = std.Io.null },
+        .tmux = .{ .gpa = arena.allocator(), .runner = .{ .gpa = arena.allocator(), .io = std.Io.null }, .session = "demo" },
     };
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
