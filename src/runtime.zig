@@ -141,7 +141,7 @@ pub const Runtime = struct {
         const running = try dc.runningServices();
         defer self.gpa.free(running.stdout);
         defer self.gpa.free(running.stderr);
-        if (std.mem.indexOf(u8, running.stdout, container) == null) {
+        if (!serviceListContains(running.stdout, container)) {
             try writer.print("Container '{s}' is not running\n", .{container});
             return error.ContainerNotRunning;
         }
@@ -281,3 +281,16 @@ pub const Runtime = struct {
         return try self.runner().runInteractive(argv);
     }
 };
+
+fn serviceListContains(output: []const u8, name: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.eql(u8, std.mem.trim(u8, line, " \t\r"), name)) return true;
+    }
+    return false;
+}
+
+test "matches docker compose services by full line" {
+    try std.testing.expect(serviceListContains("api\ndb\n", "db"));
+    try std.testing.expect(!serviceListContains("mydb\ndb-replica\n", "db"));
+}

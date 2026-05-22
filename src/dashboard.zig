@@ -252,7 +252,14 @@ fn healthStatus(ctx: Context, service: std.json.Value) !MonitorStatus {
     const result = ctx.runner.run(&.{ "nc", "-z", "localhost", try std.fmt.allocPrint(ctx.gpa, "{d}", .{port}) }) catch return .ready;
     defer ctx.gpa.free(result.stdout);
     defer ctx.gpa.free(result.stderr);
-    return if (result.term == .exited and result.term.exited == 0) .live else .ready;
+    if (result.term != .exited or result.term.exited != 0) return .ready;
+    if (!std.mem.eql(u8, config.Config.serviceHealthcheckType(service), "http")) return .live;
+
+    const url = try std.fmt.allocPrint(ctx.gpa, "http://localhost:{d}{s}", .{ port, config.Config.serviceHealthcheckPath(service) });
+    const http = ctx.runner.run(&.{ "curl", "-sf", "--max-time", "1", url }) catch return .degraded;
+    defer ctx.gpa.free(http.stdout);
+    defer ctx.gpa.free(http.stderr);
+    return if (http.term == .exited and http.term.exited == 0) .live else .degraded;
 }
 
 fn dockerRunning(ctx: Context) !bool {

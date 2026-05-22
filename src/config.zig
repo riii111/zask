@@ -87,6 +87,16 @@ pub const Config = struct {
         return config_value.optionalObjectInt(service, "port");
     }
 
+    pub fn serviceHealthcheckType(service: Value) []const u8 {
+        const healthcheck = if (service == .object) service.object.get("healthcheck") orelse return "tcp" else return "tcp";
+        return config_value.optionalObjectString(healthcheck, "type", "tcp");
+    }
+
+    pub fn serviceHealthcheckPath(service: Value) []const u8 {
+        const healthcheck = if (service == .object) service.object.get("healthcheck") orelse return "/health" else return "/health";
+        return config_value.optionalObjectString(healthcheck, "path", "/health");
+    }
+
     pub fn serviceDir(self: Config, gpa: std.mem.Allocator, service: Value) ![]const u8 {
         const dir = config_value.optionalObjectString(service, "dir", ".");
         const external = config_value.optionalObjectBool(service, "external", false);
