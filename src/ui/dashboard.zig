@@ -1,7 +1,7 @@
 const std = @import("std");
-const config = @import("config.zig");
-const proc_runner = @import("runner.zig");
-const tmux_client = @import("tmux.zig");
+const config = @import("../config.zig");
+const proc_runner = @import("../infra/runner.zig");
+const tmux_client = @import("../infra/tmux.zig");
 
 pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.Io.Writer) !void {
     const run: proc_runner.Runner = .{ .gpa = gpa, .io = io };

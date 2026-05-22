@@ -2,7 +2,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const root = @import("root.zig");
 const config = @import("config.zig");
-const paths = @import("paths.zig");
+const paths = @import("infra/paths.zig");
 const validate = @import("validate.zig");
 const Runtime = @import("runtime.zig").Runtime;
 

@@ -1,10 +1,10 @@
 const std = @import("std");
 const config = @import("config.zig");
 const config_value = @import("config_value.zig");
-const docker_client = @import("docker.zig");
-const proc_runner = @import("runner.zig");
-const shell = @import("shell.zig");
-const tmux_client = @import("tmux.zig");
+const docker_client = @import("infra/docker.zig");
+const proc_runner = @import("infra/runner.zig");
+const shell = @import("infra/shell.zig");
+const tmux_client = @import("infra/tmux.zig");
 
 pub const Lifecycle = struct {
     gpa: std.mem.Allocator,

@@ -1,14 +1,14 @@
 const std = @import("std");
 const config = @import("config.zig");
-const dashboard_ui = @import("dashboard.zig");
-const docker_client = @import("docker.zig");
+const dashboard_ui = @import("ui/dashboard.zig");
+const docker_client = @import("infra/docker.zig");
 const lifecycle_mod = @import("lifecycle.zig");
-const lock = @import("lock.zig");
-const paths = @import("paths.zig");
-const render = @import("render.zig");
-const proc_runner = @import("runner.zig");
-const shell = @import("shell.zig");
-const tmux_client = @import("tmux.zig");
+const lock = @import("infra/lock.zig");
+const paths = @import("infra/paths.zig");
+const render = @import("ui/render.zig");
+const proc_runner = @import("infra/runner.zig");
+const shell = @import("infra/shell.zig");
+const tmux_client = @import("infra/tmux.zig");
 
 pub const Runtime = struct {
     gpa: std.mem.Allocator,

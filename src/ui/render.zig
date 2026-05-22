@@ -1,5 +1,5 @@
 const std = @import("std");
-const config = @import("config.zig");
+const config = @import("../config.zig");
 
 pub fn renderTmuxp(cfg: config.Config, gpa: std.mem.Allocator, writer: *std.Io.Writer, zask_path: []const u8, config_path: []const u8) !void {
     const project = try cfg.projectName();
