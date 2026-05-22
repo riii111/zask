@@ -41,6 +41,10 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ "tmux", "set-option", "-t", self.session, name, value });
     }
 
+    pub fn setWindowOption(self: Client, name: []const u8, value: []const u8) !void {
+        _ = try self.runner.run(&.{ "tmux", "set-window-option", "-t", self.session, name, value });
+    }
+
     pub fn showOption(self: Client, name: []const u8) !?[]const u8 {
         const result = self.runner.run(&.{ "tmux", "show-option", "-t", self.session, "-qv", name }) catch return null;
         defer self.gpa.free(result.stdout);
@@ -54,8 +58,8 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ "tmux", "bind-key", "-T", "prefix", key, "run-shell", command });
     }
 
-    pub fn resizeWindowToLargestClient(self: Client, window: []const u8) !void {
-        _ = try self.runner.run(&.{ "tmux", "resize-window", "-A", "-t", try self.target(window) });
+    pub fn resizeWindowToActiveClient(self: Client, window: []const u8) !void {
+        _ = try self.runner.run(&.{ "tmux", "resize-window", "-a", "-t", try self.target(window) });
     }
 
     pub fn popup(self: Client, width: []const u8, height: []const u8, command: []const u8) !void {
@@ -160,17 +164,17 @@ test "sendKeys records tmux command through runner" {
     try std.testing.expectEqualStrings("Enter", command.argv[5]);
 }
 
-test "resizeWindowToLargestClient records resize command" {
+test "resizeWindowToActiveClient records resize command" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     const run = runner.Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
     const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
 
-    try client.resizeWindowToLargestClient("api");
+    try client.resizeWindowToActiveClient("api");
 
     const command = recorder.commands.items[0];
     try std.testing.expectEqualStrings("tmux", command.argv[0]);
     try std.testing.expectEqualStrings("resize-window", command.argv[1]);
-    try std.testing.expectEqualStrings("-A", command.argv[2]);
+    try std.testing.expectEqualStrings("-a", command.argv[2]);
     try std.testing.expectEqualStrings("demo:api", command.argv[4]);
 }

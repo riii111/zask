@@ -279,11 +279,12 @@ pub const Runtime = struct {
 
     fn resizeWindows(self: Runtime) !void {
         const tx = try self.tmux();
-        tx.resizeWindowToLargestClient("dashboard") catch {};
+        tx.resizeWindowToActiveClient("dashboard") catch {};
         for (try self.cfg.services()) |service| {
-            tx.resizeWindowToLargestClient(try config.Config.serviceName(service)) catch {};
+            tx.resizeWindowToActiveClient(try config.Config.serviceName(service)) catch {};
         }
-        if (self.cfg.dockerEnabled()) tx.resizeWindowToLargestClient("docker") catch {};
+        if (self.cfg.dockerEnabled()) tx.resizeWindowToActiveClient("docker") catch {};
+        tx.setWindowOption("window-size", "latest") catch {};
     }
 
     fn sessionExists(self: Runtime) !bool {
