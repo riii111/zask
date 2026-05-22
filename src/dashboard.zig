@@ -12,12 +12,24 @@ pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, write
 }
 
 pub fn runMonitor(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.Io.Writer) !void {
-    const ctx: Context = .{ .gpa = gpa, .cfg = cfg, .runner = .{ .gpa = gpa, .io = io } };
+    var previous: []u8 = &.{};
     while (true) {
-        try writer.writeAll(clearScreen);
-        try renderMonitor(ctx, writer);
-        try writer.flush();
-        _ = ctx.runner.run(&.{ "sleep", "1" }) catch {};
+        var frame_arena = std.heap.ArenaAllocator.init(gpa);
+        defer frame_arena.deinit();
+        const frame_gpa = frame_arena.allocator();
+        const ctx: Context = .{ .gpa = frame_gpa, .cfg = cfg, .runner = .{ .gpa = frame_gpa, .io = io } };
+        var frame: std.Io.Writer.Allocating = .init(frame_gpa);
+        try renderMonitor(ctx, &frame.writer);
+        const output = frame.writer.buffered();
+        if (!std.mem.eql(u8, previous, output)) {
+            try writer.writeAll(clearScreen);
+            try writer.writeAll(output);
+            try writer.flush();
+            if (previous.len > 0) gpa.free(previous);
+            previous = try gpa.dupe(u8, output);
+        }
+        const outer_runner: proc_runner.Runner = .{ .gpa = gpa, .io = io };
+        _ = outer_runner.run(&.{ "sleep", "1" }) catch {};
     }
 }
 

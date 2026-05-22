@@ -6,6 +6,7 @@ const lifecycle_mod = @import("lifecycle.zig");
 const paths = @import("paths.zig");
 const render = @import("render.zig");
 const proc_runner = @import("runner.zig");
+const shell = @import("shell.zig");
 const tmux_client = @import("tmux.zig");
 
 pub const Runtime = struct {
@@ -67,10 +68,19 @@ pub const Runtime = struct {
     }
 
     pub fn follow(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
+        _ = writer;
         _ = try self.cfg.findService(service);
-        const log_file = try std.fs.path.join(self.gpa, &.{ try self.logDir(), try std.fmt.allocPrint(self.gpa, "{s}.log", .{service}) });
-        if (!try self.pathExists(log_file)) try writer.print("Warning: Log file not found yet: {s}\n", .{log_file});
-        _ = try self.run(&.{ "tmux", "popup", "-w", self.cfg.popupWidth(), "-h", self.cfg.popupHeight(), "-E", try std.fmt.allocPrint(self.gpa, "nvim -c 'terminal tail -F {s}'", .{log_file}) });
+        const log_dir = try self.logDir();
+        const mkdir_result = try self.run(&.{ "mkdir", "-p", log_dir });
+        self.gpa.free(mkdir_result.stdout);
+        self.gpa.free(mkdir_result.stderr);
+        const log_file = try std.fs.path.join(self.gpa, &.{ log_dir, try std.fmt.allocPrint(self.gpa, "{s}.log", .{service}) });
+        if (!try self.pathExists(log_file)) {
+            const touch_result = try self.run(&.{ "touch", log_file });
+            self.gpa.free(touch_result.stdout);
+            self.gpa.free(touch_result.stderr);
+        }
+        try (try self.tmux()).popup(self.cfg.popupWidth(), self.cfg.popupHeight(), try std.fmt.allocPrint(self.gpa, "nvim -c 'terminal tail -F {s}'", .{try shell.quote(self.gpa, log_file)}));
     }
 
     pub fn hello(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
@@ -188,18 +198,20 @@ pub const Runtime = struct {
     }
 
     fn initLogDir(self: Runtime) !void {
-        const dir = try self.logDir();
+        const session_id = try self.logSessionId();
+        const dir = try self.logDirForSession(session_id);
         const result = try self.run(&.{ "mkdir", "-p", dir });
         self.gpa.free(result.stdout);
         self.gpa.free(result.stderr);
-        _ = try self.run(&.{ "tmux", "set-option", "-t", try self.cfg.sessionName(), "@mux_log_session_id", "current" });
+        try (try self.tmux()).setOption("@mux_log_session_id", session_id);
+        try self.cleanupOldLogs();
     }
 
     fn setupPipePane(self: Runtime) !void {
         const dir = try self.logDir();
         for (try self.cfg.services()) |service| {
             const name = try config.Config.serviceName(service);
-            _ = self.run(&.{ "tmux", "pipe-pane", "-t", try std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ try self.cfg.sessionName(), name }), try std.fmt.allocPrint(self.gpa, "cat >> '{s}/{s}.log'", .{ dir, name }) }) catch {};
+            _ = (try self.tmux()).pipePane(try (try self.tmux()).target(name), try std.fmt.allocPrint(self.gpa, "cat >> {s}", .{try shell.quote(self.gpa, try std.fs.path.join(self.gpa, &.{ dir, try std.fmt.allocPrint(self.gpa, "{s}.log", .{name}) }))})) catch {};
         }
     }
 
@@ -207,7 +219,7 @@ pub const Runtime = struct {
         if (!try self.sessionExists()) return;
         for (try self.cfg.services()) |service| {
             const name = try config.Config.serviceName(service);
-            _ = self.run(&.{ "tmux", "pipe-pane", "-t", try std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ try self.cfg.sessionName(), name }) }) catch {};
+            _ = (try self.tmux()).pipePane(try (try self.tmux()).target(name), null) catch {};
         }
     }
 
@@ -229,7 +241,32 @@ pub const Runtime = struct {
     }
 
     fn logDir(self: Runtime) ![]const u8 {
-        return std.fs.path.join(self.gpa, &.{ try paths.dataBase(self.gpa), try self.cfg.projectName(), "logs", "current" });
+        const session_id = (try self.tmux()).showOption("@mux_log_session_id") catch null;
+        return self.logDirForSession(session_id orelse "current");
+    }
+
+    fn logBaseDir(self: Runtime) ![]const u8 {
+        return std.fs.path.join(self.gpa, &.{ try paths.dataBase(self.gpa), try self.cfg.projectName(), "logs" });
+    }
+
+    fn logDirForSession(self: Runtime, session_id: []const u8) ![]const u8 {
+        return std.fs.path.join(self.gpa, &.{ try self.logBaseDir(), session_id });
+    }
+
+    fn logSessionId(self: Runtime) ![]const u8 {
+        const result = try self.run(&.{ "date", "+%Y%m%d_%H%M%S" });
+        defer self.gpa.free(result.stdout);
+        defer self.gpa.free(result.stderr);
+        return try self.gpa.dupe(u8, std.mem.trim(u8, result.stdout, " \t\r\n"));
+    }
+
+    fn cleanupOldLogs(self: Runtime) !void {
+        const base = try self.logBaseDir();
+        const keep = self.cfg.logKeepSessions();
+        const script = try std.fmt.allocPrint(self.gpa, "ls -dt {s}/*/ 2>/dev/null | tail -n +{d} | xargs rm -rf", .{ try shell.quote(self.gpa, base), keep + 1 });
+        const result = self.run(&.{ "bash", "-c", script }) catch return;
+        self.gpa.free(result.stdout);
+        self.gpa.free(result.stderr);
     }
 
     fn pathExists(self: Runtime, path: []const u8) !bool {

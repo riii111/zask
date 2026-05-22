@@ -37,8 +37,20 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ "tmux", "set-option", "-t", self.session, name, value });
     }
 
+    pub fn showOption(self: Client, name: []const u8) !?[]const u8 {
+        const result = self.runner.run(&.{ "tmux", "show-option", "-t", self.session, "-qv", name }) catch return null;
+        defer self.gpa.free(result.stderr);
+        const value = std.mem.trim(u8, result.stdout, " \t\r\n");
+        if (value.len == 0) return null;
+        return try self.gpa.dupe(u8, value);
+    }
+
     pub fn bindRunShell(self: Client, key: []const u8, command: []const u8) !void {
         _ = try self.runner.run(&.{ "tmux", "bind-key", "-T", "prefix", key, "run-shell", command });
+    }
+
+    pub fn popup(self: Client, width: []const u8, height: []const u8, command: []const u8) !void {
+        _ = try self.runner.run(&.{ "tmux", "popup", "-w", width, "-h", height, "-E", command });
     }
 
     pub fn sendKeys(self: Client, pane_target: []const u8, keys: []const []const u8) !void {
