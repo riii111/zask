@@ -164,17 +164,44 @@ fn renderLauncher(ctx: Context, writer: *std.Io.Writer) !void {
     try writer.print("{s}\n", .{reset});
     try writer.print("{s}Commands:{s}\n", .{ bold, reset });
     const project = try ctx.cfg.projectName();
-    try writer.print("  {s}{s} hello{s}           Start all + attach\n", .{ green, project, reset });
-    try writer.print("  {s}{s} hello --<profile>{s} Start configured profile\n", .{ green, project, reset });
-    try writer.print("  {s}{s} hello --docker{s}  Start docker only\n", .{ green, project, reset });
-    try writer.print("  {s}{s} bye{s}             Graceful shutdown\n", .{ green, project, reset });
-    try writer.print("  {s}{s} re{s}              Restart session\n", .{ green, project, reset });
-    try writer.print("  {s}{s} status{s}          Show all status\n", .{ green, project, reset });
-    try writer.print("  {s}{s} up <svc|group>{s}      Start a service or group\n", .{ green, project, reset });
-    try writer.print("  {s}{s} stop <svc|group>{s}    Stop a service or group\n", .{ green, project, reset });
-    try writer.print("  {s}{s} restart <svc|group>{s} Restart a service or group\n", .{ green, project, reset });
-    try writer.print("  {s}{s} logs <svc>{s}      Jump to window\n", .{ green, project, reset });
-    try writer.print("  {s}{s} follow <svc>{s}    Tail log in nvim\n\n", .{ green, project, reset });
+    try writeCommandHelp(writer, project);
+    try writer.writeByte('\n');
+}
+
+const LauncherCommand = struct {
+    usage: []const u8,
+    description: []const u8,
+};
+
+const launcher_commands = [_]LauncherCommand{
+    .{ .usage = "hello", .description = "Start all + attach" },
+    .{ .usage = "hello --<profile>", .description = "Start configured profile" },
+    .{ .usage = "hello --docker", .description = "Start docker only" },
+    .{ .usage = "bye", .description = "Graceful shutdown" },
+    .{ .usage = "re", .description = "Restart session" },
+    .{ .usage = "status", .description = "Show all status" },
+    .{ .usage = "up <svc|group>", .description = "Start a service or group" },
+    .{ .usage = "stop <svc|group>", .description = "Stop a service or group" },
+    .{ .usage = "restart <svc|group>", .description = "Restart a service or group" },
+    .{ .usage = "logs <svc>", .description = "Jump to window" },
+    .{ .usage = "follow <svc>", .description = "Tail log in nvim" },
+};
+
+fn writeCommandHelp(writer: *std.Io.Writer, project: []const u8) !void {
+    const usage_width = launcherCommandWidth(project);
+    for (launcher_commands) |command| {
+        try writer.print("  {s}{s} {s}{s}", .{ green, project, command.usage, reset });
+        try writeSpaces(writer, usage_width - project.len - 1 - command.usage.len + 2);
+        try writer.print("{s}\n", .{command.description});
+    }
+}
+
+fn launcherCommandWidth(project: []const u8) usize {
+    var width: usize = 0;
+    for (launcher_commands) |command| {
+        width = @max(width, project.len + 1 + command.usage.len);
+    }
+    return width;
 }
 
 fn renderMonitor(ctx: Context, writer: *std.Io.Writer) !void {
