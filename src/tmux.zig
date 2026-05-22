@@ -138,3 +138,19 @@ pub const PaneInfo = struct {
 pub fn isShellCommand(command: []const u8) bool {
     return std.mem.eql(u8, command, "zsh") or std.mem.eql(u8, command, "bash") or std.mem.eql(u8, command, "sh") or command.len == 0;
 }
+
+test "sendKeys records tmux command through runner" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
+    const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
+
+    try client.sendKeys("demo:api", &.{ "echo ok", "Enter" });
+
+    const command = recorder.commands.items[0];
+    try std.testing.expectEqualStrings("tmux", command.argv[0]);
+    try std.testing.expectEqualStrings("send-keys", command.argv[1]);
+    try std.testing.expectEqualStrings("demo:api", command.argv[3]);
+    try std.testing.expectEqualStrings("echo ok", command.argv[4]);
+    try std.testing.expectEqualStrings("Enter", command.argv[5]);
+}
