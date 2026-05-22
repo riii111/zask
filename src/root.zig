@@ -2,8 +2,18 @@ const std = @import("std");
 
 pub const cli = @import("cli.zig");
 pub const config = @import("config.zig");
+pub const config_value = @import("config_value.zig");
+pub const dashboard = @import("dashboard.zig");
+pub const docker = @import("docker.zig");
+pub const lifecycle = @import("lifecycle.zig");
+pub const lock = @import("lock.zig");
+pub const paths = @import("paths.zig");
 pub const render = @import("render.zig");
+pub const runner = @import("runner.zig");
 pub const runtime = @import("runtime.zig");
+pub const shell = @import("shell.zig");
+pub const tmux = @import("tmux.zig");
+pub const validate = @import("validate.zig");
 
 pub fn greeting() []const u8 {
     return "Hello from zask";

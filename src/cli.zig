@@ -55,16 +55,16 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
     if (std.mem.eql(u8, command, "status")) return rt.status(writer);
     if (std.mem.eql(u8, command, "attach")) return rt.attach();
     if (std.mem.eql(u8, command, "detach")) return rt.detach(writer);
-    if (std.mem.eql(u8, command, "logs")) return rt.logs(try oneArg(parsed.args, "logs"));
-    if (std.mem.eql(u8, command, "follow")) return rt.follow(try oneArg(parsed.args, "follow"), writer);
+    if (std.mem.eql(u8, command, "logs")) return rt.logs(try oneArg(parsed.args));
+    if (std.mem.eql(u8, command, "follow")) return rt.follow(try oneArg(parsed.args), writer);
     if (std.mem.eql(u8, command, "hello")) return rt.hello(try resolveHelloProfile(rt.cfg, parsed.args), writer);
     if (std.mem.eql(u8, command, "bye")) return rt.bye(writer);
     if (std.mem.eql(u8, command, "kill")) return rt.kill(writer);
     if (std.mem.eql(u8, command, "re")) return rt.re(writer);
     if (std.mem.eql(u8, command, "up")) return rt.up(if (parsed.args.len > 0) parsed.args[0] else null, writer);
     if (std.mem.eql(u8, command, "stop")) return rt.stop(if (parsed.args.len > 0) parsed.args[0] else null, writer);
-    if (std.mem.eql(u8, command, "restart")) return rt.restart(try oneArg(parsed.args, "restart"), writer);
-    if (std.mem.eql(u8, command, "exec")) return rt.exec(try oneArg(parsed.args, "exec"), parsed.args.len > 1 and std.mem.eql(u8, parsed.args[1], "--shell"), writer);
+    if (std.mem.eql(u8, command, "restart")) return rt.restart(try oneArg(parsed.args), writer);
+    if (std.mem.eql(u8, command, "exec")) return rt.exec(try oneArg(parsed.args), parsed.args.len > 1 and std.mem.eql(u8, parsed.args[1], "--shell"), writer);
     if (std.mem.eql(u8, command, "dashboard")) return rt.dashboard(writer);
     if (std.mem.eql(u8, command, "monitor")) return rt.monitorOnce(writer);
 
@@ -154,8 +154,7 @@ fn absoluteExePath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]cons
     return path;
 }
 
-fn oneArg(args: []const []const u8, command: []const u8) ![]const u8 {
-    _ = command;
+fn oneArg(args: []const []const u8) ![]const u8 {
     if (args.len == 0) return error.InvalidArguments;
     return args[0];
 }

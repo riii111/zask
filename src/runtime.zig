@@ -306,10 +306,6 @@ pub const Runtime = struct {
     fn run(self: Runtime, argv: []const []const u8) !std.process.RunResult {
         return try self.runner().run(argv);
     }
-
-    fn runInteractive(self: Runtime, argv: []const []const u8) !std.process.Child.Term {
-        return try self.runner().runInteractive(argv);
-    }
 };
 
 fn serviceListContains(output: []const u8, name: []const u8) bool {

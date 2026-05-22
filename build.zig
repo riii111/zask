@@ -1,6 +1,5 @@
 const std = @import("std");
-
-const version = "0.0.0";
+const manifest = @import("build.zig.zon");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -12,7 +11,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const options = b.addOptions();
-    options.addOption([]const u8, "version", version);
+    options.addOption([]const u8, "version", manifest.version);
     zask_mod.addOptions("build_options", options);
 
     const exe = b.addExecutable(.{

@@ -336,3 +336,14 @@ test "rejects unknown runtimes and missing services" {
     try std.testing.expectError(error.UnknownService, cfg.findService("missing"));
     try std.testing.expectError(error.UnknownGroup, cfg.resolveGroup(arena.allocator(), "missing"));
 }
+
+test "parses synthetic fixture" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try Config.parse(arena.allocator(), @embedFile("../testdata/synthetic.json"), "/home/me");
+
+    try std.testing.expectEqualStrings("demo", try cfg.projectName());
+    try std.testing.expectEqual(@as(usize, 3), (try cfg.services()).len);
+    try std.testing.expectEqual(@as(usize, 3), cfg.phases().len);
+    try std.testing.expectEqualStrings("core-backend", cfg.resolvePhaseGroup("core", "backend"));
+}
