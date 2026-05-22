@@ -54,6 +54,10 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ "tmux", "bind-key", "-T", "prefix", key, "run-shell", command });
     }
 
+    pub fn resizeWindowToLargestClient(self: Client, window: []const u8) !void {
+        _ = try self.runner.run(&.{ "tmux", "resize-window", "-A", "-t", try self.target(window) });
+    }
+
     pub fn popup(self: Client, width: []const u8, height: []const u8, command: []const u8) !void {
         _ = try self.runner.run(&.{ "tmux", "popup", "-w", width, "-h", height, "-E", command });
     }
@@ -154,4 +158,19 @@ test "sendKeys records tmux command through runner" {
     try std.testing.expectEqualStrings("demo:api", command.argv[3]);
     try std.testing.expectEqualStrings("echo ok", command.argv[4]);
     try std.testing.expectEqualStrings("Enter", command.argv[5]);
+}
+
+test "resizeWindowToLargestClient records resize command" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
+    const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
+
+    try client.resizeWindowToLargestClient("api");
+
+    const command = recorder.commands.items[0];
+    try std.testing.expectEqualStrings("tmux", command.argv[0]);
+    try std.testing.expectEqualStrings("resize-window", command.argv[1]);
+    try std.testing.expectEqualStrings("-A", command.argv[2]);
+    try std.testing.expectEqualStrings("demo:api", command.argv[4]);
 }

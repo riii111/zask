@@ -116,6 +116,7 @@ pub const Runtime = struct {
         try tx.setOption("@zask_dash_mode", "all");
         try tx.bindRunShell("m", "mode=$(tmux show-option -qv @zask_dash_mode); if [ \"$mode\" = \"all\" ]; then tmux set-option @zask_dash_mode bad; else tmux set-option @zask_dash_mode all; fi");
         try tx.bindRunShell("f", try std.fmt.allocPrint(self.gpa, "{s} --config {s} follow \"#{{window_name}}\"", .{ self.zask_path, self.config_path }));
+        try self.resizeWindows();
         try self.initLogDir();
         try self.setupPipePane();
         try (try self.lifecycle()).startAll(profile, writer);
@@ -274,6 +275,15 @@ pub const Runtime = struct {
             const name = try config.Config.serviceName(service);
             _ = (try self.tmux()).pipePane(try (try self.tmux()).target(name), null) catch {};
         }
+    }
+
+    fn resizeWindows(self: Runtime) !void {
+        const tx = try self.tmux();
+        tx.resizeWindowToLargestClient("dashboard") catch {};
+        for (try self.cfg.services()) |service| {
+            tx.resizeWindowToLargestClient(try config.Config.serviceName(service)) catch {};
+        }
+        if (self.cfg.dockerEnabled()) tx.resizeWindowToLargestClient("docker") catch {};
     }
 
     fn sessionExists(self: Runtime) !bool {
