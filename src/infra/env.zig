@@ -1,8 +1,9 @@
 const std = @import("std");
 
 pub fn get(comptime name: [:0]const u8) ?[]const u8 {
-    if (std.c.getenv(name)) |value| return std.mem.span(value);
-    return null;
+    const raw = std.mem.span(std.c.environ);
+    const environ: std.process.Environ = .{ .block = .{ .slice = @ptrCast(raw) } };
+    return std.process.Environ.getPosix(environ, name);
 }
 
 pub fn exists(comptime name: [:0]const u8) bool {
