@@ -1,16 +1,17 @@
 const std = @import("std");
 
 pub fn quote(gpa: std.mem.Allocator, value: []const u8) ![]const u8 {
-    var out = std.array_list.Managed(u8).init(gpa);
-    try out.append('\'');
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
+    try out.writer.writeByte('\'');
     for (value) |byte| {
         if (byte == '\'') {
-            try out.appendSlice("'\\''");
+            try out.writer.writeAll("'\\''");
         } else {
-            try out.append(byte);
+            try out.writer.writeByte(byte);
         }
     }
-    try out.append('\'');
+    try out.writer.writeByte('\'');
     return out.toOwnedSlice();
 }
 
