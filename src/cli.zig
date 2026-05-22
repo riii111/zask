@@ -60,10 +60,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
     if (std.mem.eql(u8, command, "hello")) return rt.hello(try resolveHelloProfile(rt.cfg, parsed.args), writer);
     if (std.mem.eql(u8, command, "bye")) return rt.bye(writer);
     if (std.mem.eql(u8, command, "kill")) return rt.kill(writer);
-    if (std.mem.eql(u8, command, "re")) {
-        try rt.bye(writer);
-        return rt.hello("all", writer);
-    }
+    if (std.mem.eql(u8, command, "re")) return rt.re(writer);
     if (std.mem.eql(u8, command, "up")) return rt.up(if (parsed.args.len > 0) parsed.args[0] else null, writer);
     if (std.mem.eql(u8, command, "stop")) return rt.stop(if (parsed.args.len > 0) parsed.args[0] else null, writer);
     if (std.mem.eql(u8, command, "restart")) return rt.restart(try oneArg(parsed.args, "restart"), writer);

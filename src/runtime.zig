@@ -3,6 +3,7 @@ const config = @import("config.zig");
 const dashboard_ui = @import("dashboard.zig");
 const docker_client = @import("docker.zig");
 const lifecycle_mod = @import("lifecycle.zig");
+const lock = @import("lock.zig");
 const paths = @import("paths.zig");
 const render = @import("render.zig");
 const proc_runner = @import("runner.zig");
@@ -84,6 +85,12 @@ pub const Runtime = struct {
     }
 
     pub fn hello(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
+        const guard = try self.acquireLock();
+        defer guard.release();
+        try self.helloUnlocked(profile, writer);
+    }
+
+    pub fn helloUnlocked(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
         if (try self.sessionExists()) {
             try (try self.lifecycle()).startAll(profile, writer);
             try self.attach();
@@ -104,6 +111,12 @@ pub const Runtime = struct {
     }
 
     pub fn bye(self: Runtime, writer: *std.Io.Writer) !void {
+        const guard = try self.acquireLock();
+        defer guard.release();
+        try self.byeUnlocked(writer);
+    }
+
+    fn byeUnlocked(self: Runtime, writer: *std.Io.Writer) !void {
         if (!try self.sessionExists()) {
             try writer.writeAll("Session not running\n");
             return;
@@ -114,6 +127,8 @@ pub const Runtime = struct {
     }
 
     pub fn kill(self: Runtime, writer: *std.Io.Writer) !void {
+        const guard = try self.acquireLock();
+        defer guard.release();
         try (try self.lifecycle()).stopTarget("docker", writer);
         try self.cleanupPipePane();
         if (try self.sessionExists()) {
@@ -121,6 +136,17 @@ pub const Runtime = struct {
         } else {
             try writer.writeAll("Session not running\n");
         }
+    }
+
+    pub fn re(self: Runtime, writer: *std.Io.Writer) !void {
+        if (try self.inTmux()) {
+            try (try self.tmux()).detachClientExec(try std.fmt.allocPrint(self.gpa, "{s} --config {s} re", .{ self.zask_path, self.config_path }));
+            return;
+        }
+        const guard = try self.acquireLock();
+        defer guard.release();
+        try self.byeUnlocked(writer);
+        try self.helloUnlocked("all", writer);
     }
 
     pub fn up(self: Runtime, target: ?[]const u8, writer: *std.Io.Writer) !void {
@@ -182,6 +208,10 @@ pub const Runtime = struct {
             .tmux = try self.tmux(),
             .docker = try self.docker(),
         };
+    }
+
+    fn acquireLock(self: Runtime) !lock.Lock {
+        return lock.Lock.acquire(self.gpa, self.runner(), try self.cfg.projectName());
     }
 
     fn writeSessionFile(self: Runtime) ![]const u8 {

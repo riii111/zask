@@ -25,6 +25,10 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ "tmux", "detach-client" });
     }
 
+    pub fn detachClientExec(self: Client, command: []const u8) !void {
+        _ = try self.runner.run(&.{ "tmux", "detach-client", "-E", command });
+    }
+
     pub fn selectWindow(self: Client, window: []const u8) !void {
         _ = try self.runner.run(&.{ "tmux", "select-window", "-t", try self.target(window) });
     }
