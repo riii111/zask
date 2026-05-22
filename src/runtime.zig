@@ -206,7 +206,7 @@ pub const Runtime = struct {
         try dashboard_ui.runLauncher(self.gpa, self.io, self.environ, self.cfg, writer);
     }
 
-    pub fn monitorOnce(self: Runtime, writer: *std.Io.Writer) !void {
+    pub fn monitor(self: Runtime, writer: *std.Io.Writer) !void {
         try dashboard_ui.runMonitor(self.gpa, self.io, self.cfg, writer);
     }
 

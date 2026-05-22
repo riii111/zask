@@ -73,10 +73,13 @@ pub const Lifecycle = struct {
     }
 
     pub fn stopTarget(self: Lifecycle, target: ?[]const u8, writer: *std.Io.Writer) !void {
-        if (!self.tmux.hasSession()) return sessionNotRunning(writer);
         const t = target orelse "--all";
-        if (std.mem.eql(u8, t, "--all")) return self.stopAll(writer);
         if (std.mem.eql(u8, t, "docker")) return self.stopDocker();
+        if (!self.tmux.hasSession()) {
+            if (std.mem.eql(u8, t, "--all")) return self.stopDocker();
+            return sessionNotRunning(writer);
+        }
+        if (std.mem.eql(u8, t, "--all")) return self.stopAll(writer);
         if (self.cfg.resolveGroup(self.gpa, t)) |services| {
             for (services) |svc| try self.stopService(svc, writer);
         } else |_| try self.stopService(t, writer);
@@ -125,6 +128,7 @@ pub const Lifecycle = struct {
 
     fn startDocker(self: Lifecycle) !void {
         if (!self.cfg.dockerEnabled()) return;
+        if (self.docker.running()) return;
         try self.waitForWindow("docker");
         try self.tmux.sendKeys(try self.tmux.target("docker"), &.{ try std.fmt.allocPrint(self.gpa, "cd {s} && docker compose -f {s} up", .{ try shell.quote(self.gpa, try self.cfg.dockerDir(self.gpa)), try shell.quote(self.gpa, self.cfg.dockerComposeFile()) }), "Enter" });
     }
@@ -136,9 +140,7 @@ pub const Lifecycle = struct {
     }
 
     fn runPrechecks(self: Lifecycle, writer: *std.Io.Writer) !void {
-        const prechecks = self.cfg.value.object.get("prechecks") orelse return;
-        if (prechecks != .array) return;
-        for (prechecks.array.items) |check| {
+        for (self.cfg.prechecks()) |check| {
             const name = config_value.optionalObjectString(check, "name", "precheck");
             const command = try config_value.requiredObjectString(check, "command");
             const on_fail = config_value.optionalObjectString(check, "on_fail", "warn");
@@ -265,6 +267,72 @@ test "stop and restart targets require an active session" {
     const output = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "Session not running. Run 'hello' first.") != null);
     try std.testing.expectEqual(@as(usize, 2), recorder.commands.items.len);
+}
+
+test "docker stop reaches compose down without tmux session" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"enabled": true},
+        \\  "services": [{"name":"api","dir":"backend","command":"serve","group":"backend"}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    recorder.term = .{ .exited = 1 };
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = std.Io.null, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const lifecycle = Lifecycle{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
+        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.stopTarget("docker", &writer);
+
+    const down = recorder.commands.items[1];
+    try std.testing.expectEqualStrings("docker", down.argv[0]);
+    try std.testing.expectEqualStrings("down", down.argv[4]);
+    try std.testing.expectEqualStrings("/tmp/demo", down.cwd.?);
+}
+
+test "docker start is a no-op when compose services already run" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"enabled": true},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("api\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = std.Io.null, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const lifecycle = Lifecycle{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
+        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startTarget("docker", &writer);
+
+    try std.testing.expectEqual(@as(usize, 2), recorder.commands.items.len);
+    try std.testing.expectEqualStrings("has-session", recorder.commands.items[0].argv[1]);
+    try std.testing.expectEqualStrings("ps", recorder.commands.items[1].argv[4]);
 }
 
 test "startAll dispatches quoted service command to tmux" {

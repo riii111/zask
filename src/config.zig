@@ -75,6 +75,12 @@ pub const Config = struct {
         return node.array.items;
     }
 
+    pub fn prechecks(self: Config) []const Value {
+        const node = self.get(&.{"prechecks"}) orelse return &.{};
+        if (node != .array) return &.{};
+        return node.array.items;
+    }
+
     pub fn serviceName(service: Value) ![]const u8 {
         const name = try config_value.requiredObjectString(service, "name");
         try validate.identifier(name);

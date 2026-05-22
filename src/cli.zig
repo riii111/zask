@@ -93,6 +93,7 @@ pub fn run(init: std.process.Init) !void {
 
 pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *std.Io.Writer) !void {
     if (args.len == 0) {
+        if (isProjectAlias(context.argv0)) return printHelp(writer);
         return printGreeting(writer);
     }
 
@@ -123,7 +124,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
         .restart => rt.restart(try oneArg(parsed.args), writer),
         .exec => rt.exec(try oneArg(parsed.args), parsed.args.len > 1 and std.mem.eql(u8, parsed.args[1], "--shell"), writer),
         .dashboard => rt.dashboard(writer),
-        .monitor => rt.monitorOnce(writer),
+        .monitor => rt.monitor(writer),
     };
 }
 
@@ -162,8 +163,9 @@ fn writeSpaces(writer: *std.Io.Writer, count: usize) !void {
 }
 
 fn parseArgs(context: CommandContext, args: []const []const u8) !ParsedArgs {
-    const basename = std.fs.path.basename(context.argv0);
-    if (!std.mem.eql(u8, basename, "zask") and !std.mem.eql(u8, basename, "zask-debug")) {
+    if (args.len == 0) return error.InvalidArguments;
+    if (isProjectAlias(context.argv0)) {
+        const basename = std.fs.path.basename(context.argv0);
         return .{ .project = basename, .command = args[0], .args = args[1..] };
     }
     if (std.mem.eql(u8, args[0], "--config")) {
@@ -173,6 +175,11 @@ fn parseArgs(context: CommandContext, args: []const []const u8) !ParsedArgs {
     if (isGlobalCommand(args[0])) return .{ .command = args[0], .args = args[1..] };
     if (args.len < 2) return error.ProjectRequired;
     return .{ .project = args[0], .command = args[1], .args = args[2..] };
+}
+
+fn isProjectAlias(argv0: []const u8) bool {
+    const basename = std.fs.path.basename(argv0);
+    return !std.mem.eql(u8, basename, "zask") and !std.mem.eql(u8, basename, "zask-debug");
 }
 
 fn isGlobalCommand(command: []const u8) bool {
@@ -253,6 +260,14 @@ test "help prints usage" {
     try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "render-session") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "exec <container>") != null);
+}
+
+test "project alias without arguments prints usage" {
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runWithArgs(.{ .gpa = std.testing.allocator, .argv0 = "nodex" }, &.{}, &writer);
+    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
 }
 
 test "command metadata parses aliases and global commands" {
