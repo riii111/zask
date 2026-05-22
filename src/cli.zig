@@ -119,9 +119,9 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
         .bye => rt.bye(writer),
         .kill => rt.kill(writer),
         .re => rt.re(writer),
-        .up => rt.up(if (parsed.args.len > 0) parsed.args[0] else null, writer),
-        .stop => rt.stop(if (parsed.args.len > 0) parsed.args[0] else null, writer),
-        .restart => rt.restart(try oneArg(parsed.args), writer),
+        .up => rt.up(optionalTarget(parsed.args), writer),
+        .stop => rt.stop(optionalTarget(parsed.args), writer),
+        .restart => rt.restart(try requiredTarget(parsed.args), writer),
         .exec => rt.exec(try oneArg(parsed.args), parsed.args.len > 1 and std.mem.eql(u8, parsed.args[1], "--shell"), writer),
         .dashboard => rt.dashboard(writer),
         .monitor => rt.monitor(writer),
@@ -238,6 +238,20 @@ fn oneArg(args: []const []const u8) ![]const u8 {
     return args[0];
 }
 
+fn optionalTarget(args: []const []const u8) ?[]const u8 {
+    if (args.len == 0) return null;
+    return normalizeTarget(args[0]);
+}
+
+fn requiredTarget(args: []const []const u8) ![]const u8 {
+    return normalizeTarget(try oneArg(args));
+}
+
+fn normalizeTarget(target: []const u8) []const u8 {
+    if (std.mem.eql(u8, target, "--docker")) return "docker";
+    return target;
+}
+
 fn resolveHelloProfile(cfg: config.Config, args: []const []const u8) ![]const u8 {
     if (args.len == 0) return "all";
     if (std.mem.eql(u8, args[0], "--docker")) return "docker";
@@ -275,6 +289,13 @@ test "command metadata parses aliases and global commands" {
     try std.testing.expectEqual(Command.render_session, parseCommand("render-session").?);
     try std.testing.expect(isGlobalCommand("--help"));
     try std.testing.expect(!isGlobalCommand("list"));
+}
+
+test "normalizes docker target aliases" {
+    try std.testing.expectEqualStrings("docker", normalizeTarget("--docker"));
+    try std.testing.expectEqualStrings("api", normalizeTarget("api"));
+    try std.testing.expectEqualStrings("docker", (try requiredTarget(&.{"--docker"})));
+    try std.testing.expect(optionalTarget(&.{}) == null);
 }
 
 test "parses project command form" {
