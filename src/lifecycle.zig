@@ -50,13 +50,14 @@ pub const Lifecycle = struct {
     }
 
     pub fn stopAll(self: Lifecycle, writer: *std.Io.Writer) !void {
+        try writeProgress(writer, "Stopping services...\n", .{});
         const services = try self.cfg.services();
         var i = services.len;
         while (i > 0) {
             i -= 1;
             try self.stopService(try config.Config.serviceName(services[i]), writer);
         }
-        try self.stopDocker();
+        try self.stopDocker(writer);
     }
 
     pub fn startTarget(self: Lifecycle, target: ?[]const u8, writer: *std.Io.Writer) !void {
@@ -74,9 +75,9 @@ pub const Lifecycle = struct {
 
     pub fn stopTarget(self: Lifecycle, target: ?[]const u8, writer: *std.Io.Writer) !void {
         const t = target orelse "--all";
-        if (std.mem.eql(u8, t, "docker")) return self.stopDocker();
+        if (std.mem.eql(u8, t, "docker")) return self.stopDocker(writer);
         if (!self.tmux.hasSession()) {
-            if (std.mem.eql(u8, t, "--all")) return self.stopDocker();
+            if (std.mem.eql(u8, t, "--all")) return self.stopDocker(writer);
             return sessionNotRunning(writer);
         }
         if (std.mem.eql(u8, t, "--all")) return self.stopAll(writer);
@@ -88,7 +89,7 @@ pub const Lifecycle = struct {
     pub fn restartTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
         if (!self.tmux.hasSession()) return sessionNotRunning(writer);
         if (std.mem.eql(u8, target, "docker")) {
-            try self.stopDocker();
+            try self.stopDocker(writer);
             try self.startDocker();
             return;
         }
@@ -101,22 +102,22 @@ pub const Lifecycle = struct {
         const value = try self.cfg.findService(service);
         try self.waitForWindow(service);
         if (self.tmux.paneRunning(service)) {
-            try writer.print("{s} already running\n", .{service});
+            try writeProgress(writer, "{s} already running\n", .{service});
             return;
         }
         const target = try self.tmux.target(service);
         const cmd = try std.fmt.allocPrint(self.gpa, "cd {s} && {s}", .{ try shell.quote(self.gpa, try self.cfg.serviceDir(self.gpa, value)), try self.cfg.serviceStartCommand(self.gpa, value) });
-        try writer.print("Starting {s}...\n", .{service});
+        try writeProgress(writer, "Starting {s}...\n", .{service});
         try self.tmux.sendKeys(target, &.{ cmd, "Enter" });
     }
 
     fn stopService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
         _ = try self.cfg.findService(service);
         if (!self.tmux.paneRunning(service)) {
-            try writer.print("{s} already stopped\n", .{service});
+            try writeProgress(writer, "{s} already stopped\n", .{service});
             return;
         }
-        try writer.print("Stopping {s}...\n", .{service});
+        try writeProgress(writer, "Stopping {s}...\n", .{service});
         try self.tmux.sendKeys(try self.tmux.target(service), &.{"C-c"});
         try self.waitForStopped(service);
     }
@@ -133,8 +134,9 @@ pub const Lifecycle = struct {
         try self.tmux.sendKeys(try self.tmux.target("docker"), &.{ try std.fmt.allocPrint(self.gpa, "cd {s} && docker compose -f {s} up", .{ try shell.quote(self.gpa, try self.cfg.dockerDir(self.gpa)), try shell.quote(self.gpa, self.cfg.dockerComposeFile()) }), "Enter" });
     }
 
-    pub fn stopDocker(self: Lifecycle) !void {
+    pub fn stopDocker(self: Lifecycle, writer: *std.Io.Writer) !void {
         if (!self.cfg.dockerEnabled()) return;
+        try writeProgress(writer, "Stopping Docker...\n", .{});
         if (self.tmux.hasSession()) try self.tmux.sendKeys(try self.tmux.target("docker"), &.{"C-c"});
         self.docker.down() catch {};
     }
@@ -219,6 +221,11 @@ pub const Lifecycle = struct {
 
 fn sessionNotRunning(writer: *std.Io.Writer) !void {
     try writer.writeAll("Session not running. Run 'hello' first.\n");
+}
+
+fn writeProgress(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytype) !void {
+    try writer.print(fmt, args);
+    try writer.flush();
 }
 
 fn runningContainerCount(output: []const u8) usize {

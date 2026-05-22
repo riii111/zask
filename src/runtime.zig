@@ -142,7 +142,7 @@ pub const Runtime = struct {
     pub fn kill(self: Runtime, writer: *std.Io.Writer) !void {
         const guard = try self.acquireLock();
         defer guard.release();
-        try (try self.lifecycle()).stopDocker();
+        try (try self.lifecycle()).stopDocker(writer);
         try self.cleanupPipePane();
         if (try self.sessionExists()) {
             try (try self.tmux()).killSession();
