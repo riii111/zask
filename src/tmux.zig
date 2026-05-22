@@ -56,6 +56,42 @@ pub const Client = struct {
         }
     }
 
+    pub fn windowExists(self: Client, window: []const u8) bool {
+        const result = self.runner.run(&.{ "tmux", "list-panes", "-t", self.target(window) catch return false }) catch return false;
+        defer self.gpa.free(result.stdout);
+        defer self.gpa.free(result.stderr);
+        return result.term == .exited and result.term.exited == 0;
+    }
+
+    pub fn paneRunning(self: Client, window: []const u8) bool {
+        const info = self.paneInfo(window) catch return false;
+        if (info.dead) return false;
+        if (!isShellCommand(info.command)) return true;
+        const result = self.runner.run(&.{ "pgrep", "-P", info.pid }) catch return false;
+        defer self.gpa.free(result.stdout);
+        defer self.gpa.free(result.stderr);
+        return std.mem.trim(u8, result.stdout, " \t\r\n").len > 0;
+    }
+
+    pub fn paneInfo(self: Client, window: []const u8) !PaneInfo {
+        const result = self.runner.run(&.{ "tmux", "list-panes", "-t", try self.target(window), "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}" }) catch return .{};
+        defer self.gpa.free(result.stderr);
+
+        var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+        const line = lines.next() orelse return .{};
+        var fields = std.mem.splitScalar(u8, line, '|');
+        const dead = fields.next() orelse "0";
+        const exit_code = fields.next() orelse "0";
+        const pid = fields.next() orelse "0";
+        const command = fields.next() orelse "";
+        return .{
+            .dead = std.mem.eql(u8, dead, "1"),
+            .exit_code = try self.gpa.dupe(u8, exit_code),
+            .pid = try self.gpa.dupe(u8, pid),
+            .command = try self.gpa.dupe(u8, command),
+        };
+    }
+
     pub fn panePid(self: Client, pane_target: []const u8) !?[]const u8 {
         const result = self.runner.run(&.{ "tmux", "list-panes", "-t", pane_target, "-F", "#{pane_pid}" }) catch return null;
         defer self.gpa.free(result.stderr);
@@ -66,3 +102,14 @@ pub const Client = struct {
         return std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ self.session, window });
     }
 };
+
+pub const PaneInfo = struct {
+    dead: bool = false,
+    exit_code: []const u8 = "0",
+    pid: []const u8 = "0",
+    command: []const u8 = "",
+};
+
+pub fn isShellCommand(command: []const u8) bool {
+    return std.mem.eql(u8, command, "zsh") or std.mem.eql(u8, command, "bash") or std.mem.eql(u8, command, "sh") or command.len == 0;
+}

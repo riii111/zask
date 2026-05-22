@@ -58,6 +58,10 @@ pub const Lifecycle = struct {
     }
 
     pub fn startTarget(self: Lifecycle, target: ?[]const u8, writer: *std.Io.Writer) !void {
+        if (!self.tmux.hasSession()) {
+            try writer.writeAll("Session not running. Run 'hello' first.\n");
+            return error.SessionNotRunning;
+        }
         const t = target orelse "--all";
         if (std.mem.eql(u8, t, "--all")) return self.startAll("all", writer);
         if (std.mem.eql(u8, t, "docker")) return self.startDocker();
@@ -88,7 +92,12 @@ pub const Lifecycle = struct {
 
     fn startService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
         const value = try self.cfg.findService(service);
-        const target = try std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ try self.cfg.sessionName(), service });
+        try self.waitForWindow(service);
+        if (self.tmux.paneRunning(service)) {
+            try writer.print("{s} already running\n", .{service});
+            return;
+        }
+        const target = try self.tmux.target(service);
         const cmd = try std.fmt.allocPrint(self.gpa, "cd '{s}' && {s}", .{ try self.cfg.serviceDir(self.gpa, value), try self.cfg.serviceStartCommand(self.gpa, value) });
         try writer.print("Starting {s}...\n", .{service});
         try self.tmux.sendKeys(target, &.{ cmd, "Enter" });
@@ -97,7 +106,8 @@ pub const Lifecycle = struct {
     fn stopService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
         _ = try self.cfg.findService(service);
         try writer.print("Stopping {s}...\n", .{service});
-        try self.tmux.sendKeys(try std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ try self.cfg.sessionName(), service }), &.{"C-c"});
+        try self.tmux.sendKeys(try self.tmux.target(service), &.{"C-c"});
+        try self.waitForStopped(service);
     }
 
     fn restartService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
@@ -107,12 +117,13 @@ pub const Lifecycle = struct {
 
     fn startDocker(self: Lifecycle) !void {
         if (!self.cfg.dockerEnabled()) return;
-        try self.tmux.sendKeys(try std.fmt.allocPrint(self.gpa, "{s}:docker", .{try self.cfg.sessionName()}), &.{ try std.fmt.allocPrint(self.gpa, "cd '{s}' && docker compose -f '{s}' up", .{ try self.cfg.dockerDir(self.gpa), self.cfg.dockerComposeFile() }), "Enter" });
+        try self.waitForWindow("docker");
+        try self.tmux.sendKeys(try self.tmux.target("docker"), &.{ try std.fmt.allocPrint(self.gpa, "cd '{s}' && docker compose -f '{s}' up", .{ try self.cfg.dockerDir(self.gpa), self.cfg.dockerComposeFile() }), "Enter" });
     }
 
     fn stopDocker(self: Lifecycle) !void {
         if (!self.cfg.dockerEnabled()) return;
-        if (self.tmux.hasSession()) try self.tmux.sendKeys(try std.fmt.allocPrint(self.gpa, "{s}:docker", .{try self.cfg.sessionName()}), &.{"C-c"});
+        if (self.tmux.hasSession()) try self.tmux.sendKeys(try self.tmux.target("docker"), &.{"C-c"});
         self.docker.down() catch {};
     }
 
@@ -161,6 +172,7 @@ pub const Lifecycle = struct {
             defer self.gpa.free(result.stderr);
 
             if (result.term == .exited and result.term.exited == 0 and runningContainerCount(result.stdout) > 0) {
+                _ = self.runner.run(&.{ "sleep", "2" }) catch {};
                 try writer.writeAll("Docker containers ready\n");
                 return;
             }
@@ -174,6 +186,23 @@ pub const Lifecycle = struct {
         while (elapsed < timeout) : (elapsed += 2) {
             if ((self.runner.run(&.{ "nc", "-z", "localhost", try std.fmt.allocPrint(self.gpa, "{d}", .{port}) }) catch null) != null) return;
             _ = self.runner.run(&.{ "sleep", "2" }) catch {};
+        }
+    }
+
+    fn waitForWindow(self: Lifecycle, window: []const u8) !void {
+        var attempt: usize = 0;
+        while (attempt < 20) : (attempt += 1) {
+            if (self.tmux.windowExists(window)) return;
+            _ = self.runner.run(&.{ "sleep", "0.3" }) catch {};
+        }
+        return error.WindowNotReady;
+    }
+
+    fn waitForStopped(self: Lifecycle, service: []const u8) !void {
+        var attempt: usize = 0;
+        while (attempt < 10) : (attempt += 1) {
+            if (!self.tmux.paneRunning(service)) return;
+            _ = self.runner.run(&.{ "sleep", "0.5" }) catch {};
         }
     }
 };

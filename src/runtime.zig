@@ -216,8 +216,7 @@ pub const Runtime = struct {
     }
 
     fn serviceRunning(self: Runtime, service: []const u8) !bool {
-        const pid = try (try self.tmux()).panePid(try std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ try self.cfg.sessionName(), service }));
-        return if (pid) |value| value.len > 0 else false;
+        return (try self.tmux()).paneRunning(service);
     }
 
     fn dockerRunning(self: Runtime) !bool {
