@@ -35,6 +35,35 @@ const Command = enum {
     monitor,
 };
 
+const CommandSpec = struct {
+    command: Command,
+    names: []const []const u8,
+    help: ?[]const u8 = null,
+    global: bool = false,
+};
+
+const command_specs = [_]CommandSpec{
+    .{ .command = .version, .names = &.{"version"}, .help = "  version                      Print zask version", .global = true },
+    .{ .command = .help, .names = &.{ "help", "--help", "-h" }, .help = "  help                         Print this help", .global = true },
+    .{ .command = .render_session, .names = &.{"render-session"}, .help = "  render-session               Print generated tmuxp YAML" },
+    .{ .command = .list, .names = &.{"list"}, .help = "  status | list                Show service state or config services" },
+    .{ .command = .status, .names = &.{"status"} },
+    .{ .command = .attach, .names = &.{"attach"}, .help = "  attach | detach | kill       Manage tmux session" },
+    .{ .command = .detach, .names = &.{"detach"} },
+    .{ .command = .logs, .names = &.{"logs"}, .help = "  logs <service>               Focus service window" },
+    .{ .command = .follow, .names = &.{"follow"}, .help = "  follow <service>             Tail captured log in tmux popup" },
+    .{ .command = .hello, .names = &.{"hello"}, .help = "  hello [--docker|--<profile>] Start session + services + attach" },
+    .{ .command = .bye, .names = &.{"bye"}, .help = "  bye                         Graceful shutdown" },
+    .{ .command = .kill, .names = &.{"kill"} },
+    .{ .command = .re, .names = &.{"re"}, .help = "  re                          Restart session" },
+    .{ .command = .up, .names = &.{"up"}, .help = "  up [--all|docker|name]       Start service, group, docker, or all" },
+    .{ .command = .stop, .names = &.{"stop"}, .help = "  stop [--all|docker|name]     Stop service, group, docker, or all" },
+    .{ .command = .restart, .names = &.{"restart"}, .help = "  restart <docker|name>        Restart service, group, or docker" },
+    .{ .command = .exec, .names = &.{"exec"}, .help = "  exec <container> [--shell]   Enter Docker container" },
+    .{ .command = .dashboard, .names = &.{"dashboard"} },
+    .{ .command = .monitor, .names = &.{"monitor"} },
+};
+
 pub const CommandContext = struct {
     gpa: std.mem.Allocator,
     io: ?std.Io = null,
@@ -103,26 +132,11 @@ fn printVersion(writer: *std.Io.Writer) !void {
 }
 
 fn printHelp(writer: *std.Io.Writer) !void {
-    try writer.writeAll(
-        \\Usage: zask <command>
-        \\
-        \\Commands:
-        \\  hello [--docker|--<profile>] Start session + services + attach
-        \\  bye                         Graceful shutdown
-        \\  re                          Restart session
-        \\  attach | detach | kill       Manage tmux session
-        \\  up [--all|docker|name]       Start service, group, docker, or all
-        \\  stop [--all|docker|name]     Stop service, group, docker, or all
-        \\  restart <docker|name>        Restart service, group, or docker
-        \\  status | list                Show service state or config services
-        \\  logs <service>               Focus service window
-        \\  follow <service>             Tail captured log in tmux popup
-        \\  exec <container> [--shell]   Enter Docker container
-        \\  render-session               Print generated tmuxp YAML
-        \\  version                      Print zask version
-        \\  help                         Print this help
-        \\
-    );
+    try writer.writeAll("Usage: zask <command>\n\nCommands:\n");
+    for (command_specs) |spec| {
+        if (spec.help) |line| try writer.print("{s}\n", .{line});
+    }
+    try writer.writeByte('\n');
 }
 
 fn parseArgs(context: CommandContext, args: []const []const u8) !ParsedArgs {
@@ -140,30 +154,21 @@ fn parseArgs(context: CommandContext, args: []const []const u8) !ParsedArgs {
 }
 
 fn isGlobalCommand(command: []const u8) bool {
-    const parsed = parseCommand(command) orelse return false;
-    return parsed == .version or parsed == .help;
+    for (command_specs) |spec| {
+        if (!spec.global) continue;
+        for (spec.names) |name| {
+            if (std.mem.eql(u8, command, name)) return true;
+        }
+    }
+    return false;
 }
 
 fn parseCommand(command: []const u8) ?Command {
-    if (std.mem.eql(u8, command, "version")) return .version;
-    if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) return .help;
-    if (std.mem.eql(u8, command, "render-session")) return .render_session;
-    if (std.mem.eql(u8, command, "list")) return .list;
-    if (std.mem.eql(u8, command, "status")) return .status;
-    if (std.mem.eql(u8, command, "attach")) return .attach;
-    if (std.mem.eql(u8, command, "detach")) return .detach;
-    if (std.mem.eql(u8, command, "logs")) return .logs;
-    if (std.mem.eql(u8, command, "follow")) return .follow;
-    if (std.mem.eql(u8, command, "hello")) return .hello;
-    if (std.mem.eql(u8, command, "bye")) return .bye;
-    if (std.mem.eql(u8, command, "kill")) return .kill;
-    if (std.mem.eql(u8, command, "re")) return .re;
-    if (std.mem.eql(u8, command, "up")) return .up;
-    if (std.mem.eql(u8, command, "stop")) return .stop;
-    if (std.mem.eql(u8, command, "restart")) return .restart;
-    if (std.mem.eql(u8, command, "exec")) return .exec;
-    if (std.mem.eql(u8, command, "dashboard")) return .dashboard;
-    if (std.mem.eql(u8, command, "monitor")) return .monitor;
+    for (command_specs) |spec| {
+        for (spec.names) |name| {
+            if (std.mem.eql(u8, command, name)) return spec.command;
+        }
+    }
     return null;
 }
 
@@ -223,6 +228,15 @@ test "help prints usage" {
 
     try runWithArgs(.{ .gpa = std.testing.allocator }, &.{"help"}, &writer);
     try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "render-session") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "exec <container>") != null);
+}
+
+test "command metadata parses aliases and global commands" {
+    try std.testing.expectEqual(Command.help, parseCommand("-h").?);
+    try std.testing.expectEqual(Command.render_session, parseCommand("render-session").?);
+    try std.testing.expect(isGlobalCommand("--help"));
+    try std.testing.expect(!isGlobalCommand("list"));
 }
 
 test "parses project command form" {
