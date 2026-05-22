@@ -45,6 +45,14 @@ const green = "\x1b[32m";
 const yellow = "\x1b[33m";
 const blue = "\x1b[34m";
 const cyan = "\x1b[36m";
+const launcher_width = 46;
+const service_name_width = 15;
+const service_port_width = 6;
+const monitor_name_width = 12;
+const monitor_port_width = 6;
+const monitor_status_width = 8;
+const monitor_log_width = 35;
+const dash_mode_option = "@zask_dash_mode";
 
 const Context = struct {
     gpa: std.mem.Allocator,
@@ -108,7 +116,7 @@ fn renderLauncher(ctx: Context, writer: *std.Io.Writer) !void {
     const title = try std.fmt.allocPrint(ctx.gpa, "{s} - Development TUI", .{try ctx.cfg.projectName()});
     try writer.print("{s}{s}╔══════════════════════════════════════════════╗{s}\n", .{ bold, cyan, reset });
     try writer.print("{s}{s}║", .{ bold, cyan });
-    try writeCentered(writer, title, 46);
+    try writeCentered(writer, title, launcher_width);
     try writer.print("║{s}\n", .{reset});
     try writer.print("{s}{s}╚══════════════════════════════════════════════╝{s}\n\n", .{ bold, cyan, reset });
 
@@ -117,7 +125,7 @@ fn renderLauncher(ctx: Context, writer: *std.Io.Writer) !void {
     if (ctx.cfg.dockerEnabled()) {
         try writer.print("{s}{s}[docker]{s}\n", .{ bold, blue, reset });
         try writer.print("  {s}", .{green});
-        try writePadded(writer, "docker", 15);
+        try writePadded(writer, "docker", service_name_width);
         try writer.print("{s} {s}", .{ reset, dim });
         try writePadded(writer, "compose", 7);
         try writer.print("{s}  docker compose up\n\n", .{reset});
@@ -132,13 +140,13 @@ fn renderLauncher(ctx: Context, writer: *std.Io.Writer) !void {
             const port = config.Config.servicePort(service);
             const command = try ctx.cfg.serviceStartCommand(ctx.gpa, service);
             try writer.print("  {s}", .{green});
-            try writePadded(writer, name, 15);
+            try writePadded(writer, name, service_name_width);
             try writer.print("{s} {s}", .{ reset, dim });
             if (port) |p| {
                 const port_text = try std.fmt.allocPrint(ctx.gpa, ":{d}", .{p});
-                try writePadded(writer, port_text, 6);
+                try writePadded(writer, port_text, service_port_width);
             } else {
-                try writePadded(writer, ":N/A", 6);
+                try writePadded(writer, ":N/A", service_port_width);
             }
             try writer.print("{s}  {s}\n", .{ reset, command });
         }
@@ -180,7 +188,7 @@ fn renderMonitor(ctx: Context, writer: *std.Io.Writer) !void {
         countMonitorRow(row, &live_count, &warn_count, &dead_count);
     }
 
-    try writer.print("{s}[mux-monitor]{s} {s}LIVE:{d}{s} {s}WARN:{d}{s} {s}DEAD:{d}{s}  {s}[{s}]{s}  {s}Ctrl+q m: toggle{s}\n\n", .{ bold, reset, green, live_count, reset, yellow, warn_count, reset, red, dead_count, reset, dim, mode, reset, dim, reset });
+    try writer.print("{s}[zask-monitor]{s} {s}LIVE:{d}{s} {s}WARN:{d}{s} {s}DEAD:{d}{s}  {s}[{s}]{s}  {s}Ctrl+q m: toggle{s}\n\n", .{ bold, reset, green, live_count, reset, yellow, warn_count, reset, red, dead_count, reset, dim, mode, reset, dim, reset });
     for (rows.items) |row| {
         if (std.mem.eql(u8, mode, "bad") and row.status == .live) continue;
         try writeMonitorRow(ctx, writer, row, !std.mem.eql(u8, mode, "all") or row.status != .live);
@@ -207,7 +215,7 @@ fn serviceGroups(ctx: Context) ![][]const u8 {
 }
 
 fn dashboardMode(ctx: Context) ![]const u8 {
-    return try ctx.tmux.showOption("@mux_dash_mode") orelse "all";
+    return try ctx.tmux.showOption(dash_mode_option) orelse "all";
 }
 
 fn serviceMonitorRow(ctx: Context, service: std.json.Value) !MonitorRow {
@@ -266,15 +274,15 @@ fn dockerRunning(ctx: Context) !bool {
 fn writeMonitorRow(ctx: Context, writer: *std.Io.Writer, row: MonitorRow, show_log: bool) !void {
     const color = row.status.color();
     try writer.print("{s}{s}{s} ", .{ color, row.status.icon(), reset });
-    try writePadded(writer, truncate(row.name, 12), 12);
+    try writePadded(writer, truncate(row.name, monitor_name_width), monitor_name_width);
     try writer.print(" {s}", .{dim});
-    try writePadded(writer, row.port, 6);
+    try writePadded(writer, row.port, monitor_port_width);
     try writer.print("{s} {s}", .{ reset, color });
-    try writePadded(writer, row.status.summary(row.exit_code), 8);
+    try writePadded(writer, row.status.summary(row.exit_code), monitor_status_width);
     try writer.print("{s}", .{reset});
     if (show_log and row.status != .live) {
         const log = try lastLogLine(ctx, row.name);
-        if (log.len > 0) try writer.print(" {s}│{s} {s}", .{ dim, reset, truncate(log, 35) });
+        if (log.len > 0) try writer.print(" {s}│{s} {s}", .{ dim, reset, truncate(log, monitor_log_width) });
     }
 }
 

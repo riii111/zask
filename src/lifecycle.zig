@@ -62,7 +62,7 @@ pub const Lifecycle = struct {
     pub fn startTarget(self: Lifecycle, target: ?[]const u8, writer: *std.Io.Writer) !void {
         if (!self.tmux.hasSession()) {
             try writer.writeAll("Session not running. Run 'hello' first.\n");
-            return error.SessionNotRunning;
+            return;
         }
         const t = target orelse "--all";
         if (std.mem.eql(u8, t, "--all")) return self.startAll("all", writer);

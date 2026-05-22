@@ -101,8 +101,8 @@ pub const Runtime = struct {
         const tx = try self.tmux();
         try tx.setOption("prefix", "C-q");
         try tx.setOption("status-format[0]", "#[align=left]#{T;=/#{status-left-length}:status-left}#[align=right]#{T;=/#{status-right-length}:status-right}");
-        try tx.setOption("@mux_dash_mode", "all");
-        try tx.bindRunShell("m", "mode=$(tmux show-option -qv @mux_dash_mode); if [ \"$mode\" = \"all\" ]; then tmux set-option @mux_dash_mode bad; else tmux set-option @mux_dash_mode all; fi");
+        try tx.setOption("@zask_dash_mode", "all");
+        try tx.bindRunShell("m", "mode=$(tmux show-option -qv @zask_dash_mode); if [ \"$mode\" = \"all\" ]; then tmux set-option @zask_dash_mode bad; else tmux set-option @zask_dash_mode all; fi");
         try tx.bindRunShell("f", try std.fmt.allocPrint(self.gpa, "{s} --config {s} follow \"#{{window_name}}\"", .{ self.zask_path, self.config_path }));
         try self.initLogDir();
         try self.setupPipePane();
@@ -233,7 +233,7 @@ pub const Runtime = struct {
         const result = try self.run(&.{ "mkdir", "-p", dir });
         self.gpa.free(result.stdout);
         self.gpa.free(result.stderr);
-        try (try self.tmux()).setOption("@mux_log_session_id", session_id);
+        try (try self.tmux()).setOption("@zask_log_session_id", session_id);
         try self.cleanupOldLogs();
     }
 
@@ -271,7 +271,7 @@ pub const Runtime = struct {
     }
 
     fn logDir(self: Runtime) ![]const u8 {
-        const session_id = (try self.tmux()).showOption("@mux_log_session_id") catch null;
+        const session_id = (try self.tmux()).showOption("@zask_log_session_id") catch null;
         return self.logDirForSession(session_id orelse "current");
     }
 
