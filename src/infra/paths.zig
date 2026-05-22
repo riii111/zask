@@ -1,22 +1,23 @@
 const std = @import("std");
+const env = @import("env.zig");
 
 pub fn configBase(gpa: std.mem.Allocator) ![]const u8 {
-    if (std.c.getenv("XDG_CONFIG_HOME")) |value| return std.fs.path.join(gpa, &.{ std.mem.span(value), "zask" });
+    if (env.get("XDG_CONFIG_HOME")) |value| return std.fs.path.join(gpa, &.{ value, "zask" });
     return std.fs.path.join(gpa, &.{ home(), ".config", "zask" });
 }
 
 pub fn dataBase(gpa: std.mem.Allocator) ![]const u8 {
-    if (std.c.getenv("XDG_DATA_HOME")) |value| return std.fs.path.join(gpa, &.{ std.mem.span(value), "zask" });
+    if (env.get("XDG_DATA_HOME")) |value| return std.fs.path.join(gpa, &.{ value, "zask" });
     return std.fs.path.join(gpa, &.{ home(), ".local", "share", "zask" });
 }
 
 pub fn runtimeBase(gpa: std.mem.Allocator) ![]const u8 {
-    if (std.c.getenv("XDG_RUNTIME_DIR")) |value| return std.fs.path.join(gpa, &.{ std.mem.span(value), "zask" });
+    if (env.get("XDG_RUNTIME_DIR")) |value| return std.fs.path.join(gpa, &.{ value, "zask" });
     return std.fs.path.join(gpa, &.{ "/tmp", "zask" });
 }
 
 pub fn home() []const u8 {
-    if (std.c.getenv("HOME")) |value| return std.mem.span(value);
+    if (env.get("HOME")) |value| return value;
     return "";
 }
 

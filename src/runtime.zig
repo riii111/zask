@@ -2,6 +2,7 @@ const std = @import("std");
 const config = @import("config.zig");
 const dashboard_ui = @import("ui/dashboard.zig");
 const docker_client = @import("infra/docker.zig");
+const env = @import("infra/env.zig");
 const lifecycle_mod = @import("lifecycle.zig");
 const lock = @import("infra/lock.zig");
 const paths = @import("infra/paths.zig");
@@ -9,6 +10,7 @@ const render = @import("ui/render.zig");
 const proc_runner = @import("infra/runner.zig");
 const shell = @import("infra/shell.zig");
 const tmux_client = @import("infra/tmux.zig");
+const validate = @import("validate.zig");
 
 pub const Runtime = struct {
     gpa: std.mem.Allocator,
@@ -69,9 +71,14 @@ pub const Runtime = struct {
     }
 
     pub fn follow(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
-        _ = writer;
         _ = try self.cfg.findService(service);
-        const log_dir = try self.logDir();
+        const log_dir = self.logDir() catch |err| switch (err) {
+            error.LogSessionNotInitialized => {
+                try writer.writeAll("Log session not initialized. Run 'hello' first.\n");
+                return;
+            },
+            else => return err,
+        };
         const mkdir_result = try self.run(&.{ "mkdir", "-p", log_dir });
         self.gpa.free(mkdir_result.stdout);
         self.gpa.free(mkdir_result.stderr);
@@ -163,12 +170,27 @@ pub const Runtime = struct {
 
     pub fn exec(self: Runtime, container: []const u8, use_shell: bool, writer: *std.Io.Writer) !void {
         if (!self.cfg.dockerEnabled()) return error.DockerDisabled;
+        try validate.identifier(container);
         const dc = try self.docker();
         const running = try dc.runningServices();
         defer self.gpa.free(running.stdout);
         defer self.gpa.free(running.stderr);
+        if (running.term != .exited or running.term.exited != 0) {
+            try writer.writeAll("Docker compose services unavailable\n");
+            return error.DockerUnavailable;
+        }
+        if (std.mem.trim(u8, running.stdout, " \t\r\n").len == 0) {
+            try writer.writeAll("No running containers. Run 'up docker' first.\n");
+            return error.ContainerNotRunning;
+        }
         if (!serviceListContains(running.stdout, container)) {
             try writer.print("Container '{s}' is not running\n", .{container});
+            try writer.writeAll("Running containers:\n");
+            var lines = std.mem.splitScalar(u8, running.stdout, '\n');
+            while (lines.next()) |line| {
+                const item = std.mem.trim(u8, line, " \t\r");
+                if (item.len > 0) try writer.print("  {s}\n", .{item});
+            }
             return error.ContainerNotRunning;
         }
         const exec_cmd = if (use_shell) "bash" else self.cfg.dockerExecDefault(container);
@@ -267,12 +289,12 @@ pub const Runtime = struct {
 
     fn inTmux(self: Runtime) !bool {
         _ = self;
-        return std.c.getenv("TMUX") != null;
+        return env.exists("TMUX");
     }
 
     fn logDir(self: Runtime) ![]const u8 {
         const session_id = (try self.tmux()).showOption("@zask_log_session_id") catch null;
-        return self.logDirForSession(session_id orelse "current");
+        return self.logDirForSession(session_id orelse return error.LogSessionNotInitialized);
     }
 
     fn logBaseDir(self: Runtime) ![]const u8 {

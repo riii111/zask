@@ -107,6 +107,10 @@ pub const Lifecycle = struct {
 
     fn stopService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
         _ = try self.cfg.findService(service);
+        if (!self.tmux.paneRunning(service)) {
+            try writer.print("{s} already stopped\n", .{service});
+            return;
+        }
         try writer.print("Stopping {s}...\n", .{service});
         try self.tmux.sendKeys(try self.tmux.target(service), &.{"C-c"});
         try self.waitForStopped(service);

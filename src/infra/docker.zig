@@ -29,10 +29,11 @@ pub const Compose = struct {
     }
 
     pub fn execInteractive(self: Compose, container: []const u8, command: []const u8) !void {
-        var argv = std.array_list.Managed([]const u8).init(self.gpa);
-        try argv.appendSlice(&.{ "docker", "compose", "-f", self.file, "exec", container });
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(self.gpa);
+        try argv.appendSlice(self.gpa, &.{ "docker", "compose", "-f", self.file, "exec", container });
         var parts = std.mem.tokenizeScalar(u8, command, ' ');
-        while (parts.next()) |part| try argv.append(part);
+        while (parts.next()) |part| try argv.append(self.gpa, part);
         _ = try self.runner.runInteractiveCwd(argv.items, self.dir);
     }
 };

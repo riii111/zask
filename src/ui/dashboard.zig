@@ -1,5 +1,7 @@
 const std = @import("std");
 const config = @import("../config.zig");
+const docker_client = @import("../infra/docker.zig");
+const env = @import("../infra/env.zig");
 const proc_runner = @import("../infra/runner.zig");
 const tmux_client = @import("../infra/tmux.zig");
 
@@ -9,7 +11,7 @@ pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, write
     try writer.writeAll(clearScreen);
     try renderLauncher(ctx, writer);
     try writer.flush();
-    const shell = if (std.c.getenv("SHELL")) |value| std.mem.span(value) else "sh";
+    const shell = env.get("SHELL") orelse "sh";
     _ = try ctx.runner.runInteractive(&.{shell});
 }
 
@@ -174,17 +176,17 @@ fn renderMonitor(ctx: Context, writer: *std.Io.Writer) !void {
     var live_count: usize = 0;
     var warn_count: usize = 0;
     var dead_count: usize = 0;
-    var rows = std.array_list.Managed(MonitorRow).init(ctx.gpa);
+    var rows: std.ArrayList(MonitorRow) = .empty;
 
     if (ctx.cfg.dockerEnabled()) {
         const row = try dockerMonitorRow(ctx);
-        try rows.append(row);
+        try rows.append(ctx.gpa, row);
         countMonitorRow(row, &live_count, &warn_count, &dead_count);
     }
 
     for (try ctx.cfg.services()) |service| {
         const row = try serviceMonitorRow(ctx, service);
-        try rows.append(row);
+        try rows.append(ctx.gpa, row);
         countMonitorRow(row, &live_count, &warn_count, &dead_count);
     }
 
@@ -199,7 +201,7 @@ fn renderMonitor(ctx: Context, writer: *std.Io.Writer) !void {
 }
 
 fn serviceGroups(ctx: Context) ![][]const u8 {
-    var groups = std.array_list.Managed([]const u8).init(ctx.gpa);
+    var groups: std.ArrayList([]const u8) = .empty;
     for (try ctx.cfg.services()) |service| {
         const group = config.Config.serviceGroup(service);
         var seen = false;
@@ -209,9 +211,9 @@ fn serviceGroups(ctx: Context) ![][]const u8 {
                 break;
             }
         }
-        if (!seen) try groups.append(group);
+        if (!seen) try groups.append(ctx.gpa, group);
     }
-    return groups.toOwnedSlice();
+    return groups.toOwnedSlice(ctx.gpa);
 }
 
 fn dashboardMode(ctx: Context) ![]const u8 {
@@ -265,10 +267,12 @@ fn healthStatus(ctx: Context, service: std.json.Value) !MonitorStatus {
 }
 
 fn dockerRunning(ctx: Context) !bool {
-    const result = ctx.runner.runCwd(&.{ "docker", "compose", "-f", ctx.cfg.dockerComposeFile(), "ps", "--status", "running" }, try ctx.cfg.dockerDir(ctx.gpa)) catch return false;
-    defer ctx.gpa.free(result.stdout);
-    defer ctx.gpa.free(result.stderr);
-    return result.stdout.len > 0;
+    return (docker_client.Compose{
+        .gpa = ctx.gpa,
+        .runner = ctx.runner,
+        .dir = try ctx.cfg.dockerDir(ctx.gpa),
+        .file = ctx.cfg.dockerComposeFile(),
+    }).running();
 }
 
 fn writeMonitorRow(ctx: Context, writer: *std.Io.Writer, row: MonitorRow, show_log: bool) !void {

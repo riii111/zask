@@ -64,7 +64,9 @@ pub const Config = struct {
     }
 
     pub fn services(self: Config) ![]const Value {
-        return (try self.required(&.{"services"})).array.items;
+        const node = try self.required(&.{"services"});
+        if (node != .array) return error.InvalidConfig;
+        return node.array.items;
     }
 
     pub fn phases(self: Config) []const Value {
@@ -106,14 +108,6 @@ pub const Config = struct {
         return std.fs.path.join(gpa, &.{ try self.projectRoot(gpa), dir });
     }
 
-    pub fn serviceCommand(service: Value) ![]const u8 {
-        const command = config_value.requiredObjectString(service, "command") catch "";
-        const runtime = config_value.optionalObjectString(service, "runtime", "");
-        if (runtime.len == 0) return command;
-        if (!isAllowedRuntime(runtime)) return error.UnknownRuntime;
-        return command;
-    }
-
     pub fn serviceStartCommand(self: Config, gpa: std.mem.Allocator, service: Value) ![]const u8 {
         _ = self;
         const command = try config_value.requiredObjectString(service, "command");
@@ -135,14 +129,14 @@ pub const Config = struct {
             if (alias == .array) return stringArray(gpa, alias.array.items);
         }
 
-        var list = std.array_list.Managed([]const u8).init(gpa);
+        var list: std.ArrayList([]const u8) = .empty;
         for (try self.services()) |service| {
             if (std.mem.eql(u8, serviceGroup(service), name)) {
-                try list.append(try serviceName(service));
+                try list.append(gpa, try serviceName(service));
             }
         }
         if (list.items.len == 0) return error.UnknownGroup;
-        return list.toOwnedSlice();
+        return list.toOwnedSlice(gpa);
     }
 
     pub fn resolveStartProfileOption(self: Config, option: []const u8) ?[]const u8 {
@@ -251,12 +245,12 @@ fn readFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
 }
 
 fn stringArray(gpa: std.mem.Allocator, values: []const Value) ![][]const u8 {
-    var list = std.array_list.Managed([]const u8).init(gpa);
+    var list: std.ArrayList([]const u8) = .empty;
     for (values) |value| {
         if (value != .string) return error.InvalidConfig;
-        try list.append(value.string);
+        try list.append(gpa, value.string);
     }
-    return list.toOwnedSlice();
+    return list.toOwnedSlice(gpa);
 }
 
 fn isAllowedRuntime(runtime: []const u8) bool {
@@ -335,6 +329,35 @@ test "rejects unknown runtimes and missing services" {
     try std.testing.expectError(error.UnknownRuntime, cfg.serviceStartCommand(arena.allocator(), try cfg.findService("api")));
     try std.testing.expectError(error.UnknownService, cfg.findService("missing"));
     try std.testing.expectError(error.UnknownGroup, cfg.resolveGroup(arena.allocator(), "missing"));
+}
+
+test "rejects malformed service collection" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": {"api": {"command":"serve"}}
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+
+    try std.testing.expectError(error.InvalidConfig, cfg.services());
+}
+
+test "rejects invalid identifiers at config boundaries" {
+    const json =
+        \\{
+        \\  "project": {"name":"bad name","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": [{"name":"api.bad","dir":"backend","command":"serve","group":"backend"}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+
+    try std.testing.expectError(error.InvalidIdentifier, cfg.projectName());
+    try std.testing.expectError(error.InvalidIdentifier, Config.serviceName((try cfg.services())[0]));
 }
 
 test "parses synthetic fixture" {

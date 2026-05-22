@@ -59,9 +59,10 @@ pub const Client = struct {
     }
 
     pub fn sendKeys(self: Client, pane_target: []const u8, keys: []const []const u8) !void {
-        var argv = std.array_list.Managed([]const u8).init(self.gpa);
-        try argv.appendSlice(&.{ "tmux", "send-keys", "-t", pane_target });
-        try argv.appendSlice(keys);
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(self.gpa);
+        try argv.appendSlice(self.gpa, &.{ "tmux", "send-keys", "-t", pane_target });
+        try argv.appendSlice(self.gpa, keys);
         _ = try self.runner.run(argv.items);
     }
 
