@@ -1,44 +1,82 @@
 const std = @import("std");
 const paths = @import("paths.zig");
 const runner = @import("runner.zig");
-const shell = @import("shell.zig");
 
 pub const Lock = struct {
     gpa: std.mem.Allocator,
-    runner: runner.Runner,
+    io: std.Io,
     dir: []const u8,
 
     pub fn acquire(gpa: std.mem.Allocator, proc: runner.Runner, name: []const u8) !Lock {
         const base = try paths.runtimeBase(gpa);
-        _ = proc.run(&.{ "mkdir", "-p", base }) catch {};
+        try ensurePrivateDir(proc.io, base);
         const dir = try std.fs.path.join(gpa, &.{ base, try std.fmt.allocPrint(gpa, "{s}.lock", .{name}) });
-        const quoted_dir = try shell.quote(gpa, dir);
         const pid = try std.fmt.allocPrint(gpa, "{d}", .{std.c.getpid()});
-        const script = try std.fmt.allocPrint(gpa,
-            \\if mkdir {s} 2>/dev/null; then
-            \\  printf '%s\n' {s} > {s}/pid
-            \\  exit 0
-            \\fi
-            \\pid=$(cat {s}/pid 2>/dev/null || true)
-            \\if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            \\  exit 1
-            \\fi
-            \\rm -rf {s}
-            \\mkdir {s}
-            \\printf '%s\n' {s} > {s}/pid
-        , .{ quoted_dir, pid, quoted_dir, quoted_dir, quoted_dir, quoted_dir, pid, quoted_dir });
-        const result = try proc.run(&.{ "bash", "-c", script });
-        defer gpa.free(result.stdout);
-        defer gpa.free(result.stderr);
-        if (result.term != .exited or result.term.exited != 0) return error.LockBusy;
-        return .{ .gpa = gpa, .runner = proc, .dir = dir };
+        if (try acquireDir(proc.io, dir)) {
+            try writePid(gpa, proc.io, dir, pid);
+            return .{ .gpa = gpa, .io = proc.io, .dir = dir };
+        }
+        if (try lockAlive(gpa, proc.io, dir)) return error.LockBusy;
+
+        std.Io.Dir.cwd().deleteTree(proc.io, dir) catch {};
+        if (!try acquireDir(proc.io, dir)) return error.LockBusy;
+        try writePid(gpa, proc.io, dir, pid);
+        return .{ .gpa = gpa, .io = proc.io, .dir = dir };
     }
 
     pub fn release(self: Lock) void {
-        const quoted_dir = shell.quote(self.gpa, self.dir) catch return;
-        const script = std.fmt.allocPrint(self.gpa, "rm -rf {s}", .{quoted_dir}) catch return;
-        const result = self.runner.run(&.{ "bash", "-c", script }) catch return;
-        self.gpa.free(result.stdout);
-        self.gpa.free(result.stderr);
+        std.Io.Dir.cwd().deleteTree(self.io, self.dir) catch {};
     }
 };
+
+fn ensurePrivateDir(io: std.Io, path: []const u8) !void {
+    _ = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
+    var dir = try std.Io.Dir.openDirAbsolute(io, path, .{});
+    defer dir.close(io);
+    try dir.setPermissions(io, private_dir_permissions);
+}
+
+fn acquireDir(io: std.Io, path: []const u8) !bool {
+    std.Io.Dir.createDirAbsolute(io, path, private_dir_permissions) catch |err| switch (err) {
+        error.PathAlreadyExists => return false,
+        else => return err,
+    };
+    return true;
+}
+
+fn writePid(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, pid: []const u8) !void {
+    const pid_path = try std.fs.path.join(gpa, &.{ dir, "pid" });
+    try paths.writeFile(io, pid_path, pid);
+}
+
+fn lockAlive(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !bool {
+    const pid_path = try std.fs.path.join(gpa, &.{ dir, "pid" });
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, pid_path, gpa, .limited(64)) catch return false;
+    defer gpa.free(bytes);
+    const pid_text = std.mem.trim(u8, bytes, " \t\r\n");
+    if (pid_text.len == 0) return false;
+    const pid = std.fmt.parseInt(std.posix.pid_t, pid_text, 10) catch return false;
+    std.posix.kill(pid, @enumFromInt(0)) catch |err| switch (err) {
+        error.ProcessNotFound => return false,
+        error.PermissionDenied => return true,
+        else => return false,
+    };
+    return true;
+}
+
+const private_dir_permissions: std.Io.Dir.Permissions = @enumFromInt(0o700);
+
+test "lock blocks concurrent acquire and releases directory" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const run = runner.Runner{ .gpa = gpa, .io = std.Io.null };
+    const name = try std.fmt.allocPrint(gpa, "zask-test-{d}", .{std.c.getpid()});
+
+    const first = try Lock.acquire(gpa, run, name);
+    defer first.release();
+    try std.testing.expectError(error.LockBusy, Lock.acquire(gpa, run, name));
+    first.release();
+    const second = try Lock.acquire(gpa, run, name);
+    second.release();
+}
