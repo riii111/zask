@@ -2,6 +2,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const root = @import("root.zig");
 const config = @import("config.zig");
+const env = @import("infra/env.zig");
 const paths = @import("infra/paths.zig");
 const validate = @import("validate.zig");
 const Runtime = @import("runtime.zig").Runtime;
@@ -38,28 +39,29 @@ const Command = enum {
 const CommandSpec = struct {
     command: Command,
     names: []const []const u8,
-    help: ?[]const u8 = null,
+    usage: ?[]const u8 = null,
+    description: []const u8 = "",
     global: bool = false,
 };
 
 const command_specs = [_]CommandSpec{
-    .{ .command = .version, .names = &.{"version"}, .help = "  version                      Print zask version", .global = true },
-    .{ .command = .help, .names = &.{ "help", "--help", "-h" }, .help = "  help                         Print this help", .global = true },
-    .{ .command = .render_session, .names = &.{"render-session"}, .help = "  render-session               Print generated tmuxp YAML" },
-    .{ .command = .list, .names = &.{"list"}, .help = "  status | list                Show service state or config services" },
-    .{ .command = .status, .names = &.{"status"} },
-    .{ .command = .attach, .names = &.{"attach"}, .help = "  attach | detach | kill       Manage tmux session" },
+    .{ .command = .hello, .names = &.{"hello"}, .usage = "hello [--docker|--<profile>]", .description = "Start session + services + attach" },
+    .{ .command = .bye, .names = &.{"bye"}, .usage = "bye", .description = "Graceful shutdown" },
+    .{ .command = .re, .names = &.{"re"}, .usage = "re", .description = "Restart session" },
+    .{ .command = .attach, .names = &.{"attach"}, .usage = "attach | detach | kill", .description = "Manage tmux session" },
     .{ .command = .detach, .names = &.{"detach"} },
-    .{ .command = .logs, .names = &.{"logs"}, .help = "  logs <service>               Focus service window" },
-    .{ .command = .follow, .names = &.{"follow"}, .help = "  follow <service>             Tail captured log in tmux popup" },
-    .{ .command = .hello, .names = &.{"hello"}, .help = "  hello [--docker|--<profile>] Start session + services + attach" },
-    .{ .command = .bye, .names = &.{"bye"}, .help = "  bye                         Graceful shutdown" },
     .{ .command = .kill, .names = &.{"kill"} },
-    .{ .command = .re, .names = &.{"re"}, .help = "  re                          Restart session" },
-    .{ .command = .up, .names = &.{"up"}, .help = "  up [--all|docker|name]       Start service, group, docker, or all" },
-    .{ .command = .stop, .names = &.{"stop"}, .help = "  stop [--all|docker|name]     Stop service, group, docker, or all" },
-    .{ .command = .restart, .names = &.{"restart"}, .help = "  restart <docker|name>        Restart service, group, or docker" },
-    .{ .command = .exec, .names = &.{"exec"}, .help = "  exec <container> [--shell]   Enter Docker container" },
+    .{ .command = .up, .names = &.{"up"}, .usage = "up [--all|docker|name]", .description = "Start service, group, docker, or all" },
+    .{ .command = .stop, .names = &.{"stop"}, .usage = "stop [--all|docker|name]", .description = "Stop service, group, docker, or all" },
+    .{ .command = .restart, .names = &.{"restart"}, .usage = "restart <docker|name>", .description = "Restart service, group, or docker" },
+    .{ .command = .status, .names = &.{"status"}, .usage = "status | list", .description = "Show service state or config services" },
+    .{ .command = .list, .names = &.{"list"} },
+    .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window" },
+    .{ .command = .follow, .names = &.{"follow"}, .usage = "follow <service>", .description = "Tail captured log in tmux popup" },
+    .{ .command = .exec, .names = &.{"exec"}, .usage = "exec <container> [--shell]", .description = "Enter Docker container" },
+    .{ .command = .render_session, .names = &.{"render-session"}, .usage = "render-session", .description = "Print generated tmuxp YAML" },
+    .{ .command = .version, .names = &.{"version"}, .usage = "version", .description = "Print zask version", .global = true },
+    .{ .command = .help, .names = &.{ "help", "--help", "-h" }, .usage = "help", .description = "Print this help", .global = true },
     .{ .command = .dashboard, .names = &.{"dashboard"} },
     .{ .command = .monitor, .names = &.{"monitor"} },
 };
@@ -67,6 +69,7 @@ const command_specs = [_]CommandSpec{
 pub const CommandContext = struct {
     gpa: std.mem.Allocator,
     io: ?std.Io = null,
+    environ: ?*const env.Map = null,
     argv0: []const u8 = "zask",
 };
 
@@ -76,6 +79,7 @@ pub fn run(init: std.process.Init) !void {
     const context: CommandContext = .{
         .gpa = arena,
         .io = init.io,
+        .environ = init.environ_map,
         .argv0 = if (args.len > 0) args[0] else "zask",
     };
 
@@ -108,7 +112,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
         .status => rt.status(writer),
         .attach => rt.attach(),
         .detach => rt.detach(writer),
-        .logs => rt.logs(try oneArg(parsed.args)),
+        .logs => rt.logs(try oneArg(parsed.args), writer),
         .follow => rt.follow(try oneArg(parsed.args), writer),
         .hello => rt.hello(try resolveHelloProfile(rt.cfg, parsed.args), writer),
         .bye => rt.bye(writer),
@@ -133,10 +137,28 @@ fn printVersion(writer: *std.Io.Writer) !void {
 
 fn printHelp(writer: *std.Io.Writer) !void {
     try writer.writeAll("Usage: zask <command>\n\nCommands:\n");
+    const usage_width = maxHelpUsageWidth();
     for (command_specs) |spec| {
-        if (spec.help) |line| try writer.print("{s}\n", .{line});
+        if (spec.usage) |usage| {
+            try writer.print("  {s}", .{usage});
+            try writeSpaces(writer, usage_width - usage.len + 2);
+            try writer.print("{s}\n", .{spec.description});
+        }
     }
     try writer.writeByte('\n');
+}
+
+fn maxHelpUsageWidth() usize {
+    var width: usize = 0;
+    for (command_specs) |spec| {
+        if (spec.usage) |usage| width = @max(width, usage.len);
+    }
+    return width;
+}
+
+fn writeSpaces(writer: *std.Io.Writer, count: usize) !void {
+    var i: usize = 0;
+    while (i < count) : (i += 1) try writer.writeByte(' ');
 }
 
 fn parseArgs(context: CommandContext, args: []const []const u8) !ParsedArgs {
@@ -174,20 +196,21 @@ fn parseCommand(command: []const u8) ?Command {
 
 fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
     const io = context.io orelse return error.MissingIo;
-    const path = try absoluteConfigPath(context.gpa, io, if (parsed.config_path) |p| p else try projectConfigPath(context.gpa, parsed.project orelse return error.ProjectRequired));
-    const cfg = try config.loadPath(context.gpa, io, path, paths.home());
+    const path = try absoluteConfigPath(context.gpa, io, if (parsed.config_path) |p| p else try projectConfigPath(context.gpa, context.environ, parsed.project orelse return error.ProjectRequired));
+    const cfg = try config.loadPath(context.gpa, io, path, try paths.home(context.environ));
     return .{
         .gpa = context.gpa,
         .io = io,
+        .environ = context.environ,
         .cfg = cfg,
         .config_path = path,
         .zask_path = try absoluteExePath(context.gpa, io, context.argv0),
     };
 }
 
-fn projectConfigPath(gpa: std.mem.Allocator, project: []const u8) ![]const u8 {
+fn projectConfigPath(gpa: std.mem.Allocator, environ: ?*const env.Map, project: []const u8) ![]const u8 {
     try validate.identifier(project);
-    return std.fs.path.join(gpa, &.{ try paths.configBase(gpa), project, "config.json" });
+    return std.fs.path.join(gpa, &.{ try paths.configBase(gpa, environ), project, "config.json" });
 }
 
 fn absoluteConfigPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {

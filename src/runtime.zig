@@ -15,6 +15,7 @@ const validate = @import("validate.zig");
 pub const Runtime = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
+    environ: ?*const env.Map = null,
     cfg: config.Config,
     config_path: []const u8,
     zask_path: []const u8,
@@ -61,8 +62,12 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn logs(self: Runtime, service: []const u8) !void {
+    pub fn logs(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
         _ = try self.cfg.findService(service);
+        if (!try self.sessionExists()) {
+            try writer.writeAll("Session not running\n");
+            return;
+        }
         if (try self.inTmux()) {
             try (try self.tmux()).switchClient();
         }
@@ -72,6 +77,10 @@ pub const Runtime = struct {
 
     pub fn follow(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
         _ = try self.cfg.findService(service);
+        if (!try self.sessionExists()) {
+            try writer.writeAll("Session not running\n");
+            return;
+        }
         const log_dir = self.logDir() catch |err| switch (err) {
             error.LogSessionNotInitialized => {
                 try writer.writeAll("Log session not initialized. Run 'hello' first.\n");
@@ -79,14 +88,10 @@ pub const Runtime = struct {
             },
             else => return err,
         };
-        const mkdir_result = try self.run(&.{ "mkdir", "-p", log_dir });
-        self.gpa.free(mkdir_result.stdout);
-        self.gpa.free(mkdir_result.stderr);
+        try self.runner().runDiscard(&.{ "mkdir", "-p", log_dir });
         const log_file = try std.fs.path.join(self.gpa, &.{ log_dir, try std.fmt.allocPrint(self.gpa, "{s}.log", .{service}) });
         if (!try self.pathExists(log_file)) {
-            const touch_result = try self.run(&.{ "touch", log_file });
-            self.gpa.free(touch_result.stdout);
-            self.gpa.free(touch_result.stderr);
+            try self.runner().runDiscard(&.{ "touch", log_file });
         }
         try (try self.tmux()).popup(self.cfg.popupWidth(), self.cfg.popupHeight(), try std.fmt.allocPrint(self.gpa, "nvim -c 'terminal tail -F {s}'", .{try shell.quote(self.gpa, log_file)}));
     }
@@ -136,7 +141,7 @@ pub const Runtime = struct {
     pub fn kill(self: Runtime, writer: *std.Io.Writer) !void {
         const guard = try self.acquireLock();
         defer guard.release();
-        try (try self.lifecycle()).stopTarget("docker", writer);
+        try (try self.lifecycle()).stopDocker();
         try self.cleanupPipePane();
         if (try self.sessionExists()) {
             try (try self.tmux()).killSession();
@@ -198,7 +203,7 @@ pub const Runtime = struct {
     }
 
     pub fn dashboard(self: Runtime, writer: *std.Io.Writer) !void {
-        try dashboard_ui.runLauncher(self.gpa, self.io, self.cfg, writer);
+        try dashboard_ui.runLauncher(self.gpa, self.io, self.environ, self.cfg, writer);
     }
 
     pub fn monitorOnce(self: Runtime, writer: *std.Io.Writer) !void {
@@ -233,14 +238,12 @@ pub const Runtime = struct {
     }
 
     fn acquireLock(self: Runtime) !lock.Lock {
-        return lock.Lock.acquire(self.gpa, self.runner(), try self.cfg.projectName());
+        return lock.Lock.acquire(self.gpa, self.runner(), try self.cfg.projectName(), try paths.runtimeBase(self.gpa, self.environ));
     }
 
     fn writeSessionFile(self: Runtime) ![]const u8 {
-        const dir = try std.fs.path.join(self.gpa, &.{ try paths.configBase(self.gpa), try self.cfg.projectName() });
-        const mkdir_result = try self.run(&.{ "mkdir", "-p", dir });
-        self.gpa.free(mkdir_result.stdout);
-        self.gpa.free(mkdir_result.stderr);
+        const dir = try std.fs.path.join(self.gpa, &.{ try paths.configBase(self.gpa, self.environ), try self.cfg.projectName() });
+        try self.runner().runDiscard(&.{ "mkdir", "-p", dir });
         const path = try std.fs.path.join(self.gpa, &.{ dir, "session.yml" });
         var out: std.Io.Writer.Allocating = .init(self.gpa);
         defer out.deinit();
@@ -252,9 +255,7 @@ pub const Runtime = struct {
     fn initLogDir(self: Runtime) !void {
         const session_id = try self.logSessionId();
         const dir = try self.logDirForSession(session_id);
-        const result = try self.run(&.{ "mkdir", "-p", dir });
-        self.gpa.free(result.stdout);
-        self.gpa.free(result.stderr);
+        try self.runner().runDiscard(&.{ "mkdir", "-p", dir });
         try (try self.tmux()).setOption("@zask_log_session_id", session_id);
         try self.cleanupOldLogs();
     }
@@ -288,8 +289,7 @@ pub const Runtime = struct {
     }
 
     fn inTmux(self: Runtime) !bool {
-        _ = self;
-        return env.exists("TMUX");
+        return env.exists(self.environ, "TMUX");
     }
 
     fn logDir(self: Runtime) ![]const u8 {
@@ -298,7 +298,7 @@ pub const Runtime = struct {
     }
 
     fn logBaseDir(self: Runtime) ![]const u8 {
-        return std.fs.path.join(self.gpa, &.{ try paths.dataBase(self.gpa), try self.cfg.projectName(), "logs" });
+        return std.fs.path.join(self.gpa, &.{ try paths.dataBase(self.gpa, self.environ), try self.cfg.projectName(), "logs" });
     }
 
     fn logDirForSession(self: Runtime, session_id: []const u8) ![]const u8 {
@@ -316,9 +316,7 @@ pub const Runtime = struct {
         const base = try self.logBaseDir();
         const keep = self.cfg.logKeepSessions();
         const script = try std.fmt.allocPrint(self.gpa, "ls -dt {s}/*/ 2>/dev/null | tail -n +{d} | xargs rm -rf", .{ try shell.quote(self.gpa, base), keep + 1 });
-        const result = self.run(&.{ "bash", "-c", script }) catch return;
-        self.gpa.free(result.stdout);
-        self.gpa.free(result.stderr);
+        self.runner().runDiscard(&.{ "bash", "-c", script }) catch return;
     }
 
     fn pathExists(self: Runtime, path: []const u8) !bool {

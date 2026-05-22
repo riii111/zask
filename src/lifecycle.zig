@@ -73,6 +73,7 @@ pub const Lifecycle = struct {
     }
 
     pub fn stopTarget(self: Lifecycle, target: ?[]const u8, writer: *std.Io.Writer) !void {
+        if (!self.tmux.hasSession()) return sessionNotRunning(writer);
         const t = target orelse "--all";
         if (std.mem.eql(u8, t, "--all")) return self.stopAll(writer);
         if (std.mem.eql(u8, t, "docker")) return self.stopDocker();
@@ -82,6 +83,7 @@ pub const Lifecycle = struct {
     }
 
     pub fn restartTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
+        if (!self.tmux.hasSession()) return sessionNotRunning(writer);
         if (std.mem.eql(u8, target, "docker")) {
             try self.stopDocker();
             try self.startDocker();
@@ -127,7 +129,7 @@ pub const Lifecycle = struct {
         try self.tmux.sendKeys(try self.tmux.target("docker"), &.{ try std.fmt.allocPrint(self.gpa, "cd {s} && docker compose -f {s} up", .{ try shell.quote(self.gpa, try self.cfg.dockerDir(self.gpa)), try shell.quote(self.gpa, self.cfg.dockerComposeFile()) }), "Enter" });
     }
 
-    fn stopDocker(self: Lifecycle) !void {
+    pub fn stopDocker(self: Lifecycle) !void {
         if (!self.cfg.dockerEnabled()) return;
         if (self.tmux.hasSession()) try self.tmux.sendKeys(try self.tmux.target("docker"), &.{"C-c"});
         self.docker.down() catch {};
@@ -213,6 +215,10 @@ pub const Lifecycle = struct {
     }
 };
 
+fn sessionNotRunning(writer: *std.Io.Writer) !void {
+    try writer.writeAll("Session not running. Run 'hello' first.\n");
+}
+
 fn runningContainerCount(output: []const u8) usize {
     var count: usize = 0;
     var lines = std.mem.splitScalar(u8, output, '\n');
@@ -227,4 +233,69 @@ test "counts running docker compose rows" {
     try std.testing.expectEqual(@as(usize, 0), runningContainerCount(""));
     try std.testing.expectEqual(@as(usize, 0), runningContainerCount("NAME SERVICE STATUS\n"));
     try std.testing.expectEqual(@as(usize, 2), runningContainerCount("NAME SERVICE STATUS\none api running\ntwo db running\n"));
+}
+
+test "stop and restart targets require an active session" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": [{"name":"api","dir":"backend","command":"serve","group":"backend"}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    recorder.term = .{ .exited = 1 };
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = std.Io.null, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const lifecycle = Lifecycle{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
+        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.stopTarget("api", &writer);
+    try lifecycle.restartTarget("api", &writer);
+
+    const output = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, output, "Session not running. Run 'hello' first.") != null);
+    try std.testing.expectEqual(@as(usize, 2), recorder.commands.items.len);
+}
+
+test "startAll dispatches quoted service command to tmux" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo app","session_name":"demo"},
+        \\  "services": [{"name":"api","dir":"backend","command":"serve","group":"backend"}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = std.Io.null, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const lifecycle = Lifecycle{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
+        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo app", .file = "compose.yaml" },
+    };
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startAll("all", &writer);
+
+    const send_keys = recorder.commands.items[2];
+    try std.testing.expectEqualStrings("tmux", send_keys.argv[0]);
+    try std.testing.expectEqualStrings("send-keys", send_keys.argv[1]);
+    try std.testing.expectEqualStrings("demo:api", send_keys.argv[3]);
+    try std.testing.expectEqualStrings("cd '/tmp/demo app/backend' && serve", send_keys.argv[4]);
+    try std.testing.expectEqualStrings("Enter", send_keys.argv[5]);
 }

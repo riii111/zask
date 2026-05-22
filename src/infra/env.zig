@@ -1,15 +1,16 @@
 const std = @import("std");
 
-pub fn get(comptime name: [:0]const u8) ?[]const u8 {
-    const raw = std.mem.span(std.c.environ);
-    const environ: std.process.Environ = .{ .block = .{ .slice = @ptrCast(raw) } };
-    return std.process.Environ.getPosix(environ, name);
+pub const Map = std.process.Environ.Map;
+
+pub fn get(map: ?*const Map, name: []const u8) ?[]const u8 {
+    const m = map orelse return null;
+    return m.get(name);
 }
 
-pub fn exists(comptime name: [:0]const u8) bool {
-    return get(name) != null;
+pub fn exists(map: ?*const Map, name: []const u8) bool {
+    return get(map, name) != null;
 }
 
 test "missing environment variable returns null" {
-    try std.testing.expect(get("ZASK_ENV_TEST_SHOULD_NOT_EXIST") == null);
+    try std.testing.expect(get(null, "ZASK_ENV_TEST_SHOULD_NOT_EXIST") == null);
 }

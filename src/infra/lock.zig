@@ -7,8 +7,7 @@ pub const Lock = struct {
     io: std.Io,
     dir: []const u8,
 
-    pub fn acquire(gpa: std.mem.Allocator, proc: runner.Runner, name: []const u8) !Lock {
-        const base = try paths.runtimeBase(gpa);
+    pub fn acquire(gpa: std.mem.Allocator, proc: runner.Runner, name: []const u8, base: []const u8) !Lock {
         try ensurePrivateDir(proc.io, base);
         const dir = try std.fs.path.join(gpa, &.{ base, try std.fmt.allocPrint(gpa, "{s}.lock", .{name}) });
         const pid = try std.fmt.allocPrint(gpa, "{d}", .{std.c.getpid()});
@@ -18,7 +17,9 @@ pub const Lock = struct {
         }
         if (try lockAlive(gpa, proc.io, dir)) return error.LockBusy;
 
-        std.Io.Dir.cwd().deleteTree(proc.io, dir) catch {};
+        const stale_dir = try std.fmt.allocPrint(gpa, "{s}.stale.{d}", .{ dir, std.c.getpid() });
+        std.Io.Dir.renameAbsolute(dir, stale_dir, proc.io) catch return error.LockBusy;
+        defer std.Io.Dir.cwd().deleteTree(proc.io, stale_dir) catch {};
         if (!try acquireDir(proc.io, dir)) return error.LockBusy;
         try writePid(gpa, proc.io, dir, pid);
         return .{ .gpa = gpa, .io = proc.io, .dir = dir };
@@ -30,7 +31,8 @@ pub const Lock = struct {
 };
 
 fn ensurePrivateDir(io: std.Io, path: []const u8) !void {
-    _ = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
+    const status = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
+    if (status == .existed) return;
     var dir = try std.Io.Dir.openDirAbsolute(io, path, .{});
     defer dir.close(io);
     try dir.setPermissions(io, private_dir_permissions);
@@ -73,10 +75,11 @@ test "lock blocks concurrent acquire and releases directory" {
     const run = runner.Runner{ .gpa = gpa, .io = std.Io.null };
     const name = try std.fmt.allocPrint(gpa, "zask-test-{d}", .{std.c.getpid()});
 
-    const first = try Lock.acquire(gpa, run, name);
+    const base = try std.fs.path.join(gpa, &.{ "/tmp", "zask-test-locks" });
+    const first = try Lock.acquire(gpa, run, name, base);
     defer first.release();
-    try std.testing.expectError(error.LockBusy, Lock.acquire(gpa, run, name));
+    try std.testing.expectError(error.LockBusy, Lock.acquire(gpa, run, name, base));
     first.release();
-    const second = try Lock.acquire(gpa, run, name);
+    const second = try Lock.acquire(gpa, run, name, base);
     second.release();
 }

@@ -15,7 +15,7 @@ pub const Compose = struct {
     }
 
     pub fn runningServices(self: Compose) !std.process.RunResult {
-        return self.runner.run(&.{ "docker", "compose", "-f", self.file, "ps", "--status", "running", "--format", "{{.Service}}" });
+        return self.runner.runCwd(&.{ "docker", "compose", "-f", self.file, "ps", "--status", "running", "--format", "{{.Service}}" }, self.dir);
     }
 
     pub fn runningTable(self: Compose) !std.process.RunResult {
@@ -37,3 +37,17 @@ pub const Compose = struct {
         _ = try self.runner.runInteractiveCwd(argv.items, self.dir);
     }
 };
+
+test "runningServices uses compose working directory" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
+    const compose = Compose{ .gpa = std.testing.allocator, .runner = run, .dir = "/tmp/demo/docker", .file = "compose.yaml" };
+
+    const result = try compose.runningServices();
+    defer std.testing.allocator.free(result.stdout);
+    defer std.testing.allocator.free(result.stderr);
+
+    try std.testing.expectEqualStrings("/tmp/demo/docker", recorder.commands.items[0].cwd.?);
+    try std.testing.expectEqualStrings("compose.yaml", recorder.commands.items[0].argv[3]);
+}

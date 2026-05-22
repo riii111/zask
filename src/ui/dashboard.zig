@@ -5,13 +5,13 @@ const env = @import("../infra/env.zig");
 const proc_runner = @import("../infra/runner.zig");
 const tmux_client = @import("../infra/tmux.zig");
 
-pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.Io.Writer) !void {
+pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env.Map, cfg: config.Config, writer: *std.Io.Writer) !void {
     const run: proc_runner.Runner = .{ .gpa = gpa, .io = io };
     const ctx: Context = .{ .gpa = gpa, .cfg = cfg, .runner = run, .tmux = .{ .gpa = gpa, .runner = run, .session = try cfg.sessionName() } };
     try writer.writeAll(clearScreen);
     try renderLauncher(ctx, writer);
     try writer.flush();
-    const shell = env.get("SHELL") orelse "sh";
+    const shell = env.get(environ, "SHELL") orelse "sh";
     _ = try ctx.runner.runInteractive(&.{shell});
 }
 
@@ -116,11 +116,15 @@ const MonitorRow = struct {
 fn renderLauncher(ctx: Context, writer: *std.Io.Writer) !void {
     try writer.writeAll("\n");
     const title = try std.fmt.allocPrint(ctx.gpa, "{s} - Development TUI", .{try ctx.cfg.projectName()});
-    try writer.print("{s}{s}╔══════════════════════════════════════════════╗{s}\n", .{ bold, cyan, reset });
+    try writer.print("{s}{s}", .{ bold, cyan });
+    try writeRule(writer, "╔", "═", "╗", launcher_width);
+    try writer.print("{s}\n", .{reset});
     try writer.print("{s}{s}║", .{ bold, cyan });
     try writeCentered(writer, title, launcher_width);
     try writer.print("║{s}\n", .{reset});
-    try writer.print("{s}{s}╚══════════════════════════════════════════════╝{s}\n\n", .{ bold, cyan, reset });
+    try writer.print("{s}{s}", .{ bold, cyan });
+    try writeRule(writer, "╚", "═", "╝", launcher_width);
+    try writer.print("{s}\n\n", .{reset});
 
     try writer.print("{s}Navigate: {s}{s}Ctrl+q w{s}{s} (list) {s}{s}Ctrl+q '{s}{s} (number) {s}{s}Ctrl+q m{s}{s} (toggle){s}\n\n", .{ dim, reset, bold, reset, dim, reset, bold, reset, dim, reset, bold, reset, dim, reset });
 
@@ -155,7 +159,9 @@ fn renderLauncher(ctx: Context, writer: *std.Io.Writer) !void {
         try writer.writeAll("\n");
     }
 
-    try writer.print("{s}────────────────────────────────────────────────{s}\n", .{ dim, reset });
+    try writer.print("{s}", .{dim});
+    try writeRule(writer, "", "─", "", launcher_width + 2);
+    try writer.print("{s}\n", .{reset});
     try writer.print("{s}Commands:{s}\n", .{ bold, reset });
     const project = try ctx.cfg.projectName();
     try writer.print("  {s}{s} hello{s}           Start all + attach\n", .{ green, project, reset });
@@ -330,6 +336,13 @@ fn writePadded(writer: *std.Io.Writer, text: []const u8, width: usize) !void {
 fn writeSpaces(writer: *std.Io.Writer, count: usize) !void {
     var i: usize = 0;
     while (i < count) : (i += 1) try writer.writeByte(' ');
+}
+
+fn writeRule(writer: *std.Io.Writer, left: []const u8, fill: []const u8, right: []const u8, width: usize) !void {
+    try writer.writeAll(left);
+    var i: usize = 0;
+    while (i < width) : (i += 1) try writer.writeAll(fill);
+    try writer.writeAll(right);
 }
 
 fn truncate(text: []const u8, width: usize) []const u8 {
