@@ -121,7 +121,7 @@ test "precheck failure prints hint and preserves abort semantics" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Hint: install tool") != null);
 }
 
-test "command phase warn continues and abort returns phase failure" {
+test "command phase warn continues and abort fails startup" {
     const lifecycle_mod = @import("lifecycle.zig");
     const runner_mod = @import("infra/runner.zig");
     const json =
@@ -158,6 +158,7 @@ test "command phase warn continues and abort returns phase failure" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: command phase failed") != null);
     try std.testing.expectEqualStrings("warn setup", recorder.commands.items[0].argv[2]);
     try std.testing.expectEqualStrings("abort setup", recorder.commands.items[1].argv[2]);
+    try runner_mod.expectNoRemainingResponses(&recorder);
 }
 
 test "phase cwd rejects path traversal" {

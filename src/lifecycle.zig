@@ -323,10 +323,10 @@ test "precheck abort stops startup and warn continues" {
 
     try std.testing.expectError(error.PrecheckFailed, lifecycle.startAll("all", &writer));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: warn-check check failed") != null);
-    try assertRecordedCommandContains(&recorder, "false");
+    try proc_runner.expectCommandContaining(&recorder, "false");
 }
 
-test "startAll with idle docker and service records compose and service startup" {
+test "startAll starts idle docker before service command" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -360,10 +360,11 @@ test "startAll with idle docker and service records compose and service startup"
 
     try lifecycle.startAll("all", &writer);
 
-    try assertRecordedCommandContains(&recorder, "docker compose");
-    try assertRecordedCommandContains(&recorder, "cd '/tmp/demo/backend' && serve");
-    try assertRecordedCommandOrder(&recorder, "docker compose", "cd '/tmp/demo/backend' && serve");
-    try assertNoSizingCommands(&recorder);
+    try proc_runner.expectCommandContaining(&recorder, "docker compose");
+    try proc_runner.expectCommandContaining(&recorder, "cd '/tmp/demo/backend' && serve");
+    try proc_runner.expectCommandOrder(&recorder, "docker compose", "cd '/tmp/demo/backend' && serve");
+    try proc_runner.expectNoSizingCommands(&recorder);
+    try proc_runner.expectNoRemainingResponses(&recorder);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }
 
@@ -768,7 +769,7 @@ test "docker restart stops compose before reporting missing session" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Session not running") != null);
 }
 
-test "docker restart records compose down before compose up" {
+test "docker restart runs compose down before compose up" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -803,10 +804,11 @@ test "docker restart records compose down before compose up" {
 
     try lifecycle.restartTarget("docker", &writer);
 
-    try assertRecordedCommandOrder(&recorder, "down", "docker compose");
+    try proc_runner.expectCommandOrder(&recorder, "down", "docker compose");
     try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items.len);
-    try std.testing.expectEqual(std.Io.Duration.fromSeconds(2), recorder.sleeps.items[0].duration);
-    try assertRecordedCommandContains(&recorder, "docker compose");
+    try std.testing.expectEqual(waits.docker_ready_settle, recorder.sleeps.items[0].duration);
+    try proc_runner.expectCommandContaining(&recorder, "docker compose");
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
 test "startAll dispatches quoted service command to tmux" {
@@ -840,47 +842,4 @@ test "startAll dispatches quoted service command to tmux" {
     try std.testing.expectEqualStrings("demo:api", send_keys.argv[3]);
     try std.testing.expectEqualStrings("cd '/tmp/demo app/backend' && serve", send_keys.argv[4]);
     try std.testing.expectEqualStrings("Enter", send_keys.argv[5]);
-}
-
-fn assertRecordedCommandContains(recorder: *const proc_runner.Recorder, needle: []const u8) !void {
-    try std.testing.expect(findRecordedCommandContaining(recorder, needle) != null);
-}
-
-fn assertRecordedCommandOrder(recorder: *const proc_runner.Recorder, before: []const u8, after: []const u8) !void {
-    var before_index: ?usize = null;
-    var after_index: ?usize = null;
-    for (recorder.commands.items, 0..) |command, index| {
-        if (before_index == null and recordedCommandContains(command, before)) before_index = index;
-        if (after_index == null and recordedCommandContains(command, after)) after_index = index;
-    }
-    try std.testing.expect(before_index != null);
-    try std.testing.expect(after_index != null);
-    try std.testing.expect(before_index.? < after_index.?);
-}
-
-fn findRecordedCommandContaining(recorder: *const proc_runner.Recorder, needle: []const u8) ?proc_runner.RecordedCommand {
-    for (recorder.commands.items) |command| {
-        if (recordedCommandContains(command, needle)) return command;
-    }
-    return null;
-}
-
-fn recordedCommandContains(command: proc_runner.RecordedCommand, needle: []const u8) bool {
-    for (command.argv) |arg| {
-        if (std.mem.indexOf(u8, arg, needle) != null) return true;
-    }
-    if (command.cwd) |cwd| return std.mem.indexOf(u8, cwd, needle) != null;
-    return false;
-}
-
-fn assertNoSizingCommands(recorder: *const proc_runner.Recorder) !void {
-    for (recorder.commands.items) |command| {
-        if (std.mem.eql(u8, command.argv[0], "tmux") and command.argv.len > 1) {
-            try std.testing.expect(!std.mem.eql(u8, command.argv[1], "resize-window"));
-            try std.testing.expect(!std.mem.eql(u8, command.argv[1], "resize-pane"));
-            if (std.mem.eql(u8, command.argv[1], "set-option") or std.mem.eql(u8, command.argv[1], "set-window-option")) {
-                for (command.argv) |arg| try std.testing.expect(!std.mem.eql(u8, arg, "window-size"));
-            }
-        }
-    }
 }

@@ -14,6 +14,9 @@ const shell = @import("infra/shell.zig");
 const tmux_client = @import("infra/tmux.zig");
 const tmux_setup = @import("tmux_setup.zig");
 const validate = @import("validate.zig");
+const waits = @import("waits.zig");
+
+const bye_kill_settle = std.Io.Duration.fromSeconds(1);
 
 pub const Runtime = struct {
     gpa: std.mem.Allocator,
@@ -152,7 +155,7 @@ pub const Runtime = struct {
         }
         try self.lifecycle().stopAll(writer);
         self.cleanupPipePane() catch {};
-        self.runner().sleep(std.Io.Duration.fromSeconds(1));
+        self.runner().sleep(bye_kill_settle);
         const tx = self.tmux();
         try tx.killSession();
     }
@@ -390,7 +393,7 @@ test "exec reports missing containers and uses shell override" {
     try std.testing.expectEqualStrings("bash", command.argv[6]);
 }
 
-test "exec default command is passed directly without shell wrapping" {
+test "exec passes default command without shell wrapping" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -419,7 +422,7 @@ test "exec default command is passed directly without shell wrapping" {
     try std.testing.expectEqualStrings("psql", command.argv[6]);
     try std.testing.expectEqualStrings("-c", command.argv[7]);
     try std.testing.expectEqualStrings("select 1", command.argv[8]);
-    try std.testing.expect(!recordedCommandContains(command, "bash -lc"));
+    try std.testing.expect(!proc_runner.commandContains(command, "bash -lc"));
 }
 
 test "bye kills session even when pipe cleanup fails" {
@@ -452,7 +455,7 @@ test "bye kills session even when pipe cleanup fails" {
     try std.testing.expectEqualStrings("kill-session", kill.argv[1]);
 }
 
-test "bye records stop cleanup sleep and kill-session despite pipe cleanup failure" {
+test "bye reaches kill-session after cleanup failure" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -484,13 +487,14 @@ test "bye records stop cleanup sleep and kill-session despite pipe cleanup failu
     try runtime.byeUnlocked(&writer);
 
     const kill_index = recorder.commands.items.len - 1;
-    try assertRecordedCommandOrder(&recorder, "C-c", "down");
-    try assertRecordedCommandOrder(&recorder, "down", "pipe-pane");
+    try proc_runner.expectCommandOrder(&recorder, "C-c", "down");
+    try proc_runner.expectCommandOrder(&recorder, "down", "pipe-pane");
     try std.testing.expectEqualStrings("kill-session", recorder.commands.items[kill_index].argv[1]);
     try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items.len);
-    try std.testing.expectEqual(std.Io.Duration.fromSeconds(2), recorder.sleeps.items[0].duration);
-    try std.testing.expectEqual(std.Io.Duration.fromSeconds(1), recorder.sleeps.items[1].duration);
-    try std.testing.expectEqual(kill_index, recorder.sleeps.items[1].command_count);
+    try std.testing.expectEqual(waits.docker_ready_settle, recorder.sleeps.items[0].duration);
+    try std.testing.expectEqual(bye_kill_settle, recorder.sleeps.items[1].duration);
+    try std.testing.expectEqual(kill_index, recorder.sleeps.items[1].commands_before);
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
 test "attach from tmux switches client without mutating window sizes" {
@@ -555,10 +559,10 @@ test "hello creates session with interactive tmuxp and no sizing commands" {
     const load = findRecordedCommand(&recorder, "tmuxp").?;
     try std.testing.expect(load.interactive);
     try std.testing.expectEqualStrings("load", load.argv[1]);
-    try assertRecordedCommandContains(&recorder, "set-option");
-    try assertRecordedCommandContains(&recorder, "@zask_dash_mode");
-    try assertRecordedCommandContains(&recorder, "bind-key");
-    try assertNoSizingCommands(&recorder);
+    try proc_runner.expectCommandContaining(&recorder, "set-option");
+    try proc_runner.expectCommandContaining(&recorder, "@zask_dash_mode");
+    try proc_runner.expectCommandContaining(&recorder, "bind-key");
+    try proc_runner.expectNoSizingCommands(&recorder);
 }
 
 test "hello attaches existing session when another hello holds the lock" {
@@ -608,49 +612,6 @@ fn findRecordedCommand(recorder: *const proc_runner.Recorder, executable: []cons
         if (std.mem.eql(u8, command.argv[0], executable)) return command;
     }
     return null;
-}
-
-fn findRecordedCommandContaining(recorder: *const proc_runner.Recorder, needle: []const u8) ?proc_runner.RecordedCommand {
-    for (recorder.commands.items) |command| {
-        if (recordedCommandContains(command, needle)) return command;
-    }
-    return null;
-}
-
-fn assertRecordedCommandContains(recorder: *const proc_runner.Recorder, needle: []const u8) !void {
-    try std.testing.expect(findRecordedCommandContaining(recorder, needle) != null);
-}
-
-fn assertRecordedCommandOrder(recorder: *const proc_runner.Recorder, before: []const u8, after: []const u8) !void {
-    var before_index: ?usize = null;
-    var after_index: ?usize = null;
-    for (recorder.commands.items, 0..) |command, index| {
-        if (before_index == null and recordedCommandContains(command, before)) before_index = index;
-        if (after_index == null and recordedCommandContains(command, after)) after_index = index;
-    }
-    try std.testing.expect(before_index != null);
-    try std.testing.expect(after_index != null);
-    try std.testing.expect(before_index.? < after_index.?);
-}
-
-fn recordedCommandContains(command: proc_runner.RecordedCommand, needle: []const u8) bool {
-    for (command.argv) |arg| {
-        if (std.mem.indexOf(u8, arg, needle) != null) return true;
-    }
-    if (command.cwd) |cwd| return std.mem.indexOf(u8, cwd, needle) != null;
-    return false;
-}
-
-fn assertNoSizingCommands(recorder: *const proc_runner.Recorder) !void {
-    for (recorder.commands.items) |command| {
-        if (std.mem.eql(u8, command.argv[0], "tmux") and command.argv.len > 1) {
-            try std.testing.expect(!std.mem.eql(u8, command.argv[1], "resize-window"));
-            try std.testing.expect(!std.mem.eql(u8, command.argv[1], "resize-pane"));
-            if (std.mem.eql(u8, command.argv[1], "set-option") or std.mem.eql(u8, command.argv[1], "set-window-option")) {
-                for (command.argv) |arg| try std.testing.expect(!std.mem.eql(u8, arg, "window-size"));
-            }
-        }
-    }
 }
 
 fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.Config) Runtime {

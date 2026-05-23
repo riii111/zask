@@ -46,7 +46,7 @@ pub const Runner = struct {
 
     pub fn sleep(self: Runner, duration: std.Io.Duration) void {
         if (self.recorder) |recorder| {
-            recorder.recordSleep(duration) catch return;
+            recorder.recordSleep(duration);
             return;
         }
         std.Io.sleep(self.io, duration, .awake) catch {};
@@ -132,8 +132,8 @@ pub const Recorder = struct {
         });
     }
 
-    pub fn recordSleep(self: *Recorder, duration: std.Io.Duration) !void {
-        try self.sleeps.append(self.gpa, .{ .duration = duration, .command_count = self.commands.items.len });
+    pub fn recordSleep(self: *Recorder, duration: std.Io.Duration) void {
+        self.sleeps.append(self.gpa, .{ .duration = duration, .commands_before = self.commands.items.len }) catch @panic("failed to record sleep");
     }
 
     fn record(self: *Recorder, argv: []const []const u8, cwd: ?[]const u8, interactive: bool) !std.process.RunResult {
@@ -170,8 +170,56 @@ pub const RecordedCommand = struct {
 
 pub const RecordedSleep = struct {
     duration: std.Io.Duration,
-    command_count: usize,
+    commands_before: usize,
 };
+
+pub fn commandContains(command: RecordedCommand, needle: []const u8) bool {
+    for (command.argv) |arg| {
+        if (std.mem.indexOf(u8, arg, needle) != null) return true;
+    }
+    if (command.cwd) |cwd| return std.mem.indexOf(u8, cwd, needle) != null;
+    return false;
+}
+
+pub fn findCommandContaining(recorder: *const Recorder, needle: []const u8) ?RecordedCommand {
+    for (recorder.commands.items) |command| {
+        if (commandContains(command, needle)) return command;
+    }
+    return null;
+}
+
+pub fn expectCommandContaining(recorder: *const Recorder, needle: []const u8) !void {
+    try std.testing.expect(findCommandContaining(recorder, needle) != null);
+}
+
+pub fn expectCommandOrder(recorder: *const Recorder, before: []const u8, after: []const u8) !void {
+    const before_index = findCommandIndexContaining(recorder, before, 0) orelse return error.CommandNotFound;
+    const after_index = findCommandIndexContaining(recorder, after, before_index + 1) orelse return error.CommandNotFound;
+    try std.testing.expect(before_index < after_index);
+}
+
+pub fn expectNoSizingCommands(recorder: *const Recorder) !void {
+    for (recorder.commands.items) |command| {
+        if (std.mem.eql(u8, command.argv[0], "tmux") and command.argv.len > 1) {
+            try std.testing.expect(!std.mem.eql(u8, command.argv[1], "resize-window"));
+            try std.testing.expect(!std.mem.eql(u8, command.argv[1], "resize-pane"));
+            if (std.mem.eql(u8, command.argv[1], "set-option") or std.mem.eql(u8, command.argv[1], "set-window-option")) {
+                for (command.argv) |arg| try std.testing.expect(!std.mem.eql(u8, arg, "window-size"));
+            }
+        }
+    }
+}
+
+pub fn expectNoRemainingResponses(recorder: *const Recorder) !void {
+    try std.testing.expectEqual(@as(usize, 0), recorder.responses.items.len);
+}
+
+fn findCommandIndexContaining(recorder: *const Recorder, needle: []const u8, start: usize) ?usize {
+    for (recorder.commands.items[start..], start..) |command, index| {
+        if (commandContains(command, needle)) return index;
+    }
+    return null;
+}
 
 const RecordedResponse = struct {
     stdout: []const u8,
@@ -199,7 +247,7 @@ test "recorder captures commands without spawning processes" {
     run.sleep(std.Io.Duration.fromSeconds(2));
     try std.testing.expectEqual(@as(usize, 1), recorder.sleeps.items.len);
     try std.testing.expectEqual(std.Io.Duration.fromSeconds(2), recorder.sleeps.items[0].duration);
-    try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items[0].command_count);
+    try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items[0].commands_before);
 }
 
 test "recorder returns queued responses in order" {
