@@ -61,12 +61,12 @@ pub const Lifecycle = struct {
     }
 
     pub fn startTarget(self: Lifecycle, target: ?[]const u8, writer: *std.Io.Writer) !void {
+        const t = target orelse "--all";
         if (!self.tmux.hasSession()) {
             try writer.writeAll("Session not running. Run 'hello' first.\n");
             try writer.flush();
             return error.SessionNotRunning;
         }
-        const t = target orelse "--all";
         if (std.mem.eql(u8, t, "--all")) return self.startAll("all", writer);
         if (std.mem.eql(u8, t, "docker")) {
             if (try self.startDocker(writer)) return self.waitForDocker(writer);
@@ -91,12 +91,13 @@ pub const Lifecycle = struct {
     }
 
     pub fn restartTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
-        if (!self.tmux.hasSession()) return sessionNotRunning(writer);
         if (std.mem.eql(u8, target, "docker")) {
             try self.stopDocker(writer);
+            if (!self.tmux.hasSession()) return sessionNotRunning(writer);
             if (try self.startDocker(writer)) return self.waitForDocker(writer);
             return;
         }
+        if (!self.tmux.hasSession()) return sessionNotRunning(writer);
         if (self.cfg.resolveGroup(self.gpa, target)) |services| {
             for (services) |svc| try self.restartService(svc, writer);
         } else |_| try self.restartService(target, writer);
@@ -133,11 +134,11 @@ pub const Lifecycle = struct {
 
     fn startDocker(self: Lifecycle, writer: *std.Io.Writer) !bool {
         if (!self.cfg.dockerEnabled()) return false;
-        if (self.docker.running()) {
+        try self.waitForWindow("docker");
+        if (self.tmux.paneRunning("docker")) {
             try writeProgress(writer, "Docker already running\n", .{});
             return false;
         }
-        try self.waitForWindow("docker");
         try writeProgress(writer, "Starting Docker...\n", .{});
         try self.tmux.sendKeys(try self.tmux.target("docker"), &.{ try std.fmt.allocPrint(self.gpa, "cd {s} && COMPOSE_MENU=false docker compose -f {s} up", .{ try shell.quote(self.gpa, try self.cfg.dockerDir(self.gpa)), try shell.quote(self.gpa, self.cfg.dockerComposeFile()) }), "Enter" });
         return true;
@@ -320,7 +321,7 @@ test "docker stop reaches compose down without tmux session" {
     try std.testing.expectEqualStrings("/tmp/demo", down.cwd.?);
 }
 
-test "docker start is a no-op when compose services already run" {
+test "docker start is a no-op when docker pane is running" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -333,7 +334,8 @@ test "docker start is a no-op when compose services already run" {
     var recorder = proc_runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("", "", .{ .exited = 0 });
-    try recorder.enqueue("api\n", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|docker\n", "", .{ .exited = 0 });
+    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = std.Io.null, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     const lifecycle = Lifecycle{
@@ -348,9 +350,10 @@ test "docker start is a no-op when compose services already run" {
 
     try lifecycle.startTarget("docker", &writer);
 
-    try std.testing.expectEqual(@as(usize, 2), recorder.commands.items.len);
+    try std.testing.expectEqual(@as(usize, 4), recorder.commands.items.len);
     try std.testing.expectEqualStrings("has-session", recorder.commands.items[0].argv[1]);
-    try std.testing.expectEqualStrings("ps", recorder.commands.items[1].argv[4]);
+    try std.testing.expectEqualStrings("list-panes", recorder.commands.items[1].argv[1]);
+    try std.testing.expectEqualStrings("pgrep", recorder.commands.items[3].argv[0]);
 }
 
 test "docker start disables compose menu and waits when started" {
@@ -366,7 +369,7 @@ test "docker start disables compose menu and waits when started" {
     var recorder = proc_runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("", "", .{ .exited = 0 });
-    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("NAME SERVICE STATUS\none api running\n", "", .{ .exited = 0 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = std.Io.null, .recorder = &recorder };
@@ -383,10 +386,42 @@ test "docker start disables compose menu and waits when started" {
 
     try lifecycle.startTarget("docker", &writer);
 
-    const send_keys = recorder.commands.items[3];
+    const send_keys = recorder.commands.items[4];
     try std.testing.expectEqualStrings("send-keys", send_keys.argv[1]);
     try std.testing.expect(std.mem.indexOf(u8, send_keys.argv[4], "COMPOSE_MENU=false") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
+}
+
+test "docker restart stops compose before reporting missing session" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"enabled": true},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    recorder.term = .{ .exited = 1 };
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = std.Io.null, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const lifecycle = Lifecycle{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
+        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.SessionNotRunning, lifecycle.restartTarget("docker", &writer));
+
+    try std.testing.expectEqualStrings("docker", recorder.commands.items[1].argv[0]);
+    try std.testing.expectEqualStrings("down", recorder.commands.items[1].argv[4]);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Session not running") != null);
 }
 
 test "startAll dispatches quoted service command to tmux" {

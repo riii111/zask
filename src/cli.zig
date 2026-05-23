@@ -122,7 +122,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
         .up => rt.up(optionalTarget(parsed.args), writer),
         .stop => rt.stop(optionalTarget(parsed.args), writer),
         .restart => rt.restart(try requiredTarget(parsed.args), writer),
-        .exec => rt.exec(try oneArg(parsed.args), parsed.args.len > 1 and std.mem.eql(u8, parsed.args[1], "--shell"), writer),
+        .exec => rt.exec(try oneArg(parsed.args), try execUseShell(parsed.args), writer),
         .dashboard => rt.dashboard(writer),
         .monitor => rt.monitor(writer),
     };
@@ -247,6 +247,16 @@ fn requiredTarget(args: []const []const u8) ![]const u8 {
     return normalizeTarget(try oneArg(args));
 }
 
+fn execUseShell(args: []const []const u8) !bool {
+    if (args.len == 0) return error.InvalidArguments;
+    var use_shell = false;
+    for (args[1..]) |arg| {
+        if (!std.mem.eql(u8, arg, "--shell")) return error.InvalidArguments;
+        use_shell = true;
+    }
+    return use_shell;
+}
+
 fn normalizeTarget(target: []const u8) []const u8 {
     if (std.mem.eql(u8, target, "--docker")) return "docker";
     return target;
@@ -296,6 +306,12 @@ test "normalizes docker target aliases" {
     try std.testing.expectEqualStrings("api", normalizeTarget("api"));
     try std.testing.expectEqualStrings("docker", (try requiredTarget(&.{"--docker"})));
     try std.testing.expect(optionalTarget(&.{}) == null);
+}
+
+test "parses exec shell flag position strictly" {
+    try std.testing.expect(try execUseShell(&.{ "api", "--shell" }));
+    try std.testing.expect(!try execUseShell(&.{"api"}));
+    try std.testing.expectError(error.InvalidArguments, execUseShell(&.{ "api", "foo", "--shell" }));
 }
 
 test "parses project command form" {

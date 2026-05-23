@@ -29,12 +29,7 @@ pub const Compose = struct {
     }
 
     pub fn execInteractive(self: Compose, container: []const u8, command: []const u8) !void {
-        var argv: std.ArrayList([]const u8) = .empty;
-        defer argv.deinit(self.gpa);
-        try argv.appendSlice(self.gpa, &.{ "docker", "compose", "-f", self.file, "exec", container });
-        var parts = std.mem.tokenizeScalar(u8, command, ' ');
-        while (parts.next()) |part| try argv.append(self.gpa, part);
-        _ = try self.runner.runInteractiveCheckedCwd(argv.items, self.dir);
+        _ = try self.runner.runInteractiveCheckedCwd(&.{ "docker", "compose", "-f", self.file, "exec", container, "bash", "-lc", command }, self.dir);
     }
 };
 
@@ -60,4 +55,19 @@ test "running ignores empty service output" {
     const compose = Compose{ .gpa = std.testing.allocator, .runner = run, .dir = "/tmp/demo/docker", .file = "compose.yaml" };
 
     try std.testing.expect(!compose.running());
+}
+
+test "execInteractive preserves command as shell string" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
+    const compose = Compose{ .gpa = std.testing.allocator, .runner = run, .dir = "/tmp/demo/docker", .file = "compose.yaml" };
+
+    try compose.execInteractive("db", "psql -c 'select 1'");
+
+    const command = recorder.commands.items[0];
+    try std.testing.expect(command.interactive);
+    try std.testing.expectEqualStrings("bash", command.argv[6]);
+    try std.testing.expectEqualStrings("-lc", command.argv[7]);
+    try std.testing.expectEqualStrings("psql -c 'select 1'", command.argv[8]);
 }

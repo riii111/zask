@@ -117,10 +117,10 @@ pub const Runtime = struct {
         try tx.setOption("prefix", "C-q");
         try tx.setOption("status-format[0]", "#[align=left]#{T;=/#{status-left-length}:status-left}#[align=right]#{T;=/#{status-right-length}:status-right}");
         try tx.setOption("@zask_dash_mode", "all");
-        try tx.bindRunShell("m", "mode=$(tmux show-option -qv @zask_dash_mode); if [ \"$mode\" = \"all\" ]; then tmux set-option @zask_dash_mode bad; else tmux set-option @zask_dash_mode all; fi");
-        const quoted_zask_path = try shell.quote(self.gpa, self.zask_path);
-        const quoted_config_path = try shell.quote(self.gpa, self.config_path);
-        try tx.bindRunShell("f", try std.fmt.allocPrint(self.gpa, "{s} --config {s} follow \"#{{window_name}}\"", .{ quoted_zask_path, quoted_config_path }));
+        try tx.setOption("@zask_path", self.zask_path);
+        try tx.setOption("@zask_config_path", self.config_path);
+        try tx.bindRunShell("m", "session=\"#{session_name}\"; mode=$(tmux show-option -t \"$session\" -qv @zask_dash_mode); if [ \"$mode\" = \"all\" ]; then tmux set-option -t \"$session\" @zask_dash_mode bad; else tmux set-option -t \"$session\" @zask_dash_mode all; fi");
+        try tx.bindRunShell("f", "session=\"#{session_name}\"; zask=$(tmux show-option -t \"$session\" -qv @zask_path); config=$(tmux show-option -t \"$session\" -qv @zask_config_path); \"$zask\" --config \"$config\" follow \"#{window_name}\"");
         try self.resizeWindows();
         try self.initLogDir();
         try self.setupPipePane();

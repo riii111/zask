@@ -91,8 +91,8 @@ pub const Client = struct {
 
     pub fn paneRunning(self: Client, window: []const u8) bool {
         const info = self.paneInfo(window) catch return false;
+        defer info.deinit(self.gpa);
         if (info.dead) return false;
-        if (!isShellCommand(info.command)) return true;
         const result = self.runner.run(&.{ "pgrep", "-P", info.pid }) catch return false;
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
@@ -116,6 +116,7 @@ pub const Client = struct {
             .exit_code = try self.gpa.dupe(u8, exit_code),
             .pid = try self.gpa.dupe(u8, pid),
             .command = try self.gpa.dupe(u8, command),
+            .owned = true,
         };
     }
 
@@ -142,6 +143,14 @@ pub const PaneInfo = struct {
     exit_code: []const u8 = "0",
     pid: []const u8 = "0",
     command: []const u8 = "",
+    owned: bool = false,
+
+    pub fn deinit(self: PaneInfo, gpa: std.mem.Allocator) void {
+        if (!self.owned) return;
+        gpa.free(self.exit_code);
+        gpa.free(self.pid);
+        gpa.free(self.command);
+    }
 };
 
 pub fn isShellCommand(command: []const u8) bool {
@@ -177,4 +186,18 @@ test "resizeWindowToActiveClient records resize command" {
     try std.testing.expectEqualStrings("resize-window", command.argv[1]);
     try std.testing.expectEqualStrings("-a", command.argv[2]);
     try std.testing.expectEqualStrings("demo:api", command.argv[4]);
+}
+
+test "paneRunning checks pane child processes" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
+    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
+    const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
+
+    try std.testing.expect(client.paneRunning("api"));
+    try std.testing.expectEqualStrings("pgrep", recorder.commands.items[1].argv[0]);
+    try std.testing.expectEqualStrings("-P", recorder.commands.items[1].argv[1]);
+    try std.testing.expectEqualStrings("12345", recorder.commands.items[1].argv[2]);
 }
