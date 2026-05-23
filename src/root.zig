@@ -7,6 +7,7 @@ pub const dashboard = @import("ui/dashboard.zig");
 pub const docker = @import("infra/docker.zig");
 pub const lifecycle = @import("lifecycle.zig");
 pub const lock = @import("infra/lock.zig");
+pub const log_session = @import("log_session.zig");
 pub const paths = @import("infra/paths.zig");
 pub const render = @import("ui/render.zig");
 pub const runner = @import("infra/runner.zig");

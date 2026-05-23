@@ -5,6 +5,7 @@ const docker_client = @import("infra/docker.zig");
 const env = @import("infra/env.zig");
 const lifecycle_mod = @import("lifecycle.zig");
 const lock = @import("infra/lock.zig");
+const log_session = @import("log_session.zig");
 const paths = @import("infra/paths.zig");
 const render = @import("ui/render.zig");
 const proc_runner = @import("infra/runner.zig");
@@ -84,7 +85,7 @@ pub const Runtime = struct {
             try writer.flush();
             return error.SessionNotRunning;
         }
-        const log_dir = self.logDir() catch |err| switch (err) {
+        const log_dir = (try self.logSession()).dir() catch |err| switch (err) {
             error.LogSessionNotInitialized => {
                 try writer.writeAll("Log session not initialized. Run 'hello' first.\n");
                 try writer.flush();
@@ -123,7 +124,7 @@ pub const Runtime = struct {
         try tx.bindRunShell("m", try std.fmt.allocPrint(self.gpa, "session=\"#{{session_name}}\"; mode=$(tmux show-option -t \"$session\" -qv {s}); if [ \"$mode\" = \"all\" ]; then tmux set-option -t \"$session\" {s} bad; else tmux set-option -t \"$session\" {s} all; fi", .{ tmux_options.dash_mode, tmux_options.dash_mode, tmux_options.dash_mode }));
         try tx.bindRunShell("f", try std.fmt.allocPrint(self.gpa, "session=\"#{{session_name}}\"; zask=$(tmux show-option -t \"$session\" -qv {s}); config=$(tmux show-option -t \"$session\" -qv {s}); \"$zask\" --config \"$config\" follow \"#{{window_name}}\"", .{ tmux_options.zask_path, tmux_options.config_path }));
         try self.resizeWindows();
-        try self.initLogDir();
+        try (try self.logSession()).init();
         try self.setupPipePane();
         try (try self.lifecycle()).startAll(profile, writer);
         try self.attach();
@@ -244,6 +245,17 @@ pub const Runtime = struct {
         };
     }
 
+    fn logSession(self: Runtime) !log_session.Manager {
+        return .{
+            .gpa = self.gpa,
+            .io = self.io,
+            .environ = self.environ,
+            .cfg = self.cfg,
+            .runner = self.runner(),
+            .tmux = try self.tmux(),
+        };
+    }
+
     fn acquireLock(self: Runtime) !lock.Lock {
         return lock.Lock.acquire(self.gpa, self.runner(), try self.cfg.projectName(), try paths.runtimeBase(self.gpa, self.environ));
     }
@@ -259,16 +271,8 @@ pub const Runtime = struct {
         return path;
     }
 
-    fn initLogDir(self: Runtime) !void {
-        const session_id = try self.logSessionId();
-        const dir = try self.logDirForSession(session_id);
-        try self.runner().runCheckedDiscard(&.{ "mkdir", "-p", dir });
-        try (try self.tmux()).setOption(tmux_options.log_session_id, session_id);
-        try self.cleanupOldLogs();
-    }
-
     fn setupPipePane(self: Runtime) !void {
-        const dir = try self.logDir();
+        const dir = try (try self.logSession()).dir();
         for (try self.cfg.services()) |service| {
             const name = try config.Config.serviceName(service);
             _ = (try self.tmux()).pipePane(try (try self.tmux()).target(name), try std.fmt.allocPrint(self.gpa, "cat >> {s}", .{try shell.quote(self.gpa, try std.fs.path.join(self.gpa, &.{ dir, try std.fmt.allocPrint(self.gpa, "{s}.log", .{name}) }))})) catch {};
@@ -309,57 +313,6 @@ pub const Runtime = struct {
         return env.exists(self.environ, "TMUX");
     }
 
-    fn logDir(self: Runtime) ![]const u8 {
-        const session_id = (try self.tmux()).showOption(tmux_options.log_session_id) catch null;
-        const value = session_id orelse return error.LogSessionNotInitialized;
-        try validateLogSessionId(value);
-        return self.logDirForSession(value);
-    }
-
-    fn logBaseDir(self: Runtime) ![]const u8 {
-        return std.fs.path.join(self.gpa, &.{ try paths.dataBase(self.gpa, self.environ), try self.cfg.projectName(), "logs" });
-    }
-
-    fn logDirForSession(self: Runtime, session_id: []const u8) ![]const u8 {
-        return std.fs.path.join(self.gpa, &.{ try self.logBaseDir(), session_id });
-    }
-
-    fn logSessionId(self: Runtime) ![]const u8 {
-        const result = try self.run(&.{ "date", "+%Y%m%d_%H%M%S" });
-        defer self.gpa.free(result.stdout);
-        defer self.gpa.free(result.stderr);
-        return try self.gpa.dupe(u8, std.mem.trim(u8, result.stdout, " \t\r\n"));
-    }
-
-    fn cleanupOldLogs(self: Runtime) !void {
-        const base = try self.logBaseDir();
-        const keep = self.cfg.logKeepSessions();
-        if (keep < 0) return;
-        var dir = std.Io.Dir.openDirAbsolute(self.io, base, .{ .iterate = true }) catch return;
-        defer dir.close(self.io);
-
-        var entries: std.ArrayList(LogEntry) = .empty;
-        defer {
-            for (entries.items) |entry| self.gpa.free(entry.name);
-            entries.deinit(self.gpa);
-        }
-        var it = dir.iterate();
-        while (try it.next(self.io)) |entry| {
-            if (entry.kind != .directory) continue;
-            validateLogSessionId(entry.name) catch continue;
-            const stat = dir.statFile(self.io, entry.name, .{}) catch continue;
-            try entries.append(self.gpa, .{ .name = try self.gpa.dupe(u8, entry.name), .mtime = stat.mtime.nanoseconds });
-        }
-        std.mem.sort(LogEntry, entries.items, {}, logEntryNewer);
-
-        const keep_count: usize = @intCast(keep);
-        if (entries.items.len <= keep_count) return;
-        for (entries.items[keep_count..]) |entry| {
-            const path = try std.fs.path.join(self.gpa, &.{ base, entry.name });
-            std.Io.Dir.cwd().deleteTree(self.io, path) catch {};
-        }
-    }
-
     fn pathExists(self: Runtime, path: []const u8) !bool {
         return paths.exists(self.io, path);
     }
@@ -377,36 +330,9 @@ fn serviceListContains(output: []const u8, name: []const u8) bool {
     return false;
 }
 
-const LogEntry = struct {
-    name: []const u8,
-    mtime: i96,
-};
-
-fn logEntryNewer(_: void, lhs: LogEntry, rhs: LogEntry) bool {
-    return lhs.mtime > rhs.mtime;
-}
-
-fn validateLogSessionId(value: []const u8) !void {
-    if (value.len == 0) return error.InvalidLogSessionId;
-    for (value) |byte| {
-        switch (byte) {
-            '0'...'9', '_' => {},
-            else => return error.InvalidLogSessionId,
-        }
-    }
-}
-
 test "matches docker compose services by full line" {
     try std.testing.expect(serviceListContains("api\ndb\n", "db"));
     try std.testing.expect(serviceListContains("api\r\ndb\r\n", "api"));
     try std.testing.expect(!serviceListContains("mydb\ndb-replica\n", "db"));
     try std.testing.expect(serviceListContains(" api \n", "api"));
-}
-
-test "validates log session ids" {
-    try validateLogSessionId("20260523_010203");
-    try std.testing.expect(logEntryNewer({}, .{ .name = "new", .mtime = 2 }, .{ .name = "old", .mtime = 1 }));
-    try std.testing.expectError(error.InvalidLogSessionId, validateLogSessionId("../bad"));
-    try std.testing.expectError(error.InvalidLogSessionId, validateLogSessionId("bad name"));
-    try std.testing.expectError(error.InvalidLogSessionId, validateLogSessionId(""));
 }
