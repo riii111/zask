@@ -1,19 +1,11 @@
 const std = @import("std");
 const config = @import("config.zig");
-const config_value = @import("config_value.zig");
 const docker_client = @import("infra/docker.zig");
+const phases = @import("phases.zig");
 const proc_runner = @import("infra/runner.zig");
 const shell = @import("infra/shell.zig");
 const tmux_client = @import("infra/tmux.zig");
-
-const window_ready_attempts = 20;
-const window_ready_interval = std.Io.Duration.fromMilliseconds(300);
-const stop_attempts = 10;
-const stop_interval = std.Io.Duration.fromMilliseconds(500);
-const docker_ready_interval = std.Io.Duration.fromSeconds(1);
-const docker_ready_settle = std.Io.Duration.fromSeconds(2);
-const port_wait_interval_seconds = 2;
-const port_wait_interval = std.Io.Duration.fromSeconds(port_wait_interval_seconds);
+const waits = @import("waits.zig");
 
 pub const Lifecycle = struct {
     gpa: std.mem.Allocator,
@@ -23,26 +15,26 @@ pub const Lifecycle = struct {
     docker: docker_client.Compose,
 
     pub fn startAll(self: Lifecycle, profile: []const u8, writer: *std.Io.Writer) !void {
-        try self.runPrechecks(writer);
+        try phases.runPrechecks(self, writer);
         if (self.cfg.dockerEnabled()) {
             try self.ensureDockerStarted(writer);
-            self.ensureDockerReady(writer) catch {
+            waits.ensureDockerReady(self, writer) catch {
                 try writer.writeAll("Error: Docker failed to start\n");
                 return error.DockerFailed;
             };
         }
         if (std.mem.eql(u8, profile, "docker")) return;
-        const phases = self.cfg.phases();
-        if (phases.len == 0) {
+        const phase_list = self.cfg.phases();
+        if (phase_list.len == 0) {
             for (try self.cfg.services()) |service| try self.startService(try config.Config.serviceName(service), writer);
             return;
         }
-        for (phases) |phase| {
+        for (phase_list) |phase| {
             if (phase != .object) continue;
-            switch (phaseKind(phase)) {
+            switch (phases.phaseKind(phase)) {
                 .docker => {},
-                .command => try self.runCommandPhase(phase, profile, writer),
-                .services => try self.runServicePhase(phase, profile, writer),
+                .command => try phases.runCommandPhase(self, phase, profile, writer),
+                .services => try phases.runServicePhase(self, phase, profile, writer),
             }
         }
     }
@@ -64,7 +56,7 @@ pub const Lifecycle = struct {
         if (std.mem.eql(u8, t, "--all")) return self.startAll("all", writer);
         if (std.mem.eql(u8, t, "docker")) {
             try self.ensureDockerStarted(writer);
-            return self.ensureDockerReady(writer);
+            return waits.ensureDockerReady(self, writer);
         }
         if (self.cfg.resolveGroup(self.gpa, t)) |services| {
             for (services) |svc| try self.startService(svc, writer);
@@ -89,7 +81,7 @@ pub const Lifecycle = struct {
             try self.stopDocker(writer);
             try self.ensureSessionActive(writer);
             try self.ensureDockerStarted(writer);
-            return self.ensureDockerReady(writer);
+            return waits.ensureDockerReady(self, writer);
         }
         try self.ensureSessionActive(writer);
         if (self.cfg.resolveGroup(self.gpa, target)) |services| {
@@ -97,7 +89,7 @@ pub const Lifecycle = struct {
         } else |_| try self.restartService(target, writer);
     }
 
-    fn startService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
+    pub fn startService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
         try self.ensureServiceRunning(service, writer);
     }
 
@@ -119,7 +111,7 @@ pub const Lifecycle = struct {
 
     fn ensureServiceRunning(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
         const value = try self.cfg.findService(service);
-        self.ensureWindowReady(service) catch |err| switch (err) {
+        waits.ensureWindowReady(self, service) catch |err| switch (err) {
             error.WindowNotReady => {
                 try writeProgress(writer, "Warning: window for {s} not ready\n", .{service});
                 return;
@@ -163,12 +155,12 @@ pub const Lifecycle = struct {
         const target = try self.tmux.target(service);
         defer self.gpa.free(target);
         try self.tmux.sendKeys(target, &.{"C-c"});
-        try self.waitForStopped(service, writer);
+        try waits.waitForStopped(self, service, writer);
     }
 
     fn ensureDockerStarted(self: Lifecycle, writer: *std.Io.Writer) !void {
         if (!self.cfg.dockerEnabled()) return;
-        try self.ensureWindowReady("docker");
+        try waits.ensureWindowReady(self, "docker");
         const pane = self.tmux.observePane("docker");
         defer pane.deinit(self.gpa);
         switch (dockerStartDecision(pane.state)) {
@@ -196,117 +188,11 @@ pub const Lifecycle = struct {
             self.tmux.sendKeys(target, &.{"C-c"}) catch {
                 sent = false;
             };
-            if (sent) self.runner.sleep(docker_ready_settle);
+            if (sent) self.runner.sleep(waits.docker_ready_settle);
         }
         self.docker.down() catch {};
     }
-
-    fn runPrechecks(self: Lifecycle, writer: *std.Io.Writer) !void {
-        for (self.cfg.prechecks()) |check| {
-            const name = config_value.optionalObjectString(check, "name", "precheck");
-            const command = try config_value.requiredObjectString(check, "command");
-            const on_fail = config_value.optionalObjectString(check, "on_fail", "warn");
-            const dir = config_value.optionalObjectString(check, "dir", "");
-            const cwd = if (dir.len == 0) try self.cfg.projectRoot(self.gpa) else try std.fs.path.join(self.gpa, &.{ try self.cfg.projectRoot(self.gpa), dir });
-            const result = self.runner.runCheckedCwd(&.{ "bash", "-c", command }, cwd) catch {
-                if (std.mem.eql(u8, on_fail, "abort")) return error.PrecheckFailed;
-                try writer.print("Warning: {s} check failed\n", .{name});
-                continue;
-            };
-            self.gpa.free(result.stdout);
-            self.gpa.free(result.stderr);
-        }
-    }
-
-    fn runCommandPhase(self: Lifecycle, phase: std.json.Value, profile: []const u8, writer: *std.Io.Writer) !void {
-        const command = try config.Config.commandPhaseCommand(phase, profile);
-        const dir = config_value.optionalObjectString(phase, "dir", "");
-        const cwd = if (dir.len == 0) try self.cfg.projectRoot(self.gpa) else try std.fs.path.join(self.gpa, &.{ try self.cfg.projectRoot(self.gpa), dir });
-        _ = self.runner.runInteractiveCheckedCwd(&.{ "bash", "-c", command }, cwd) catch {
-            if (std.mem.eql(u8, config_value.optionalObjectString(phase, "on_fail", "abort"), "abort")) return error.CommandPhaseFailed;
-            try writer.writeAll("Warning: command phase failed\n");
-            return;
-        };
-    }
-
-    fn runServicePhase(self: Lifecycle, phase: std.json.Value, profile: []const u8, writer: *std.Io.Writer) !void {
-        if (phase.object.get("groups")) |groups| if (groups == .array) {
-            for (groups.array.items) |group_value| {
-                if (group_value != .string) continue;
-                const group = self.cfg.resolvePhaseGroup(profile, group_value.string);
-                for (try self.cfg.resolveGroup(self.gpa, group)) |svc| try self.startService(svc, writer);
-            }
-        };
-        if (phase.object.get("wait_ports")) |ports| if (ports == .array) {
-            for (ports.array.items) |port_value| if (port_value == .integer) try self.waitForPort(port_value.integer, 120, writer);
-        };
-    }
-
-    fn ensureDockerReady(self: Lifecycle, writer: *std.Io.Writer) !void {
-        try writer.writeAll("Waiting for Docker containers...\n");
-        var attempt: i64 = 0;
-        const max_attempts = self.cfg.dockerWaitTimeout();
-        while (attempt < max_attempts) : (attempt += 1) {
-            const compose = self.docker.observe();
-            defer compose.deinit(self.gpa);
-            if (compose.state == .running) {
-                self.runner.sleep(docker_ready_settle);
-                try writer.writeAll("Docker containers ready\n");
-                return;
-            }
-            self.runner.sleep(docker_ready_interval);
-        }
-        return error.DockerNotReady;
-    }
-
-    fn waitForPort(self: Lifecycle, port: i64, timeout: i64, writer: *std.Io.Writer) !void {
-        const port_text = try std.fmt.allocPrint(self.gpa, "{d}", .{port});
-        defer self.gpa.free(port_text);
-        var elapsed: i64 = 0;
-        while (elapsed < timeout) : (elapsed += port_wait_interval_seconds) {
-            if (self.runner.runCheckedDiscard(&.{ "nc", "-z", "localhost", port_text })) |_| return else |_| {}
-            self.runner.sleep(port_wait_interval);
-        }
-        try writeProgress(writer, "Warning: port {d} did not become ready within {d}s\n", .{ port, timeout });
-    }
-
-    fn ensureWindowReady(self: Lifecycle, window: []const u8) !void {
-        var attempt: usize = 0;
-        while (attempt < window_ready_attempts) : (attempt += 1) {
-            switch (self.tmux.observeWindow(window)) {
-                .present => return,
-                .missing => {},
-                .unavailable => return error.TmuxUnavailable,
-            }
-            self.runner.sleep(window_ready_interval);
-        }
-        return error.WindowNotReady;
-    }
-
-    fn waitForStopped(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
-        var attempt: usize = 0;
-        while (attempt < stop_attempts) : (attempt += 1) {
-            const pane = self.tmux.observePane(service);
-            defer pane.deinit(self.gpa);
-            if (pane.state != .busy) return;
-            self.runner.sleep(stop_interval);
-        }
-        try writeProgress(writer, "Warning: {s} may not have stopped completely\n", .{service});
-    }
 };
-
-const PhaseKind = enum {
-    docker,
-    command,
-    services,
-};
-
-fn phaseKind(phase: std.json.Value) PhaseKind {
-    const value = config_value.optionalObjectString(phase, "type", "");
-    if (std.mem.eql(u8, value, "docker")) return .docker;
-    if (std.mem.eql(u8, value, "command")) return .command;
-    return .services;
-}
 
 fn sessionNotRunning(writer: *std.Io.Writer) !void {
     try writer.writeAll("Session not running. Run 'hello' first.\n");
@@ -351,22 +237,6 @@ fn serviceStopDecision(state: @import("observations.zig").PaneState) StopDecisio
 
 fn dockerStartDecision(state: @import("observations.zig").PaneState) StartDecision {
     return serviceStartDecision(state);
-}
-
-test "classifies lifecycle phase kinds" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(),
-        \\[
-        \\  {"type":"docker"},
-        \\  {"type":"command"},
-        \\  {"groups":["api"]}
-        \\]
-    , .{});
-
-    try std.testing.expectEqual(PhaseKind.docker, phaseKind(parsed.array.items[0]));
-    try std.testing.expectEqual(PhaseKind.command, phaseKind(parsed.array.items[1]));
-    try std.testing.expectEqual(PhaseKind.services, phaseKind(parsed.array.items[2]));
 }
 
 test "maps pane observations to lifecycle start and stop decisions" {
@@ -485,8 +355,8 @@ test "wait helpers report timeouts" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try lifecycle.waitForPort(5432, 2, &writer);
-    try lifecycle.waitForStopped("api", &writer);
+    try waits.waitForPort(lifecycle, 5432, 2, &writer);
+    try waits.waitForStopped(lifecycle, "api", &writer);
 
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: port 5432") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api may not have stopped") != null);
@@ -514,7 +384,7 @@ test "window readiness distinguishes missing windows from unavailable tmux" {
         .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
     };
 
-    try std.testing.expectError(error.TmuxUnavailable, lifecycle.ensureWindowReady("api"));
+    try std.testing.expectError(error.TmuxUnavailable, waits.ensureWindowReady(lifecycle, "api"));
     try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
 }
 
@@ -540,8 +410,8 @@ test "window readiness retries missing windows until timeout" {
         .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
     };
 
-    try std.testing.expectError(error.WindowNotReady, lifecycle.ensureWindowReady("api"));
-    try std.testing.expectEqual(@as(usize, window_ready_attempts), recorder.commands.items.len);
+    try std.testing.expectError(error.WindowNotReady, waits.ensureWindowReady(lifecycle, "api"));
+    try std.testing.expectEqual(@as(usize, waits.windowReadyAttempts()), recorder.commands.items.len);
 }
 
 test "stop and restart targets require an active session" {
