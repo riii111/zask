@@ -52,13 +52,20 @@ pub fn ensureWindowReady(ctx: anytype, window: []const u8) !void {
 
 pub fn waitForStopped(ctx: anytype, service: []const u8, writer: *std.Io.Writer) !void {
     var attempt: usize = 0;
+    try writeStopProgress(writer, service, 1);
     while (attempt < stop_attempts) : (attempt += 1) {
         const pane = ctx.tmux.observePane(service);
         defer pane.deinit(ctx.gpa);
-        if (pane.state != .busy) return;
+        if (pane.state != .busy) {
+            try writer.print("\r  {s} ... stopped\n", .{service});
+            try writer.flush();
+            return;
+        }
         ctx.runner.sleep(stop_interval);
+        try writeStopProgress(writer, service, (attempt % 3) + 1);
     }
-    try writeProgress(writer, "Warning: {s} may not have stopped completely\n", .{service});
+    try writer.print("\r  {s} ... warning: may not have stopped completely\n", .{service});
+    try writer.flush();
 }
 
 pub fn waitForPaneIdle(ctx: anytype, window: []const u8) bool {
@@ -78,5 +85,15 @@ pub fn windowReadyAttempts() usize {
 
 fn writeProgress(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytype) !void {
     try writer.print(fmt, args);
+    try writer.flush();
+}
+
+fn writeStopProgress(writer: *std.Io.Writer, service: []const u8, dots: usize) !void {
+    const text = switch (dots) {
+        1 => ".  ",
+        2 => ".. ",
+        else => "...",
+    };
+    try writer.print("\r  {s} {s}", .{ service, text });
     try writer.flush();
 }

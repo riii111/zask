@@ -42,6 +42,7 @@ pub const Lifecycle = struct {
 
     pub fn stopAll(self: Lifecycle, writer: *std.Io.Writer) !void {
         const services = try self.cfg.services();
+        if (services.len > 0) try writeProgress(writer, "Stopping services...\n", .{});
         var i = services.len;
         while (i > 0) {
             i -= 1;
@@ -148,12 +149,11 @@ pub const Lifecycle = struct {
         switch (serviceStopDecision(pane.state)) {
             .send_stop => {},
             .no_op => {
-                try writeProgress(writer, "{s} already stopped\n", .{service});
+                try writeProgress(writer, "  {s} ... already stopped\n", .{service});
                 return;
             },
             .tmux_unavailable => return error.TmuxUnavailable,
         }
-        try writeProgress(writer, "Stopping {s}...\n", .{service});
         const target = try self.tmux.target(service);
         defer self.gpa.free(target);
         try self.tmux.sendKeys(target, &.{"C-c"});
@@ -391,7 +391,7 @@ test "wait helpers report timeouts" {
     try waits.waitForStopped(lifecycle, "api", &writer);
 
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: port 5432") != null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api may not have stopped") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api ... warning: may not have stopped") != null);
 }
 
 test "window readiness distinguishes missing windows from unavailable tmux" {
