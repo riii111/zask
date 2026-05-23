@@ -328,6 +328,12 @@ test "parses explicit config command form" {
     try std.testing.expectEqual(@as(usize, 0), parsed.args.len);
 }
 
+test "rejects incomplete config and project command forms" {
+    try std.testing.expectError(error.InvalidArguments, parseArgs(.{ .gpa = std.testing.allocator }, &.{"--config"}));
+    try std.testing.expectError(error.InvalidArguments, parseArgs(.{ .gpa = std.testing.allocator }, &.{ "--config", "demo.json" }));
+    try std.testing.expectError(error.ProjectRequired, parseArgs(.{ .gpa = std.testing.allocator }, &.{"list"}));
+}
+
 test "parses argv0 project alias form" {
     const parsed = try parseArgs(.{ .gpa = std.testing.allocator, .argv0 = "nodex" }, &.{"hello"});
     try std.testing.expectEqualStrings("nodex", parsed.project.?);

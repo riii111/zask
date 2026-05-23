@@ -194,3 +194,31 @@ test "paneRunning checks pane child processes" {
     try std.testing.expectEqualStrings("-P", recorder.commands.items[1].argv[1]);
     try std.testing.expectEqualStrings("12345", recorder.commands.items[1].argv[2]);
 }
+
+test "paneRunning rejects dead panes and panes without children" {
+    var dead_recorder = runner.Recorder.init(std.testing.allocator);
+    defer dead_recorder.deinit();
+    try dead_recorder.enqueue("1|130|12345|node\n", "", .{ .exited = 0 });
+    const dead_run = runner.Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &dead_recorder };
+    const dead_client = Client{ .gpa = std.testing.allocator, .runner = dead_run, .session = "demo" };
+    try std.testing.expect(!dead_client.paneRunning("api"));
+    try std.testing.expectEqual(@as(usize, 1), dead_recorder.commands.items.len);
+
+    var idle_recorder = runner.Recorder.init(std.testing.allocator);
+    defer idle_recorder.deinit();
+    try idle_recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
+    try idle_recorder.enqueue("\n", "", .{ .exited = 1 });
+    const idle_run = runner.Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &idle_recorder };
+    const idle_client = Client{ .gpa = std.testing.allocator, .runner = idle_run, .session = "demo" };
+    try std.testing.expect(!idle_client.paneRunning("api"));
+}
+
+test "showOption trims empty output to null" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue(" \n", "", .{ .exited = 0 });
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
+    const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
+
+    try std.testing.expect(try client.showOption("@zask_dash_mode") == null);
+}

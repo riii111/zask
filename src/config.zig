@@ -321,6 +321,27 @@ test "resolves profiles and phase group overrides" {
     try std.testing.expectEqual(@as(usize, 2), group.len);
 }
 
+test "resolves command phase profile overrides and fallback" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": [],
+        \\  "phases": [
+        \\    {"type":"command","command":"default","commands":{"core":"override"}},
+        \\    {"type":"command","commands":{"core":"only-core"}}
+        \\  ]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+    const phases = cfg.phases();
+
+    try std.testing.expectEqualStrings("override", try Config.commandPhaseCommand(phases[0], "core"));
+    try std.testing.expectEqualStrings("default", try Config.commandPhaseCommand(phases[0], "all"));
+    try std.testing.expectError(error.InvalidConfig, Config.commandPhaseCommand(phases[1], "all"));
+}
+
 test "rejects unknown runtimes and missing services" {
     const json =
         \\{
@@ -335,6 +356,21 @@ test "rejects unknown runtimes and missing services" {
     try std.testing.expectError(error.UnknownRuntime, Config.serviceStartCommand(arena.allocator(), try cfg.findService("api")));
     try std.testing.expectError(error.UnknownService, cfg.findService("missing"));
     try std.testing.expectError(error.UnknownGroup, cfg.resolveGroup(arena.allocator(), "missing"));
+}
+
+test "rejects malformed group aliases" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": [],
+        \\  "group_aliases": {"bad":["api", 42]}
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+
+    try std.testing.expectError(error.InvalidConfig, cfg.resolveGroup(arena.allocator(), "bad"));
 }
 
 test "rejects malformed service collection" {

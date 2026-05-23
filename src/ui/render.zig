@@ -71,8 +71,8 @@ pub fn renderTmuxp(cfg: config.Config, gpa: std.mem.Allocator, writer: *std.Io.W
 test "renders service and docker windows" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true},
+        \\  "project": {"name":"demo","root":"/tmp/demo app","session_name":"demo"},
+        \\  "docker": {"enabled": true, "dir":"docker stack"},
         \\  "services": [{"name":"api","dir":"backend","command":"serve","group":"be"}]
         \\}
     ;
@@ -83,9 +83,11 @@ test "renders service and docker windows" {
     defer out.deinit();
     try renderTmuxp(cfg, arena.allocator(), &out.writer, "zask path", "/tmp/demo config.json");
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "window_name: 'dashboard'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "start_directory: '/tmp/demo app'") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "'''zask path'' --config ''/tmp/demo config.json'' dashboard'") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "'''zask path'' --config ''/tmp/demo config.json'' monitor'") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "window_name: 'api'") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "start_directory: '/tmp/demo/backend'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "start_directory: '/tmp/demo app/backend'") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "window_name: 'docker'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "start_directory: '/tmp/demo app/docker stack'") != null);
 }

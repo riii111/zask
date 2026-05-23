@@ -11,6 +11,7 @@ pub const Compose = struct {
         const result = self.runningServices() catch return false;
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
+        if (result.term != .exited or result.term.exited != 0) return false;
         return std.mem.trim(u8, result.stdout, " \t\r\n").len > 0;
     }
 
@@ -51,6 +52,16 @@ test "running ignores empty service output" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("\n", "", .{ .exited = 0 });
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
+    const compose = Compose{ .gpa = std.testing.allocator, .runner = run, .dir = "/tmp/demo/docker", .file = "compose.yaml" };
+
+    try std.testing.expect(!compose.running());
+}
+
+test "running ignores failed compose command output" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("api\n", "docker unavailable", .{ .exited = 1 });
     const run = runner.Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
     const compose = Compose{ .gpa = std.testing.allocator, .runner = run, .dir = "/tmp/demo/docker", .file = "compose.yaml" };
 

@@ -398,11 +398,15 @@ fn validateLogSessionId(value: []const u8) !void {
 
 test "matches docker compose services by full line" {
     try std.testing.expect(serviceListContains("api\ndb\n", "db"));
+    try std.testing.expect(serviceListContains("api\r\ndb\r\n", "api"));
     try std.testing.expect(!serviceListContains("mydb\ndb-replica\n", "db"));
+    try std.testing.expect(serviceListContains(" api \n", "api"));
 }
 
 test "validates log session ids" {
     try validateLogSessionId("20260523_010203");
+    try std.testing.expect(logEntryNewer({}, .{ .name = "new", .mtime = 2 }, .{ .name = "old", .mtime = 1 }));
     try std.testing.expectError(error.InvalidLogSessionId, validateLogSessionId("../bad"));
     try std.testing.expectError(error.InvalidLogSessionId, validateLogSessionId("bad name"));
+    try std.testing.expectError(error.InvalidLogSessionId, validateLogSessionId(""));
 }
