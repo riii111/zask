@@ -92,7 +92,13 @@ pub fn run(init: std.process.Init) !void {
     var stdout_file_writer: std.Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);
     const stdout = &stdout_file_writer.interface;
 
-    try runWithArgs(context, if (args.len > 1) args[1..] else &.{}, stdout);
+    runWithArgs(context, if (args.len > 1) args[1..] else &.{}, stdout) catch |err| switch (err) {
+        error.InvalidArguments, error.UnknownCommand, error.ProjectRequired => {
+            try stdout.flush();
+            std.process.exit(2);
+        },
+        else => return err,
+    };
     try stdout.flush();
 }
 
@@ -118,6 +124,13 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
         return printHelp(writer);
     }
     const rt = try loadRuntime(context, parsed);
+    dispatchRuntimeCommand(rt, command, parsed.args, writer) catch |err| {
+        if (err == error.InvalidArguments) try printHelp(writer);
+        return err;
+    };
+}
+
+fn dispatchRuntimeCommand(rt: Runtime, command: Command, args: []const []const u8, writer: *std.Io.Writer) !void {
     return switch (command) {
         .version, .help => unreachable,
         .render_session => rt.renderSession(writer),
@@ -125,16 +138,16 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
         .status => rt.status(writer),
         .attach => rt.attach(),
         .detach => rt.detach(writer),
-        .logs => rt.logs(try oneArg(parsed.args), writer),
-        .follow => rt.follow(try oneArg(parsed.args), writer),
-        .hello => rt.hello(try resolveHelloProfile(rt.cfg, parsed.args), writer),
+        .logs => rt.logs(try oneArg(args), writer),
+        .follow => rt.follow(try oneArg(args), writer),
+        .hello => rt.hello(try resolveHelloProfile(rt.cfg, args), writer),
         .bye => rt.bye(writer),
         .kill => rt.kill(writer),
         .re => rt.re(writer),
-        .up => rt.up(optionalTarget(parsed.args), writer),
-        .stop => rt.stop(optionalTarget(parsed.args), writer),
-        .restart => rt.restart(try requiredTarget(parsed.args), writer),
-        .exec => rt.exec(try oneArg(parsed.args), try execUseShell(parsed.args), writer),
+        .up => rt.up(optionalTarget(args), writer),
+        .stop => rt.stop(optionalTarget(args), writer),
+        .restart => rt.restart(try requiredTarget(args), writer),
+        .exec => rt.exec(try oneArg(args), try execUseShell(args), writer),
         .dashboard => rt.dashboard(writer),
         .monitor => rt.monitor(writer),
     };
@@ -429,4 +442,22 @@ test "resolves hello profiles" {
     try std.testing.expectEqualStrings("docker", try resolveHelloProfile(cfg, &.{"--docker"}));
     try std.testing.expectEqualStrings("backend", try resolveHelloProfile(cfg, &.{"--api"}));
     try std.testing.expectError(error.InvalidArguments, resolveHelloProfile(cfg, &.{"--missing"}));
+}
+
+test "invalid hello profile prints usage" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buffer: [4096]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var threaded = std.Io.Threaded.init_single_threaded;
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    try environ.put("HOME", "/home/me");
+
+    try std.testing.expectError(error.InvalidArguments, runWithArgs(.{
+        .gpa = arena.allocator(),
+        .io = threaded.io(),
+        .environ = &environ,
+    }, &.{ "--config", "testdata/synthetic.json", "hello", "--missing" }, &writer));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Usage: zask <command>") != null);
 }
