@@ -339,7 +339,7 @@ test "project alias without arguments prints usage" {
     var buffer: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runWithArgs(.{ .gpa = std.testing.allocator, .argv0 = "nodex" }, &.{}, &writer);
+    try runWithArgs(.{ .gpa = std.testing.allocator, .argv0 = "sample" }, &.{}, &writer);
     try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
 }
 
@@ -408,7 +408,7 @@ test "parses explicit config command form" {
 }
 
 test "project alias accepts explicit config command form" {
-    const parsed = try parseArgs(.{ .gpa = std.testing.allocator, .argv0 = "nodex" }, &.{ "--config", "demo.json", "follow", "api" });
+    const parsed = try parseArgs(.{ .gpa = std.testing.allocator, .argv0 = "sample" }, &.{ "--config", "demo.json", "follow", "api" });
     try std.testing.expectEqualStrings("demo.json", parsed.config_path.?);
     try std.testing.expectEqualStrings("follow", parsed.command);
     try std.testing.expectEqualStrings("api", parsed.args[0]);
@@ -422,8 +422,8 @@ test "rejects incomplete config and project command forms" {
 }
 
 test "parses argv0 project alias form" {
-    const parsed = try parseArgs(.{ .gpa = std.testing.allocator, .argv0 = "nodex" }, &.{"hello"});
-    try std.testing.expectEqualStrings("nodex", parsed.project.?);
+    const parsed = try parseArgs(.{ .gpa = std.testing.allocator, .argv0 = "sample" }, &.{"hello"});
+    try std.testing.expectEqualStrings("sample", parsed.project.?);
     try std.testing.expectEqualStrings("hello", parsed.command);
 }
 

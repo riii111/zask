@@ -24,9 +24,9 @@ pub fn relativeSubPath(value: []const u8) !void {
 }
 
 test "validates identifiers" {
-    try identifier("nodex-agent");
+    try identifier("sample-agent");
     try identifier("studio_api");
-    try std.testing.expectError(error.InvalidIdentifier, identifier("../nodex"));
+    try std.testing.expectError(error.InvalidIdentifier, identifier("../sample"));
     try std.testing.expectError(error.InvalidIdentifier, identifier("bad'name"));
     try std.testing.expectError(error.InvalidIdentifier, identifier("-rf"));
     try std.testing.expectError(error.InvalidIdentifier, identifier("bad\nname"));
