@@ -6,6 +6,15 @@ const proc_runner = @import("infra/runner.zig");
 const shell = @import("infra/shell.zig");
 const tmux_client = @import("infra/tmux.zig");
 
+const window_ready_attempts = 20;
+const window_ready_interval = std.Io.Duration.fromMilliseconds(300);
+const stop_attempts = 10;
+const stop_interval = std.Io.Duration.fromMilliseconds(500);
+const docker_ready_interval = std.Io.Duration.fromSeconds(1);
+const docker_ready_settle = std.Io.Duration.fromSeconds(2);
+const port_wait_interval_seconds = 2;
+const port_wait_interval = std.Io.Duration.fromSeconds(port_wait_interval_seconds);
+
 pub const Lifecycle = struct {
     gpa: std.mem.Allocator,
     cfg: config.Config,
@@ -110,7 +119,16 @@ pub const Lifecycle = struct {
 
     fn ensureServiceRunning(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
         const value = try self.cfg.findService(service);
-        try self.ensureWindowReady(service);
+        self.ensureWindowReady(service) catch |err| switch (err) {
+            error.WindowNotReady => {
+                try writeProgress(writer, "Warning: window for {s} not ready\n", .{service});
+                return;
+            },
+            error.TmuxUnavailable => {
+                try writeProgress(writer, "Warning: tmux unavailable for {s}\n", .{service});
+                return;
+            },
+        };
         const pane = self.tmux.observePane(service);
         defer pane.deinit(self.gpa);
         switch (serviceStartDecision(pane.state)) {
@@ -174,7 +192,11 @@ pub const Lifecycle = struct {
         if (self.tmux.observeSession() == .active) {
             const target = try self.tmux.target("docker");
             defer self.gpa.free(target);
-            self.tmux.sendKeys(target, &.{"C-c"}) catch {};
+            var sent = true;
+            self.tmux.sendKeys(target, &.{"C-c"}) catch {
+                sent = false;
+            };
+            if (sent) self.runner.sleep(docker_ready_settle);
         }
         self.docker.down() catch {};
     }
@@ -228,45 +250,46 @@ pub const Lifecycle = struct {
             const compose = self.docker.observe();
             defer compose.deinit(self.gpa);
             if (compose.state == .running) {
-                self.runner.runDiscard(&.{ "sleep", "2" }) catch {};
+                self.runner.sleep(docker_ready_settle);
                 try writer.writeAll("Docker containers ready\n");
                 return;
             }
-            self.runner.runDiscard(&.{ "sleep", "1" }) catch {};
+            self.runner.sleep(docker_ready_interval);
         }
         return error.DockerNotReady;
     }
 
     fn waitForPort(self: Lifecycle, port: i64, timeout: i64, writer: *std.Io.Writer) !void {
         const port_text = try std.fmt.allocPrint(self.gpa, "{d}", .{port});
+        defer self.gpa.free(port_text);
         var elapsed: i64 = 0;
-        while (elapsed < timeout) : (elapsed += 2) {
+        while (elapsed < timeout) : (elapsed += port_wait_interval_seconds) {
             if (self.runner.runCheckedDiscard(&.{ "nc", "-z", "localhost", port_text })) |_| return else |_| {}
-            self.runner.runDiscard(&.{ "sleep", "2" }) catch {};
+            self.runner.sleep(port_wait_interval);
         }
         try writeProgress(writer, "Warning: port {d} did not become ready within {d}s\n", .{ port, timeout });
     }
 
     fn ensureWindowReady(self: Lifecycle, window: []const u8) !void {
         var attempt: usize = 0;
-        while (attempt < 20) : (attempt += 1) {
+        while (attempt < window_ready_attempts) : (attempt += 1) {
             switch (self.tmux.observeWindow(window)) {
                 .present => return,
                 .missing => {},
                 .unavailable => return error.TmuxUnavailable,
             }
-            self.runner.runDiscard(&.{ "sleep", "0.3" }) catch {};
+            self.runner.sleep(window_ready_interval);
         }
         return error.WindowNotReady;
     }
 
     fn waitForStopped(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
         var attempt: usize = 0;
-        while (attempt < 10) : (attempt += 1) {
+        while (attempt < stop_attempts) : (attempt += 1) {
             const pane = self.tmux.observePane(service);
             defer pane.deinit(self.gpa);
             if (pane.state != .busy) return;
-            self.runner.runDiscard(&.{ "sleep", "0.5" }) catch {};
+            self.runner.sleep(stop_interval);
         }
         try writeProgress(writer, "Warning: {s} may not have stopped completely\n", .{service});
     }
@@ -449,7 +472,6 @@ test "wait helpers report timeouts" {
     while (i < 10) : (i += 1) {
         try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
         try recorder.enqueue("12346\n", "", .{ .exited = 0 });
-        try recorder.enqueue("", "", .{ .exited = 0 });
     }
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
@@ -519,7 +541,7 @@ test "window readiness retries missing windows until timeout" {
     };
 
     try std.testing.expectError(error.WindowNotReady, lifecycle.ensureWindowReady("api"));
-    try std.testing.expectEqual(@as(usize, 40), recorder.commands.items.len);
+    try std.testing.expectEqual(@as(usize, window_ready_attempts), recorder.commands.items.len);
 }
 
 test "stop and restart targets require an active session" {

@@ -63,10 +63,22 @@ fn splitCommand(gpa: std.mem.Allocator, command: []const u8) ![][]const u8 {
     var escaped = false;
     var in_token = false;
 
-    for (command) |byte| {
+    var index: usize = 0;
+    while (index < command.len) : (index += 1) {
+        const byte = command[index];
         if (escaped) {
             try current.append(gpa, byte);
             escaped = false;
+            in_token = true;
+            continue;
+        }
+        if (byte == '\\' and quote == '"') {
+            const next = if (index + 1 < command.len) command[index + 1] else 0;
+            if (next == '$' or next == '`' or next == '"' or next == '\\' or next == '\n') {
+                escaped = true;
+            } else {
+                try current.append(gpa, byte);
+            }
             in_token = true;
             continue;
         }
@@ -201,4 +213,20 @@ test "splitCommand handles shell-like quotes and whitespace" {
     try std.testing.expectEqualStrings("-c", args[1]);
     try std.testing.expectEqualStrings("echo hi", args[2]);
     try std.testing.expectEqualStrings("literal value", args[3]);
+}
+
+test "splitCommand preserves non-special backslash inside double quotes" {
+    const args = try splitCommand(std.testing.allocator, "psql -c \"select '\\n'\"");
+    defer freeArgs(std.testing.allocator, args);
+
+    try std.testing.expectEqual(@as(usize, 3), args.len);
+    try std.testing.expectEqualStrings("psql", args[0]);
+    try std.testing.expectEqualStrings("-c", args[1]);
+    try std.testing.expectEqualStrings("select '\\n'", args[2]);
+}
+
+test "splitCommand rejects empty and incomplete input" {
+    try std.testing.expectError(error.InvalidCommand, splitCommand(std.testing.allocator, ""));
+    try std.testing.expectError(error.InvalidCommand, splitCommand(std.testing.allocator, "echo \\"));
+    try std.testing.expectError(error.InvalidCommand, splitCommand(std.testing.allocator, "echo 'unterminated"));
 }

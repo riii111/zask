@@ -85,6 +85,11 @@ pub const Runner = struct {
         try checkTerm(term);
         return term;
     }
+
+    pub fn sleep(self: Runner, duration: std.Io.Duration) void {
+        if (self.recorder != null) return;
+        std.Io.sleep(self.io, duration, .awake) catch {};
+    }
 };
 
 fn checkTerm(term: std.process.Child.Term) !void {

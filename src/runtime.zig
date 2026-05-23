@@ -281,7 +281,10 @@ pub const Runtime = struct {
             const name = try config.Config.serviceName(service);
             const target = try tx.target(name);
             defer self.gpa.free(target);
-            _ = tx.pipePane(target, try std.fmt.allocPrint(self.gpa, "cat >> {s}", .{try shell.quote(self.gpa, try manager.prepareLogFile(name))})) catch {};
+            const log_file = manager.prepareLogFile(name) catch continue;
+            const quoted = shell.quote(self.gpa, log_file) catch continue;
+            const command = std.fmt.allocPrint(self.gpa, "cat >> {s}", .{quoted}) catch continue;
+            _ = tx.pipePane(target, command) catch {};
         }
     }
 
