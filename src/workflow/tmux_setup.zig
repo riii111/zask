@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const proc_runner = @import("../platform/runner.zig");
 const tmux_client = @import("../platform/tmux.zig");
 const tmux_options = @import("../model/tmux_options.zig");
 
@@ -23,6 +24,9 @@ pub fn applySessionOptions(gpa: std.mem.Allocator, tx: tmux_client.Client, opts:
 }
 
 pub fn bindControlKeys(gpa: std.mem.Allocator, tx: tmux_client.Client) !void {
+    try tx.bindCommand("w",
+        \\run-shell 'session="#{session_name}"; tmux list-windows -t "$session" -F "#{window_id}" | while IFS= read -r window; do tmux resize-window -a -t "$window"; done'; choose-tree -Zw
+    );
     try tx.bindRunShell("m", try std.fmt.allocPrint(gpa,
         \\session="#{{session_name}}";
         \\mode=$(tmux show-option -t "$session" -qv {s});
@@ -38,4 +42,21 @@ pub fn bindControlKeys(gpa: std.mem.Allocator, tx: tmux_client.Client) !void {
         \\config=$(tmux show-option -t "$session" -qv {s});
         \\"$zask" --config "$config" follow "#{{window_name}}"
     , .{ tmux_options.zask_path, tmux_options.config_path }));
+}
+
+test "list binding resizes preview windows before choose-tree" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const tx = tmux_client.Client{ .gpa = arena.allocator(), .runner = run, .session = "demo" };
+
+    try bindControlKeys(arena.allocator(), tx);
+
+    const command = recorder.commands.items[0];
+    try std.testing.expectEqualStrings("bind-key", command.argv[1]);
+    try std.testing.expectEqualStrings("w", command.argv[4]);
+    try std.testing.expect(std.mem.indexOf(u8, command.argv[5], "resize-window -a") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command.argv[5], "choose-tree -Zw") != null);
 }

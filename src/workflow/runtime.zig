@@ -596,6 +596,8 @@ test "hello creates session without tmuxp and keeps setup order" {
     try proc_runner.expectCommandContaining(&recorder, "set-option");
     try proc_runner.expectCommandContaining(&recorder, "@zask_dash_mode");
     try proc_runner.expectCommandContaining(&recorder, "bind-key");
+    try proc_runner.expectCommandContaining(&recorder, "choose-tree -Zw");
+    try proc_runner.expectCommandContaining(&recorder, "resize-window -a");
     try proc_runner.expectCommandOrder(&recorder, "bind-key", "date");
     try proc_runner.expectCommandOrder(&recorder, "@zask_log_session_id", "attach-session");
     try proc_runner.expectNoTmuxSizingCommands(&recorder);

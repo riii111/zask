@@ -95,6 +95,10 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ "tmux", "bind-key", "-T", "prefix", key, "run-shell", command }, .{ .check = true, .discard = true });
     }
 
+    pub fn bindCommand(self: Client, key: []const u8, command: []const u8) !void {
+        _ = try self.runner.run(&.{ "tmux", "bind-key", "-T", "prefix", key, command }, .{ .check = true, .discard = true });
+    }
+
     pub fn popup(self: Client, width: []const u8, height: []const u8, command: []const u8) !void {
         _ = try self.runner.run(&.{ "tmux", "popup", "-w", width, "-h", height, "-E", command }, .{ .check = true, .discard = true });
     }
@@ -325,6 +329,7 @@ test "options popup and pipe helpers record tmux argv" {
     const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
 
     try client.setOption("@mode", "all");
+    try client.bindCommand("w", "run-shell true; choose-tree -Zw");
     try client.bindRunShell("f", "zask follow api");
     try client.popup("80%", "60%", "tail -f log");
     try client.pipePane("demo:api", "cat >> api.log");
@@ -333,14 +338,17 @@ test "options popup and pipe helpers record tmux argv" {
     try std.testing.expectEqualStrings("set-option", recorder.commands.items[0].argv[1]);
     try std.testing.expectEqualStrings("@mode", recorder.commands.items[0].argv[4]);
     try std.testing.expectEqualStrings("bind-key", recorder.commands.items[1].argv[1]);
-    try std.testing.expectEqualStrings("f", recorder.commands.items[1].argv[4]);
-    try std.testing.expectEqualStrings("run-shell", recorder.commands.items[1].argv[5]);
-    try std.testing.expectEqualStrings("popup", recorder.commands.items[2].argv[1]);
-    try std.testing.expectEqualStrings("80%", recorder.commands.items[2].argv[3]);
-    try std.testing.expectEqualStrings("tail -f log", recorder.commands.items[2].argv[7]);
-    try std.testing.expectEqualStrings("pipe-pane", recorder.commands.items[3].argv[1]);
-    try std.testing.expectEqualStrings("cat >> api.log", recorder.commands.items[3].argv[4]);
-    try std.testing.expectEqual(@as(usize, 4), recorder.commands.items[4].argv.len);
+    try std.testing.expectEqualStrings("w", recorder.commands.items[1].argv[4]);
+    try std.testing.expectEqualStrings("run-shell true; choose-tree -Zw", recorder.commands.items[1].argv[5]);
+    try std.testing.expectEqualStrings("bind-key", recorder.commands.items[2].argv[1]);
+    try std.testing.expectEqualStrings("f", recorder.commands.items[2].argv[4]);
+    try std.testing.expectEqualStrings("run-shell", recorder.commands.items[2].argv[5]);
+    try std.testing.expectEqualStrings("popup", recorder.commands.items[3].argv[1]);
+    try std.testing.expectEqualStrings("80%", recorder.commands.items[3].argv[3]);
+    try std.testing.expectEqualStrings("tail -f log", recorder.commands.items[3].argv[7]);
+    try std.testing.expectEqualStrings("pipe-pane", recorder.commands.items[4].argv[1]);
+    try std.testing.expectEqualStrings("cat >> api.log", recorder.commands.items[4].argv[4]);
+    try std.testing.expectEqual(@as(usize, 4), recorder.commands.items[5].argv.len);
 }
 
 test "paneRunning checks pane child processes" {
