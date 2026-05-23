@@ -42,23 +42,25 @@ const CommandSpec = struct {
     usage: ?[]const u8 = null,
     description: []const u8 = "",
     global: bool = false,
+    min_args: usize = 0,
+    max_args: usize = 0,
 };
 
 const command_specs = [_]CommandSpec{
-    .{ .command = .hello, .names = &.{"hello"}, .usage = "hello [--docker|--<profile>]", .description = "Start session + services + attach" },
+    .{ .command = .hello, .names = &.{"hello"}, .usage = "hello [--docker|--<profile>]", .description = "Start session + services + attach", .max_args = 1 },
     .{ .command = .bye, .names = &.{"bye"}, .usage = "bye", .description = "Graceful shutdown" },
     .{ .command = .re, .names = &.{"re"}, .usage = "re", .description = "Restart session" },
     .{ .command = .attach, .names = &.{"attach"}, .usage = "attach | detach | kill", .description = "Manage tmux session" },
     .{ .command = .detach, .names = &.{"detach"} },
     .{ .command = .kill, .names = &.{"kill"} },
-    .{ .command = .up, .names = &.{"up"}, .usage = "up [--all|docker|name]", .description = "Start service, group, docker, or all" },
-    .{ .command = .stop, .names = &.{"stop"}, .usage = "stop [--all|docker|name]", .description = "Stop service, group, docker, or all" },
-    .{ .command = .restart, .names = &.{"restart"}, .usage = "restart <docker|name>", .description = "Restart service, group, or docker" },
+    .{ .command = .up, .names = &.{"up"}, .usage = "up [--all|docker|name]", .description = "Start service, group, docker, or all", .max_args = 1 },
+    .{ .command = .stop, .names = &.{"stop"}, .usage = "stop [--all|docker|name]", .description = "Stop service, group, docker, or all", .max_args = 1 },
+    .{ .command = .restart, .names = &.{"restart"}, .usage = "restart <docker|name>", .description = "Restart service, group, or docker", .min_args = 1, .max_args = 1 },
     .{ .command = .status, .names = &.{"status"}, .usage = "status | list", .description = "Show service state or config services" },
     .{ .command = .list, .names = &.{"list"} },
-    .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window" },
-    .{ .command = .follow, .names = &.{"follow"}, .usage = "follow <service>", .description = "Tail captured log in tmux popup" },
-    .{ .command = .exec, .names = &.{"exec"}, .usage = "exec <container> [--shell]", .description = "Enter Docker container" },
+    .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window", .min_args = 1, .max_args = 1 },
+    .{ .command = .follow, .names = &.{"follow"}, .usage = "follow <service>", .description = "Tail captured log in tmux popup", .min_args = 1, .max_args = 1 },
+    .{ .command = .exec, .names = &.{"exec"}, .usage = "exec <container> [--shell]", .description = "Enter Docker container", .min_args = 1, .max_args = 2 },
     .{ .command = .render_session, .names = &.{"render-session"}, .usage = "render-session", .description = "Print generated tmuxp YAML" },
     .{ .command = .version, .names = &.{"version"}, .usage = "version", .description = "Print zask version", .global = true },
     .{ .command = .help, .names = &.{ "help", "--help", "-h" }, .usage = "help", .description = "Print this help", .global = true },
@@ -99,6 +101,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
 
     const parsed = try parseArgs(context, args);
     const command = parseCommand(parsed.command) orelse return error.UnknownCommand;
+    try validateArity(command, parsed.args);
     if (command == .version) {
         return printVersion(writer);
     }
@@ -200,6 +203,18 @@ fn parseCommand(command: []const u8) ?Command {
         }
     }
     return null;
+}
+
+fn commandSpec(command: Command) CommandSpec {
+    for (command_specs) |spec| {
+        if (spec.command == command) return spec;
+    }
+    unreachable;
+}
+
+fn validateArity(command: Command, args: []const []const u8) !void {
+    const spec = commandSpec(command);
+    if (args.len < spec.min_args or args.len > spec.max_args) return error.InvalidArguments;
 }
 
 fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
@@ -307,6 +322,21 @@ test "command metadata parses aliases and global commands" {
     try std.testing.expectEqual(Command.render_session, parseCommand("render-session").?);
     try std.testing.expect(isGlobalCommand("--help"));
     try std.testing.expect(!isGlobalCommand("list"));
+}
+
+test "validates command arity strictly" {
+    try validateArity(.hello, &.{});
+    try validateArity(.hello, &.{"--docker"});
+    try std.testing.expectError(error.InvalidArguments, validateArity(.hello, &.{ "--docker", "extra" }));
+    try std.testing.expectError(error.InvalidArguments, validateArity(.logs, &.{}));
+    try validateArity(.logs, &.{"api"});
+    try std.testing.expectError(error.InvalidArguments, validateArity(.logs, &.{ "api", "extra" }));
+    try std.testing.expectError(error.InvalidArguments, validateArity(.up, &.{ "api", "extra" }));
+    try std.testing.expectError(error.InvalidArguments, validateArity(.restart, &.{}));
+    try std.testing.expectError(error.InvalidArguments, validateArity(.restart, &.{ "api", "extra" }));
+    try validateArity(.exec, &.{"api"});
+    try validateArity(.exec, &.{ "api", "--shell" });
+    try std.testing.expectError(error.InvalidArguments, validateArity(.exec, &.{ "api", "--shell", "extra" }));
 }
 
 test "normalizes docker target aliases" {

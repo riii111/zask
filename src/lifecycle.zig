@@ -174,7 +174,7 @@ pub const Lifecycle = struct {
         if (self.tmux.observeSession() == .active) {
             const target = try self.tmux.target("docker");
             defer self.gpa.free(target);
-            try self.tmux.sendKeys(target, &.{"C-c"});
+            self.tmux.sendKeys(target, &.{"C-c"}) catch {};
         }
         self.docker.down() catch {};
     }
@@ -585,6 +585,40 @@ test "docker stop reaches compose down without tmux session" {
     try std.testing.expectEqualStrings("docker", down.argv[0]);
     try std.testing.expectEqualStrings("down", down.argv[4]);
     try std.testing.expectEqualStrings("/tmp/demo", down.cwd.?);
+}
+
+test "docker stop reaches compose down when tmux send fails" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"enabled": true},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const lifecycle = Lifecycle{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
+        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.stopTarget("docker", &writer);
+
+    const down = recorder.commands.items[2];
+    try std.testing.expectEqualStrings("docker", down.argv[0]);
+    try std.testing.expectEqualStrings("down", down.argv[4]);
 }
 
 test "docker start is a no-op when docker pane is running" {
