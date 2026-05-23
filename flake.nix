@@ -26,6 +26,7 @@
             packages = [
               pkgs.zig
               pkgs.zls
+              pkgs.lefthook
               pkgs.tmux
               pkgs.tmuxp
               pkgs.yq-go
