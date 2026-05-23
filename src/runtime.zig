@@ -128,7 +128,7 @@ pub const Runtime = struct {
             return;
         }
         const session_file = try self.writeSessionFile();
-        _ = try self.runner().run(&.{ "tmuxp", "load", "-d", session_file }, .{ .check = true, .discard = true });
+        _ = try self.runner().run(&.{ "tmuxp", "load", "-d", session_file }, .{ .interactive = true, .check = true });
         const tx = self.tmux();
         errdefer tx.killSession() catch {};
         try tmux_setup.applySessionOptions(tx, self.zask_path, self.config_path);
@@ -445,6 +445,46 @@ test "attach from tmux switches client without mutating window sizes" {
     try std.testing.expectEqualStrings("switch-client", recorder.commands.items[0].argv[1]);
 }
 
+test "hello creates session with interactive tmuxp and no sizing commands" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    const home_dir = try std.fmt.allocPrint(arena.allocator(), "/private/tmp/zask-test-home-{d}", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteTree(io, home_dir) catch {};
+    const session_dir = try std.fs.path.join(arena.allocator(), &.{ home_dir, ".config", "zask", "demo" });
+    _ = try std.Io.Dir.cwd().createDirPathStatus(io, session_dir, @enumFromInt(0o700));
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    try environ.put("HOME", home_dir);
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    var runtime = testRuntime(arena.allocator(), run, cfg);
+    runtime.io = io;
+    runtime.environ = &environ;
+    runtime.runner_impl = run;
+    runtime.tmux_impl.runner = run;
+    runtime.docker_impl.runner = run;
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.helloUnlocked("all", &writer);
+
+    const load = findRecordedCommand(&recorder, "tmuxp").?;
+    try std.testing.expect(load.interactive);
+    try std.testing.expectEqualStrings("load", load.argv[1]);
+    try assertNoSizingCommands(&recorder);
+}
+
 test "hello attaches existing session when another hello holds the lock" {
     const json =
         \\{
@@ -485,6 +525,25 @@ test "hello attaches existing session when another hello holds the lock" {
 
     try std.testing.expectEqualStrings("has-session", recorder.commands.items[0].argv[1]);
     try std.testing.expectEqualStrings("switch-client", recorder.commands.items[1].argv[1]);
+}
+
+fn findRecordedCommand(recorder: *const proc_runner.Recorder, executable: []const u8) ?proc_runner.RecordedCommand {
+    for (recorder.commands.items) |command| {
+        if (std.mem.eql(u8, command.argv[0], executable)) return command;
+    }
+    return null;
+}
+
+fn assertNoSizingCommands(recorder: *const proc_runner.Recorder) !void {
+    for (recorder.commands.items) |command| {
+        if (std.mem.eql(u8, command.argv[0], "tmux") and command.argv.len > 1) {
+            try std.testing.expect(!std.mem.eql(u8, command.argv[1], "resize-window"));
+            try std.testing.expect(!std.mem.eql(u8, command.argv[1], "resize-pane"));
+            if (std.mem.eql(u8, command.argv[1], "set-option") or std.mem.eql(u8, command.argv[1], "set-window-option")) {
+                for (command.argv) |arg| try std.testing.expect(!std.mem.eql(u8, arg, "window-size"));
+            }
+        }
+    }
 }
 
 fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.Config) Runtime {

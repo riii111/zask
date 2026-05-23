@@ -24,7 +24,6 @@ pub fn renderTmuxp(cfg: config.Config, gpa: std.mem.Allocator, writer: *std.Io.W
         \\  status-right: ""
         \\  remain-on-exit: on
         \\  automatic-rename: off
-        \\  window-size: latest
         \\
         \\windows:
         \\  - window_name: 'dashboard'
@@ -87,6 +86,7 @@ test "renders service and docker windows" {
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "start_directory: '/tmp/demo app'") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "'''zask path'' --config ''/tmp/demo config.json'' dashboard'") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "'''zask path'' --config ''/tmp/demo config.json'' monitor'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "window-size") == null);
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "window_name: 'api'") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "start_directory: '/tmp/demo app/backend'") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "window_name: 'docker'") != null);
