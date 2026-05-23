@@ -60,6 +60,8 @@ pub const Runtime = struct {
         const tx = self.tmux();
         if (try self.inTmux()) {
             try tx.switchClient();
+            self.runner().sleep(std.Io.Duration.fromMilliseconds(100));
+            try self.resizeWindows();
         } else {
             try tx.attachSession();
         }
@@ -423,6 +425,32 @@ test "bye kills session even when pipe cleanup fails" {
     const kill = recorder.commands.items[recorder.commands.items.len - 1];
     try std.testing.expectEqualStrings("tmux", kill.argv[0]);
     try std.testing.expectEqualStrings("kill-session", kill.argv[1]);
+}
+
+test "attach from tmux resizes windows after switching client" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    try environ.put("TMUX", "/tmp/tmux");
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    var runtime = testRuntime(arena.allocator(), run, cfg);
+    runtime.environ = &environ;
+
+    try runtime.attach();
+
+    try std.testing.expectEqualStrings("switch-client", recorder.commands.items[0].argv[1]);
+    try std.testing.expectEqualStrings("resize-window", recorder.commands.items[1].argv[1]);
+    try std.testing.expectEqualStrings("set-window-option", recorder.commands.items[2].argv[1]);
 }
 
 fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.Config) Runtime {
