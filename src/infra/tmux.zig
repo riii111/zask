@@ -1,4 +1,5 @@
 const std = @import("std");
+const observations = @import("../observations.zig");
 const runner = @import("runner.zig");
 
 pub const Client = struct {
@@ -7,10 +8,16 @@ pub const Client = struct {
     session: []const u8,
 
     pub fn hasSession(self: Client) bool {
-        const result = self.runner.run(&.{ "tmux", "has-session", "-t", self.session }) catch return false;
+        return self.observeSession() == .active;
+    }
+
+    pub fn observeSession(self: Client) observations.SessionObservation {
+        const result = self.runner.run(&.{ "tmux", "has-session", "-t", self.session }) catch return .unavailable;
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
-        return result.term == .exited and result.term.exited == 0;
+        if (result.term == .exited and result.term.exited == 0) return .active;
+        if (result.term == .exited) return .missing;
+        return .unavailable;
     }
 
     pub fn switchClient(self: Client) !void {
@@ -87,30 +94,64 @@ pub const Client = struct {
     }
 
     pub fn windowExists(self: Client, window: []const u8) bool {
-        const pane_target = self.target(window) catch return false;
+        return self.observeWindow(window) == .present;
+    }
+
+    pub fn observeWindow(self: Client, window: []const u8) observations.WindowObservation {
+        const pane_target = self.target(window) catch return .unavailable;
         defer self.gpa.free(pane_target);
-        const result = self.runner.run(&.{ "tmux", "list-panes", "-t", pane_target }) catch return false;
+        const result = self.runner.run(&.{ "tmux", "list-panes", "-t", pane_target }) catch return .unavailable;
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
-        return result.term == .exited and result.term.exited == 0;
+        if (result.term == .exited and result.term.exited == 0) return .present;
+        if (result.term == .exited) return .missing;
+        return .unavailable;
     }
 
     pub fn paneRunning(self: Client, window: []const u8) bool {
-        const info = self.paneInfo(window) catch return false;
-        defer info.deinit(self.gpa);
-        if (info.dead) return false;
-        const result = self.runner.run(&.{ "pgrep", "-P", info.pid }) catch return false;
+        const observation = self.observePane(window);
+        defer observation.deinit(self.gpa);
+        return observation.running();
+    }
+
+    pub fn observePane(self: Client, window: []const u8) observations.PaneObservation {
+        const info = self.paneInfo(window) catch |err| switch (err) {
+            error.WindowMissing => return .{ .state = .window_missing },
+            else => return .{ .state = .tmux_unavailable },
+        };
+        if (info.dead) return .{
+            .state = .dead,
+            .exit_code = info.exit_code,
+            .pid = info.pid,
+            .command = info.command,
+            .owned = info.owned,
+        };
+        const result = self.runner.run(&.{ "pgrep", "-P", info.pid }) catch return .{
+            .state = .tmux_unavailable,
+            .exit_code = info.exit_code,
+            .pid = info.pid,
+            .command = info.command,
+            .owned = info.owned,
+        };
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
-        return std.mem.trim(u8, result.stdout, " \t\r\n").len > 0;
+        return .{
+            .state = if (std.mem.trim(u8, result.stdout, " \t\r\n").len > 0) .busy else .idle,
+            .exit_code = info.exit_code,
+            .pid = info.pid,
+            .command = info.command,
+            .owned = info.owned,
+        };
     }
 
     pub fn paneInfo(self: Client, window: []const u8) !PaneInfo {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
-        const result = self.runner.run(&.{ "tmux", "list-panes", "-t", pane_target, "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}" }) catch return .{};
+        const result = self.runner.run(&.{ "tmux", "list-panes", "-t", pane_target, "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}" }) catch return error.TmuxUnavailable;
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
+        if (result.term != .exited) return error.TmuxUnavailable;
+        if (result.term.exited != 0) return error.WindowMissing;
 
         var lines = std.mem.splitScalar(u8, result.stdout, '\n');
         const line = lines.next() orelse return .{};

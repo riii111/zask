@@ -2,6 +2,7 @@ const std = @import("std");
 const ansi = @import("ansi.zig");
 const config = @import("../config.zig");
 const docker_client = @import("../infra/docker.zig");
+const observations = @import("../observations.zig");
 const proc_runner = @import("../infra/runner.zig");
 const tmux_client = @import("../infra/tmux.zig");
 const tmux_options = @import("../tmux_options.zig");
@@ -121,57 +122,83 @@ fn dashboardMode(ctx: Context) ![]const u8 {
 
 fn serviceMonitorRow(ctx: Context, service: std.json.Value) !MonitorRow {
     const name = try config.Config.serviceName(service);
-    const pane = try ctx.tmux.paneInfo(name);
-    const state = if (pane.dead)
-        MonitorStatus.dead
-    else if (tmux_client.isShellCommand(pane.command))
-        MonitorStatus.stop
-    else
-        try healthStatus(ctx, service);
+    const observation = try observeService(ctx, service);
+    const state = serviceMonitorStatus(observation);
     return .{
         .name = name,
         .status = state,
-        .exit_code = pane.exit_code,
-        .command = pane.command,
+        .exit_code = observation.pane.exit_code,
+        .command = observation.pane.command,
         .port = if (config.Config.servicePort(service)) |p| try std.fmt.allocPrint(ctx.gpa, ":{d}", .{p}) else "  -",
     };
 }
 
 fn dockerMonitorRow(ctx: Context) !MonitorRow {
-    const pane = try ctx.tmux.paneInfo("docker");
-    const state = if (pane.dead)
-        MonitorStatus.dead
-    else if (tmux_client.isShellCommand(pane.command))
-        MonitorStatus.stop
-    else if (try dockerRunning(ctx))
-        MonitorStatus.live
-    else
-        MonitorStatus.ready;
-    return .{ .name = "docker", .status = state, .exit_code = pane.exit_code, .command = pane.command, .port = "compose" };
+    const pane = ctx.tmux.observePane("docker");
+    const compose = try observeDocker(ctx);
+    defer compose.deinit(ctx.gpa);
+    return .{ .name = "docker", .status = dockerMonitorStatus(pane, compose), .exit_code = pane.exit_code, .command = pane.command, .port = "compose" };
 }
 
-fn healthStatus(ctx: Context, service: std.json.Value) !MonitorStatus {
-    const port = config.Config.servicePort(service) orelse return .live;
-    const result = ctx.runner.run(&.{ "nc", "-z", "localhost", try std.fmt.allocPrint(ctx.gpa, "{d}", .{port}) }) catch return .ready;
+fn observeService(ctx: Context, service: std.json.Value) !observations.ServiceObservation {
+    const name = try config.Config.serviceName(service);
+    const pane = ctx.tmux.observePane(name);
+    const health = try observeHealth(ctx, service);
+    return .{ .pane = pane, .health = health };
+}
+
+fn observeHealth(ctx: Context, service: std.json.Value) !observations.HealthObservation {
+    const port = config.Config.servicePort(service) orelse return .no_check;
+    const result = ctx.runner.run(&.{ "nc", "-z", "localhost", try std.fmt.allocPrint(ctx.gpa, "{d}", .{port}) }) catch return .waiting;
     defer ctx.gpa.free(result.stdout);
     defer ctx.gpa.free(result.stderr);
-    if (result.term != .exited or result.term.exited != 0) return .ready;
-    if (!std.mem.eql(u8, config.Config.serviceHealthcheckType(service), "http")) return .live;
+    if (result.term != .exited or result.term.exited != 0) return .waiting;
+    if (!std.mem.eql(u8, config.Config.serviceHealthcheckType(service), "http")) return .ready;
 
     const url = try std.fmt.allocPrint(ctx.gpa, "http://localhost:{d}{s}", .{ port, config.Config.serviceHealthcheckPath(service) });
     const http = ctx.runner.run(&.{ "curl", "-sf", "--max-time", "1", url }) catch return .degraded;
     defer ctx.gpa.free(http.stdout);
     defer ctx.gpa.free(http.stderr);
-    return if (http.term == .exited and http.term.exited == 0) .live else .degraded;
+    return if (http.term == .exited and http.term.exited == 0) .ready else .degraded;
 }
 
-fn dockerRunning(ctx: Context) !bool {
+fn observeDocker(ctx: Context) !observations.ComposeObservation {
     return (docker_client.Compose{
         .gpa = ctx.gpa,
         .runner = ctx.runner,
         .dir = try ctx.cfg.dockerDir(ctx.gpa),
         .file = ctx.cfg.dockerComposeFile(),
-    }).running();
+    }).observe();
+}
+
+fn serviceMonitorStatus(observation: observations.ServiceObservation) MonitorStatus {
+    return switch (observation.pane.state) {
+        .dead => .dead,
+        .idle, .window_missing => .stop,
+        .tmux_unavailable => .unknown,
+        .busy => if (tmux_client.isShellCommand(observation.pane.command)) .stop else healthMonitorStatus(observation.health),
+    };
+}
+
+fn dockerMonitorStatus(pane: observations.PaneObservation, compose: observations.ComposeObservation) MonitorStatus {
+    return switch (pane.state) {
+        .dead => .dead,
+        .idle, .window_missing => .stop,
+        .tmux_unavailable => .unknown,
+        .busy => if (tmux_client.isShellCommand(pane.command)) .stop else switch (compose.state) {
+            .running => .live,
+            .empty => .ready,
+            .unavailable => .unknown,
+        },
+    };
+}
+
+fn healthMonitorStatus(health: observations.HealthObservation) MonitorStatus {
+    return switch (health) {
+        .no_check, .ready => .live,
+        .waiting => .ready,
+        .degraded => .degraded,
+    };
 }
 
 fn writeMonitorRow(ctx: Context, writer: *std.Io.Writer, row: MonitorRow, show_log: bool) !void {

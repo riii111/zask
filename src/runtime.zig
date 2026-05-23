@@ -6,6 +6,7 @@ const env = @import("infra/env.zig");
 const lifecycle_mod = @import("lifecycle.zig");
 const lock = @import("infra/lock.zig");
 const log_session = @import("log_session.zig");
+const observations = @import("observations.zig");
 const paths = @import("infra/paths.zig");
 const render = @import("ui/render.zig");
 const proc_runner = @import("infra/runner.zig");
@@ -40,11 +41,15 @@ pub const Runtime = struct {
         }
         try writer.print("{s} Service Status\n", .{try self.cfg.projectName()});
         if (self.cfg.dockerEnabled()) {
-            try writer.print("  docker-compose: {s}\n", .{if (try self.dockerRunning()) "running" else "stopped"});
+            const compose = (try self.docker()).observe();
+            defer compose.deinit(self.gpa);
+            try writer.print("  docker-compose: {s}\n", .{composeStatusText(compose.state)});
         }
         for (try self.cfg.services()) |service| {
             const name = try config.Config.serviceName(service);
-            try writer.print("  {s} {s} [{s}]\n", .{ name, if (try self.serviceRunning(name)) "running" else "stopped", config.Config.serviceGroup(service) });
+            const pane = (try self.tmux()).observePane(name);
+            defer pane.deinit(self.gpa);
+            try writer.print("  {s} {s} [{s}]\n", .{ name, paneStatusText(pane.state), config.Config.serviceGroup(service) });
         }
     }
 
@@ -188,25 +193,20 @@ pub const Runtime = struct {
         if (!self.cfg.dockerEnabled()) return error.DockerDisabled;
         try validate.identifier(container);
         const dc = try self.docker();
-        const running = try dc.runningServices();
-        defer self.gpa.free(running.stdout);
-        defer self.gpa.free(running.stderr);
-        if (running.term != .exited or running.term.exited != 0) {
+        const compose = dc.observe();
+        defer compose.deinit(self.gpa);
+        if (compose.state == .unavailable) {
             try writer.writeAll("Docker compose services unavailable\n");
             return error.DockerUnavailable;
         }
-        if (std.mem.trim(u8, running.stdout, " \t\r\n").len == 0) {
+        if (compose.state == .empty) {
             try writer.writeAll("No running containers. Run 'up docker' first.\n");
             return error.ContainerNotRunning;
         }
-        if (!serviceListContains(running.stdout, container)) {
+        if (!compose.contains(container)) {
             try writer.print("Container '{s}' is not running\n", .{container});
             try writer.writeAll("Running containers:\n");
-            var lines = std.mem.splitScalar(u8, running.stdout, '\n');
-            while (lines.next()) |line| {
-                const item = std.mem.trim(u8, line, " \t\r");
-                if (item.len > 0) try writer.print("  {s}\n", .{item});
-            }
+            for (compose.services) |service| try writer.print("  {s}\n", .{service});
             return error.ContainerNotRunning;
         }
         const exec_cmd = if (use_shell) "bash" else self.cfg.dockerExecDefault(container);
@@ -310,14 +310,6 @@ pub const Runtime = struct {
         return (try self.tmux()).hasSession();
     }
 
-    fn serviceRunning(self: Runtime, service: []const u8) !bool {
-        return (try self.tmux()).paneRunning(service);
-    }
-
-    fn dockerRunning(self: Runtime) !bool {
-        return (try self.docker()).running();
-    }
-
     fn inTmux(self: Runtime) !bool {
         return env.exists(self.environ, "TMUX");
     }
@@ -327,17 +319,24 @@ pub const Runtime = struct {
     }
 };
 
-fn serviceListContains(output: []const u8, name: []const u8) bool {
-    var lines = std.mem.splitScalar(u8, output, '\n');
-    while (lines.next()) |line| {
-        if (std.mem.eql(u8, std.mem.trim(u8, line, " \t\r"), name)) return true;
-    }
-    return false;
+fn paneStatusText(state: observations.PaneState) []const u8 {
+    return switch (state) {
+        .busy => "running",
+        .idle, .dead, .window_missing => "stopped",
+        .tmux_unavailable => "unknown",
+    };
 }
 
-test "matches docker compose services by full line" {
-    try std.testing.expect(serviceListContains("api\ndb\n", "db"));
-    try std.testing.expect(serviceListContains("api\r\ndb\r\n", "api"));
-    try std.testing.expect(!serviceListContains("mydb\ndb-replica\n", "db"));
-    try std.testing.expect(serviceListContains(" api \n", "api"));
+fn composeStatusText(state: observations.ComposeState) []const u8 {
+    return switch (state) {
+        .running => "running",
+        .empty => "stopped",
+        .unavailable => "unknown",
+    };
+}
+
+test "maps observations to status text" {
+    try std.testing.expectEqualStrings("running", paneStatusText(.busy));
+    try std.testing.expectEqualStrings("stopped", paneStatusText(.idle));
+    try std.testing.expectEqualStrings("unknown", composeStatusText(.unavailable));
 }

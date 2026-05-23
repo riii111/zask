@@ -1,4 +1,5 @@
 const std = @import("std");
+const observations = @import("../observations.zig");
 const runner = @import("runner.zig");
 
 pub const Compose = struct {
@@ -8,11 +9,19 @@ pub const Compose = struct {
     file: []const u8,
 
     pub fn running(self: Compose) bool {
-        const result = self.runningServices() catch return false;
+        const observation = self.observe();
+        defer observation.deinit(self.gpa);
+        return observation.state == .running;
+    }
+
+    pub fn observe(self: Compose) observations.ComposeObservation {
+        const result = self.runningServices() catch return .{ .state = .unavailable };
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
-        if (result.term != .exited or result.term.exited != 0) return false;
-        return std.mem.trim(u8, result.stdout, " \t\r\n").len > 0;
+        if (result.term != .exited or result.term.exited != 0) return .{ .state = .unavailable };
+        const services = parseServices(self.gpa, result.stdout) catch return .{ .state = .unavailable };
+        if (services.len == 0) return .{ .state = .empty, .services = services };
+        return .{ .state = .running, .services = services };
     }
 
     pub fn runningServices(self: Compose) !std.process.RunResult {
@@ -104,6 +113,21 @@ fn freeArgs(gpa: std.mem.Allocator, args: []const []const u8) void {
     gpa.free(args);
 }
 
+fn parseServices(gpa: std.mem.Allocator, output: []const u8) ![]const []const u8 {
+    var services: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (services.items) |service| gpa.free(service);
+        services.deinit(gpa);
+    }
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        const service = std.mem.trim(u8, line, " \t\r");
+        if (service.len == 0) continue;
+        try services.append(gpa, try gpa.dupe(u8, service));
+    }
+    return services.toOwnedSlice(gpa);
+}
+
 test "runningServices uses compose working directory" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
@@ -136,6 +160,21 @@ test "running ignores failed compose command output" {
     const compose = Compose{ .gpa = std.testing.allocator, .runner = run, .dir = "/tmp/demo/docker", .file = "compose.yaml" };
 
     try std.testing.expect(!compose.running());
+}
+
+test "observe returns running services" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("api\ndb\n", "", .{ .exited = 0 });
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+    const compose = Compose{ .gpa = std.testing.allocator, .runner = run, .dir = "/tmp/demo/docker", .file = "compose.yaml" };
+
+    const observation = compose.observe();
+    defer observation.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(observations.ComposeState.running, observation.state);
+    try std.testing.expect(observation.contains("api"));
+    try std.testing.expect(observation.contains("db"));
 }
 
 test "execInteractive passes configured command directly" {

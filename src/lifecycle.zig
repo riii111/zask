@@ -16,8 +16,8 @@ pub const Lifecycle = struct {
     pub fn startAll(self: Lifecycle, profile: []const u8, writer: *std.Io.Writer) !void {
         try self.runPrechecks(writer);
         if (self.cfg.dockerEnabled()) {
-            _ = try self.startDocker(writer);
-            self.waitForDocker(writer) catch {
+            try self.ensureDockerStarted(writer);
+            self.ensureDockerReady(writer) catch {
                 try writer.writeAll("Error: Docker failed to start\n");
                 return error.DockerFailed;
             };
@@ -51,15 +51,11 @@ pub const Lifecycle = struct {
 
     pub fn startTarget(self: Lifecycle, target: ?[]const u8, writer: *std.Io.Writer) !void {
         const t = target orelse "--all";
-        if (!self.tmux.hasSession()) {
-            try writer.writeAll("Session not running. Run 'hello' first.\n");
-            try writer.flush();
-            return error.SessionNotRunning;
-        }
+        try self.ensureSessionActive(writer);
         if (std.mem.eql(u8, t, "--all")) return self.startAll("all", writer);
         if (std.mem.eql(u8, t, "docker")) {
-            _ = try self.startDocker(writer);
-            return self.waitForDocker(writer);
+            try self.ensureDockerStarted(writer);
+            return self.ensureDockerReady(writer);
         }
         if (self.cfg.resolveGroup(self.gpa, t)) |services| {
             for (services) |svc| try self.startService(svc, writer);
@@ -69,7 +65,7 @@ pub const Lifecycle = struct {
     pub fn stopTarget(self: Lifecycle, target: ?[]const u8, writer: *std.Io.Writer) !void {
         const t = target orelse "--all";
         if (std.mem.eql(u8, t, "docker")) return self.stopDocker(writer);
-        if (!self.tmux.hasSession()) {
+        if (self.tmux.observeSession() != .active) {
             if (std.mem.eql(u8, t, "--all")) return self.stopDocker(writer);
             return sessionNotRunning(writer);
         }
@@ -82,22 +78,49 @@ pub const Lifecycle = struct {
     pub fn restartTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
         if (std.mem.eql(u8, target, "docker")) {
             try self.stopDocker(writer);
-            if (!self.tmux.hasSession()) return sessionNotRunning(writer);
-            _ = try self.startDocker(writer);
-            return self.waitForDocker(writer);
+            try self.ensureSessionActive(writer);
+            try self.ensureDockerStarted(writer);
+            return self.ensureDockerReady(writer);
         }
-        if (!self.tmux.hasSession()) return sessionNotRunning(writer);
+        try self.ensureSessionActive(writer);
         if (self.cfg.resolveGroup(self.gpa, target)) |services| {
             for (services) |svc| try self.restartService(svc, writer);
         } else |_| try self.restartService(target, writer);
     }
 
     fn startService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
+        try self.ensureServiceRunning(service, writer);
+    }
+
+    fn stopService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
+        try self.ensureServiceStopped(service, writer);
+    }
+
+    fn restartService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
+        try self.stopService(service, writer);
+        try self.startService(service, writer);
+    }
+
+    fn ensureSessionActive(self: Lifecycle, writer: *std.Io.Writer) !void {
+        if (self.tmux.observeSession() == .active) return;
+        try writer.writeAll("Session not running. Run 'hello' first.\n");
+        try writer.flush();
+        return error.SessionNotRunning;
+    }
+
+    fn ensureServiceRunning(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
         const value = try self.cfg.findService(service);
-        try self.waitForWindow(service);
-        if (self.tmux.paneRunning(service)) {
-            try writeProgress(writer, "{s} already running\n", .{service});
-            return;
+        try self.ensureWindowReady(service);
+        const pane = self.tmux.observePane(service);
+        defer pane.deinit(self.gpa);
+        switch (serviceStartDecision(pane.state)) {
+            .no_op => {
+                try writeProgress(writer, "{s} already running\n", .{service});
+                return;
+            },
+            .send_start => {},
+            .window_not_ready => return error.WindowNotReady,
+            .tmux_unavailable => return error.TmuxUnavailable,
         }
         const target = try self.tmux.target(service);
         defer self.gpa.free(target);
@@ -106,11 +129,17 @@ pub const Lifecycle = struct {
         try self.tmux.sendKeys(target, &.{ cmd, "Enter" });
     }
 
-    fn stopService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
+    fn ensureServiceStopped(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
         _ = try self.cfg.findService(service);
-        if (!self.tmux.paneRunning(service)) {
-            try writeProgress(writer, "{s} already stopped\n", .{service});
-            return;
+        const pane = self.tmux.observePane(service);
+        defer pane.deinit(self.gpa);
+        switch (serviceStopDecision(pane.state)) {
+            .send_stop => {},
+            .no_op => {
+                try writeProgress(writer, "{s} already stopped\n", .{service});
+                return;
+            },
+            .tmux_unavailable => return error.TmuxUnavailable,
         }
         try writeProgress(writer, "Stopping {s}...\n", .{service});
         const target = try self.tmux.target(service);
@@ -119,29 +148,34 @@ pub const Lifecycle = struct {
         try self.waitForStopped(service, writer);
     }
 
-    fn restartService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
-        try self.stopService(service, writer);
-        try self.startService(service, writer);
-    }
-
-    fn startDocker(self: Lifecycle, writer: *std.Io.Writer) !bool {
-        if (!self.cfg.dockerEnabled()) return false;
-        try self.waitForWindow("docker");
-        if (self.tmux.paneRunning("docker")) {
-            try writeProgress(writer, "Docker already running\n", .{});
-            return false;
+    fn ensureDockerStarted(self: Lifecycle, writer: *std.Io.Writer) !void {
+        if (!self.cfg.dockerEnabled()) return;
+        try self.ensureWindowReady("docker");
+        const pane = self.tmux.observePane("docker");
+        defer pane.deinit(self.gpa);
+        switch (dockerStartDecision(pane.state)) {
+            .no_op => {
+                try writeProgress(writer, "Docker already running\n", .{});
+                return;
+            },
+            .send_start => {},
+            .window_not_ready => return error.WindowNotReady,
+            .tmux_unavailable => return error.TmuxUnavailable,
         }
         try writeProgress(writer, "Starting Docker...\n", .{});
         const target = try self.tmux.target("docker");
         defer self.gpa.free(target);
         try self.tmux.sendKeys(target, &.{ try std.fmt.allocPrint(self.gpa, "cd {s} && COMPOSE_MENU=false docker compose -f {s} up", .{ try shell.quote(self.gpa, try self.cfg.dockerDir(self.gpa)), try shell.quote(self.gpa, self.cfg.dockerComposeFile()) }), "Enter" });
-        return true;
     }
 
     pub fn stopDocker(self: Lifecycle, writer: *std.Io.Writer) !void {
         if (!self.cfg.dockerEnabled()) return;
         try writeProgress(writer, "Stopping Docker...\n", .{});
-        if (self.tmux.hasSession()) try self.tmux.sendKeys(try self.tmux.target("docker"), &.{"C-c"});
+        if (self.tmux.observeSession() == .active) {
+            const target = try self.tmux.target("docker");
+            defer self.gpa.free(target);
+            try self.tmux.sendKeys(target, &.{"C-c"});
+        }
         self.docker.down() catch {};
     }
 
@@ -186,19 +220,14 @@ pub const Lifecycle = struct {
         };
     }
 
-    fn waitForDocker(self: Lifecycle, writer: *std.Io.Writer) !void {
+    fn ensureDockerReady(self: Lifecycle, writer: *std.Io.Writer) !void {
         try writer.writeAll("Waiting for Docker containers...\n");
         var attempt: i64 = 0;
         const max_attempts = self.cfg.dockerWaitTimeout();
         while (attempt < max_attempts) : (attempt += 1) {
-            const result = self.docker.runningTable() catch {
-                self.runner.runDiscard(&.{ "sleep", "1" }) catch {};
-                continue;
-            };
-            defer self.gpa.free(result.stdout);
-            defer self.gpa.free(result.stderr);
-
-            if (result.term == .exited and result.term.exited == 0 and runningContainerCount(result.stdout) > 0) {
+            const compose = self.docker.observe();
+            defer compose.deinit(self.gpa);
+            if (compose.state == .running) {
                 self.runner.runDiscard(&.{ "sleep", "2" }) catch {};
                 try writer.writeAll("Docker containers ready\n");
                 return;
@@ -218,10 +247,10 @@ pub const Lifecycle = struct {
         try writeProgress(writer, "Warning: port {d} did not become ready within {d}s\n", .{ port, timeout });
     }
 
-    fn waitForWindow(self: Lifecycle, window: []const u8) !void {
+    fn ensureWindowReady(self: Lifecycle, window: []const u8) !void {
         var attempt: usize = 0;
         while (attempt < 20) : (attempt += 1) {
-            if (self.tmux.windowExists(window)) return;
+            if (self.tmux.observeWindow(window) == .present) return;
             self.runner.runDiscard(&.{ "sleep", "0.3" }) catch {};
         }
         return error.WindowNotReady;
@@ -230,7 +259,9 @@ pub const Lifecycle = struct {
     fn waitForStopped(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
         var attempt: usize = 0;
         while (attempt < 10) : (attempt += 1) {
-            if (!self.tmux.paneRunning(service)) return;
+            const pane = self.tmux.observePane(service);
+            defer pane.deinit(self.gpa);
+            if (pane.state != .busy) return;
             self.runner.runDiscard(&.{ "sleep", "0.5" }) catch {};
         }
         try writeProgress(writer, "Warning: {s} may not have stopped completely\n", .{service});
@@ -261,20 +292,38 @@ fn writeProgress(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytype
     try writer.flush();
 }
 
-fn runningContainerCount(output: []const u8) usize {
-    var count: usize = 0;
-    var lines = std.mem.splitScalar(u8, output, '\n');
-    while (lines.next()) |line| {
-        if (std.mem.trim(u8, line, " \t\r").len > 0) count += 1;
-    }
-    if (count == 0) return 0;
-    return count - 1;
+const StartDecision = enum {
+    no_op,
+    send_start,
+    window_not_ready,
+    tmux_unavailable,
+};
+
+const StopDecision = enum {
+    no_op,
+    send_stop,
+    tmux_unavailable,
+};
+
+fn serviceStartDecision(state: @import("observations.zig").PaneState) StartDecision {
+    return switch (state) {
+        .busy => .no_op,
+        .idle, .dead => .send_start,
+        .window_missing => .window_not_ready,
+        .tmux_unavailable => .tmux_unavailable,
+    };
 }
 
-test "counts running docker compose rows" {
-    try std.testing.expectEqual(@as(usize, 0), runningContainerCount(""));
-    try std.testing.expectEqual(@as(usize, 0), runningContainerCount("NAME SERVICE STATUS\n"));
-    try std.testing.expectEqual(@as(usize, 2), runningContainerCount("NAME SERVICE STATUS\none api running\ntwo db running\n"));
+fn serviceStopDecision(state: @import("observations.zig").PaneState) StopDecision {
+    return switch (state) {
+        .busy => .send_stop,
+        .idle, .dead, .window_missing => .no_op,
+        .tmux_unavailable => .tmux_unavailable,
+    };
+}
+
+fn dockerStartDecision(state: @import("observations.zig").PaneState) StartDecision {
+    return serviceStartDecision(state);
 }
 
 test "classifies lifecycle phase kinds" {
@@ -291,6 +340,27 @@ test "classifies lifecycle phase kinds" {
     try std.testing.expectEqual(PhaseKind.docker, phaseKind(parsed.array.items[0]));
     try std.testing.expectEqual(PhaseKind.command, phaseKind(parsed.array.items[1]));
     try std.testing.expectEqual(PhaseKind.services, phaseKind(parsed.array.items[2]));
+}
+
+test "maps pane observations to lifecycle start and stop decisions" {
+    const observations = @import("observations.zig");
+    const cases = [_]struct {
+        state: observations.PaneState,
+        start: StartDecision,
+        stop: StopDecision,
+    }{
+        .{ .state = .busy, .start = .no_op, .stop = .send_stop },
+        .{ .state = .idle, .start = .send_start, .stop = .no_op },
+        .{ .state = .dead, .start = .send_start, .stop = .no_op },
+        .{ .state = .window_missing, .start = .window_not_ready, .stop = .no_op },
+        .{ .state = .tmux_unavailable, .start = .tmux_unavailable, .stop = .tmux_unavailable },
+    };
+
+    for (cases) |case| {
+        try std.testing.expectEqual(case.start, serviceStartDecision(case.state));
+        try std.testing.expectEqual(case.start, dockerStartDecision(case.state));
+        try std.testing.expectEqual(case.stop, serviceStopDecision(case.state));
+    }
 }
 
 test "precheck abort stops startup and warn continues" {
