@@ -44,7 +44,7 @@ pub const Lifecycle = struct {
                 }
             };
             if (phase.object.get("wait_ports")) |ports| if (ports == .array) {
-                for (ports.array.items) |port_value| if (port_value == .integer) try self.waitForPort(port_value.integer, 120);
+                for (ports.array.items) |port_value| if (port_value == .integer) try self.waitForPort(port_value.integer, 120, writer);
             };
         }
     }
@@ -124,7 +124,7 @@ pub const Lifecycle = struct {
         }
         try writeProgress(writer, "Stopping {s}...\n", .{service});
         try self.tmux.sendKeys(try self.tmux.target(service), &.{"C-c"});
-        try self.waitForStopped(service);
+        try self.waitForStopped(service, writer);
     }
 
     fn restartService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
@@ -203,12 +203,14 @@ pub const Lifecycle = struct {
         return error.DockerNotReady;
     }
 
-    fn waitForPort(self: Lifecycle, port: i64, timeout: i64) !void {
+    fn waitForPort(self: Lifecycle, port: i64, timeout: i64, writer: *std.Io.Writer) !void {
+        const port_text = try std.fmt.allocPrint(self.gpa, "{d}", .{port});
         var elapsed: i64 = 0;
         while (elapsed < timeout) : (elapsed += 2) {
-            if (self.runner.runCheckedDiscard(&.{ "nc", "-z", "localhost", try std.fmt.allocPrint(self.gpa, "{d}", .{port}) })) |_| return else |_| {}
+            if (self.runner.runCheckedDiscard(&.{ "nc", "-z", "localhost", port_text })) |_| return else |_| {}
             self.runner.runDiscard(&.{ "sleep", "2" }) catch {};
         }
+        try writeProgress(writer, "Warning: port {d} did not become ready within {d}s\n", .{ port, timeout });
     }
 
     fn waitForWindow(self: Lifecycle, window: []const u8) !void {
@@ -220,12 +222,13 @@ pub const Lifecycle = struct {
         return error.WindowNotReady;
     }
 
-    fn waitForStopped(self: Lifecycle, service: []const u8) !void {
+    fn waitForStopped(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
         var attempt: usize = 0;
         while (attempt < 10) : (attempt += 1) {
             if (!self.tmux.paneRunning(service)) return;
             self.runner.runDiscard(&.{ "sleep", "0.5" }) catch {};
         }
+        try writeProgress(writer, "Warning: {s} may not have stopped completely\n", .{service});
     }
 };
 
@@ -254,6 +257,75 @@ test "counts running docker compose rows" {
     try std.testing.expectEqual(@as(usize, 0), runningContainerCount(""));
     try std.testing.expectEqual(@as(usize, 0), runningContainerCount("NAME SERVICE STATUS\n"));
     try std.testing.expectEqual(@as(usize, 2), runningContainerCount("NAME SERVICE STATUS\none api running\ntwo db running\n"));
+}
+
+test "precheck abort stops startup and warn continues" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "prechecks": [
+        \\    {"name":"warn-check","command":"false","on_fail":"warn"},
+        \\    {"name":"abort-check","command":"false","on_fail":"abort"}
+        \\  ],
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = std.Io.null, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const lifecycle = Lifecycle{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
+        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.PrecheckFailed, lifecycle.startAll("all", &writer));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: warn-check check failed") != null);
+}
+
+test "wait helpers report timeouts" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    var i: usize = 0;
+    while (i < 11) : (i += 1) {
+        try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
+        try recorder.enqueue("12346\n", "", .{ .exited = 0 });
+    }
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = std.Io.null, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const lifecycle = Lifecycle{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
+        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.waitForPort(5432, 2, &writer);
+    try lifecycle.waitForStopped("api", &writer);
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: port 5432") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api may not have stopped") != null);
 }
 
 test "stop and restart targets require an active session" {

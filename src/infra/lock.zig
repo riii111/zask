@@ -31,8 +31,7 @@ pub const Lock = struct {
 };
 
 fn ensurePrivateDir(io: std.Io, path: []const u8) !void {
-    const status = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
-    if (status == .existed) return;
+    _ = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
     var dir = try std.Io.Dir.openDirAbsolute(io, path, .{});
     defer dir.close(io);
     try dir.setPermissions(io, private_dir_permissions);
@@ -48,12 +47,18 @@ fn acquireDir(io: std.Io, path: []const u8) !bool {
 
 fn writePid(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, pid: []const u8) !void {
     const pid_path = try std.fs.path.join(gpa, &.{ dir, "pid" });
-    try paths.writeFile(io, pid_path, pid);
+    const tmp_path = try std.fmt.allocPrint(gpa, "{s}.tmp.{d}", .{ pid_path, std.c.getpid() });
+    errdefer std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
+    try paths.writeFile(io, tmp_path, pid);
+    try std.Io.Dir.renameAbsolute(tmp_path, pid_path, io);
 }
 
 fn lockAlive(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !bool {
     const pid_path = try std.fs.path.join(gpa, &.{ dir, "pid" });
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, pid_path, gpa, .limited(64)) catch return false;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, pid_path, gpa, .limited(64)) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return true,
+    };
     defer gpa.free(bytes);
     const pid_text = std.mem.trim(u8, bytes, " \t\r\n");
     if (pid_text.len == 0) return false;
@@ -61,7 +66,7 @@ fn lockAlive(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !bool {
     std.posix.kill(pid, @enumFromInt(0)) catch |err| switch (err) {
         error.ProcessNotFound => return false,
         error.PermissionDenied => return true,
-        else => return false,
+        else => return true,
     };
     return true;
 }
