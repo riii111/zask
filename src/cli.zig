@@ -99,9 +99,15 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
         return printGreeting(writer);
     }
 
-    const parsed = try parseArgs(context, args);
+    const parsed = parseArgs(context, args) catch |err| {
+        if (err == error.InvalidArguments) try printHelp(writer);
+        return err;
+    };
     const command = parseCommand(parsed.command) orelse return error.UnknownCommand;
-    try validateArity(command, parsed.args);
+    validateArity(command, parsed.args) catch |err| {
+        if (err == error.InvalidArguments) try printHelp(writer);
+        return err;
+    };
     if (command == .version) {
         return printVersion(writer);
     }
@@ -337,6 +343,22 @@ test "validates command arity strictly" {
     try validateArity(.exec, &.{"api"});
     try validateArity(.exec, &.{ "api", "--shell" });
     try std.testing.expectError(error.InvalidArguments, validateArity(.exec, &.{ "api", "--shell", "extra" }));
+}
+
+test "invalid command arity prints usage before returning error" {
+    var buffer: [4096]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.InvalidArguments, runWithArgs(.{ .gpa = std.testing.allocator }, &.{ "version", "extra" }, &writer));
+    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
+}
+
+test "incomplete config form prints usage before returning error" {
+    var buffer: [4096]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.InvalidArguments, runWithArgs(.{ .gpa = std.testing.allocator }, &.{"--config"}, &writer));
+    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
 }
 
 test "normalizes docker target aliases" {
