@@ -403,34 +403,16 @@ test "rejects invalid identifiers at config boundaries" {
 }
 
 test "parses synthetic fixture" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": [
-        \\    {"name":"api","dir":"backend","command":"serve","group":"backend"},
-        \\    {"name":"web","dir":"frontend","command":"dev","group":"frontend"},
-        \\    {"name":"worker","dir":"worker","command":"work","group":"backend"}
-        \\  ],
-        \\  "group_aliases": {"core-backend":["api","worker"]},
-        \\  "start_profiles": {
-        \\    "core": {
-        \\      "profile":"core",
-        \\      "group_overrides":{"backend":"core-backend"}
-        \\    }
-        \\  },
-        \\  "phases": [
-        \\    {"type":"docker"},
-        \\    {"type":"command","command":"echo setup"},
-        \\    {"groups":["backend"]}
-        \\  ]
-        \\}
-    ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const cfg = try loadPath(arena.allocator(), threaded.io(), "testdata/synthetic.json", "/home/me");
 
     try std.testing.expectEqualStrings("demo", try cfg.projectName());
     try std.testing.expectEqual(@as(usize, 3), (try cfg.services()).len);
     try std.testing.expectEqual(@as(usize, 3), cfg.phases().len);
     try std.testing.expectEqualStrings("core-backend", cfg.resolvePhaseGroup("core", "backend"));
+    try std.testing.expectEqualStrings("psql", cfg.dockerExecDefault("db"));
+    try std.testing.expectEqual(@as(?i64, 18080), Config.servicePort(try cfg.findService("api")));
 }

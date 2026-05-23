@@ -23,3 +23,21 @@ test "quotes shell strings" {
     defer std.testing.allocator.free(value);
     try std.testing.expectEqualStrings("'a'\\''b'", value);
 }
+
+test "quotes shell edge cases" {
+    const empty = try quote(std.testing.allocator, "");
+    defer std.testing.allocator.free(empty);
+    try std.testing.expectEqualStrings("''", empty);
+
+    const newline = try quote(std.testing.allocator, "a\nb");
+    defer std.testing.allocator.free(newline);
+    try std.testing.expectEqualStrings("'a\nb'", newline);
+
+    const variable = try quote(std.testing.allocator, "$HOME");
+    defer std.testing.allocator.free(variable);
+    try std.testing.expectEqualStrings("'$HOME'", variable);
+
+    const adjacent_quotes = try quote(std.testing.allocator, "''");
+    defer std.testing.allocator.free(adjacent_quotes);
+    try std.testing.expectEqualStrings("''\\'''\\'''", adjacent_quotes);
+}
