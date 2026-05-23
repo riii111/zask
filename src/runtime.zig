@@ -122,7 +122,7 @@ pub const Runtime = struct {
             return;
         }
         const session_file = try self.writeSessionFile();
-        try self.runner().runCheckedDiscard(&.{ "tmuxp", "load", "-d", session_file });
+        _ = try self.runner().run(&.{ "tmuxp", "load", "-d", session_file }, .{ .check = true, .discard = true });
         const tx = try self.tmux();
         errdefer tx.killSession() catch {};
         try tmux_setup.applySessionOptions(tx, self.zask_path, self.config_path);
@@ -259,7 +259,7 @@ pub const Runtime = struct {
 
     fn writeSessionFile(self: Runtime) ![]const u8 {
         const dir = try std.fs.path.join(self.gpa, &.{ try paths.configBase(self.gpa, self.environ), try self.cfg.projectName() });
-        try self.runner().runCheckedDiscard(&.{ "mkdir", "-p", dir });
+        _ = try self.runner().run(&.{ "mkdir", "-p", dir }, .{ .check = true, .discard = true });
         const path = try std.fs.path.join(self.gpa, &.{ dir, "session.yml" });
         var out: std.Io.Writer.Allocating = .init(self.gpa);
         defer out.deinit();
@@ -309,10 +309,6 @@ pub const Runtime = struct {
 
     fn inTmux(self: Runtime) !bool {
         return env.exists(self.environ, "TMUX");
-    }
-
-    fn run(self: Runtime, argv: []const []const u8) !std.process.RunResult {
-        return try self.runner().run(argv);
     }
 };
 

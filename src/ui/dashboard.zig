@@ -14,7 +14,7 @@ pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env.Map,
     try renderLauncher(ctx, writer);
     try writer.flush();
     const shell = env.get(environ, "SHELL") orelse "sh";
-    _ = try ctx.runner.runInteractive(&.{shell});
+    _ = try ctx.runner.run(&.{shell}, .{ .interactive = true });
 }
 
 pub fn runMonitor(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.Io.Writer) !void {

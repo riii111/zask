@@ -157,14 +157,14 @@ fn shouldObserveCompose(pane: observations.PaneObservation) bool {
 
 fn observeHealth(ctx: Context, service: std.json.Value) !observations.HealthObservation {
     const port = config.Config.servicePort(service) orelse return .no_check;
-    const result = ctx.runner.run(&.{ "nc", "-z", "localhost", try std.fmt.allocPrint(ctx.gpa, "{d}", .{port}) }) catch return .waiting;
+    const result = proc_runner.captured(ctx.runner.run(&.{ "nc", "-z", "localhost", try std.fmt.allocPrint(ctx.gpa, "{d}", .{port}) }, .{}) catch return .waiting);
     defer ctx.gpa.free(result.stdout);
     defer ctx.gpa.free(result.stderr);
     if (result.term != .exited or result.term.exited != 0) return .waiting;
     if (!std.mem.eql(u8, config.Config.serviceHealthcheckType(service), "http")) return .ready;
 
     const url = try std.fmt.allocPrint(ctx.gpa, "http://localhost:{d}{s}", .{ port, config.Config.serviceHealthcheckPath(service) });
-    const http = ctx.runner.run(&.{ "curl", "-sf", "--max-time", "1", url }) catch return .degraded;
+    const http = proc_runner.captured(ctx.runner.run(&.{ "curl", "-sf", "--max-time", "1", url }, .{}) catch return .degraded);
     defer ctx.gpa.free(http.stdout);
     defer ctx.gpa.free(http.stderr);
     return if (http.term == .exited and http.term.exited == 0) .ready else .degraded;

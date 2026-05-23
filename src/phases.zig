@@ -24,13 +24,14 @@ pub fn runPrechecks(ctx: anytype, writer: *std.Io.Writer) !void {
         const on_fail = config_value.optionalObjectString(check, "on_fail", "warn");
         const dir = config_value.optionalObjectString(check, "dir", "");
         const cwd = try phaseCwd(ctx, dir);
-        const result = ctx.runner.runCheckedCwd(&.{ "bash", "-c", command }, cwd) catch {
+        const result = ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd, .check = true }) catch {
             if (std.mem.eql(u8, on_fail, "abort")) return error.PrecheckFailed;
             try writer.print("Warning: {s} check failed\n", .{name});
             continue;
         };
-        ctx.gpa.free(result.stdout);
-        ctx.gpa.free(result.stderr);
+        const captured = @import("infra/runner.zig").captured(result);
+        ctx.gpa.free(captured.stdout);
+        ctx.gpa.free(captured.stderr);
     }
 }
 
@@ -38,7 +39,7 @@ pub fn runCommandPhase(ctx: anytype, phase: std.json.Value, profile: []const u8,
     const command = try config.Config.commandPhaseCommand(phase, profile);
     const dir = config_value.optionalObjectString(phase, "dir", "");
     const cwd = try phaseCwd(ctx, dir);
-    _ = ctx.runner.runInteractiveCheckedCwd(&.{ "bash", "-c", command }, cwd) catch {
+    _ = ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd, .interactive = true, .check = true }) catch {
         if (std.mem.eql(u8, config_value.optionalObjectString(phase, "on_fail", "abort"), "abort")) return error.CommandPhaseFailed;
         try writer.writeAll("Warning: command phase failed\n");
         return;

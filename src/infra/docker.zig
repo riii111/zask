@@ -25,15 +25,15 @@ pub const Compose = struct {
     }
 
     pub fn runningServices(self: Compose) !std.process.RunResult {
-        return self.runner.runCwd(&.{ "docker", "compose", "-f", self.file, "ps", "--status", "running", "--format", "{{.Service}}" }, self.dir);
+        return runner.captured(try self.runner.run(&.{ "docker", "compose", "-f", self.file, "ps", "--status", "running", "--format", "{{.Service}}" }, .{ .cwd = self.dir }));
     }
 
     pub fn runningTable(self: Compose) !std.process.RunResult {
-        return self.runner.runCwd(&.{ "docker", "compose", "-f", self.file, "ps", "--status", "running" }, self.dir);
+        return runner.captured(try self.runner.run(&.{ "docker", "compose", "-f", self.file, "ps", "--status", "running" }, .{ .cwd = self.dir }));
     }
 
     pub fn down(self: Compose) !void {
-        const result = try self.runner.runCheckedCwd(&.{ "docker", "compose", "-f", self.file, "down" }, self.dir);
+        const result = runner.captured(try self.runner.run(&.{ "docker", "compose", "-f", self.file, "down" }, .{ .cwd = self.dir, .check = true }));
         self.gpa.free(result.stdout);
         self.gpa.free(result.stderr);
     }
@@ -46,7 +46,7 @@ pub const Compose = struct {
         defer argv.deinit(self.gpa);
         try argv.appendSlice(self.gpa, &.{ "docker", "compose", "-f", self.file, "exec", container });
         try argv.appendSlice(self.gpa, command_args);
-        _ = try self.runner.runInteractiveCheckedCwd(argv.items, self.dir);
+        _ = try self.runner.run(argv.items, .{ .cwd = self.dir, .interactive = true, .check = true });
     }
 };
 

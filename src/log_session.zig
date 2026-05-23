@@ -17,8 +17,8 @@ pub const Manager = struct {
     pub fn init(self: Manager) !void {
         const session_id = try self.sessionId();
         const session_dir = try self.dirForSession(session_id);
-        try self.runner.runCheckedDiscard(&.{ "mkdir", "-p", session_dir });
-        try self.runner.runCheckedDiscard(&.{ "chmod", "700", session_dir });
+        _ = try self.runner.run(&.{ "mkdir", "-p", session_dir }, .{ .check = true, .discard = true });
+        _ = try self.runner.run(&.{ "chmod", "700", session_dir }, .{ .check = true, .discard = true });
         try self.tmux.setOption(tmux_options.log_session_id, session_id);
         try self.cleanupOld();
     }
@@ -32,11 +32,11 @@ pub const Manager = struct {
 
     pub fn prepareLogFile(self: Manager, service: []const u8) ![]const u8 {
         const log_dir = try self.dir();
-        try self.runner.runCheckedDiscard(&.{ "mkdir", "-p", log_dir });
-        try self.runner.runCheckedDiscard(&.{ "chmod", "700", log_dir });
+        _ = try self.runner.run(&.{ "mkdir", "-p", log_dir }, .{ .check = true, .discard = true });
+        _ = try self.runner.run(&.{ "chmod", "700", log_dir }, .{ .check = true, .discard = true });
         const log_file = try std.fs.path.join(self.gpa, &.{ log_dir, try std.fmt.allocPrint(self.gpa, "{s}.log", .{service}) });
-        try self.runner.runCheckedDiscard(&.{ "touch", log_file });
-        try self.runner.runCheckedDiscard(&.{ "chmod", "600", log_file });
+        _ = try self.runner.run(&.{ "touch", log_file }, .{ .check = true, .discard = true });
+        _ = try self.runner.run(&.{ "chmod", "600", log_file }, .{ .check = true, .discard = true });
         return log_file;
     }
 
@@ -49,7 +49,7 @@ pub const Manager = struct {
     }
 
     fn sessionId(self: Manager) ![]const u8 {
-        const result = try self.runner.run(&.{ "date", "+%Y%m%d_%H%M%S" });
+        const result = runner_mod.captured(try self.runner.run(&.{ "date", "+%Y%m%d_%H%M%S" }, .{}));
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
         return try self.gpa.dupe(u8, std.mem.trim(u8, result.stdout, " \t\r\n"));

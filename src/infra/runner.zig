@@ -5,92 +5,86 @@ pub const Runner = struct {
     io: std.Io,
     recorder: ?*Recorder = null,
 
-    pub fn run(self: Runner, argv: []const []const u8) !std.process.RunResult {
-        if (self.recorder) |recorder| return recorder.record(argv, null, false);
-        return std.process.run(self.gpa, self.io, .{
-            .argv = argv,
-            .stdout_limit = .limited(1024 * 1024),
-            .stderr_limit = .limited(1024 * 1024),
-        });
-    }
-
-    pub fn runDiscard(self: Runner, argv: []const []const u8) !void {
-        const result = try self.run(argv);
-        self.gpa.free(result.stdout);
-        self.gpa.free(result.stderr);
-    }
-
-    pub fn runChecked(self: Runner, argv: []const []const u8) !std.process.RunResult {
-        const result = try self.run(argv);
+    pub fn run(self: Runner, argv: []const []const u8, options: RunOptions) !RunOutput {
+        if (self.recorder) |recorder| {
+            return self.recordedRun(recorder, argv, options);
+        }
+        if (options.interactive) {
+            var child = if (options.cwd) |cwd|
+                try std.process.spawn(self.io, .{ .argv = argv, .cwd = .{ .path = cwd } })
+            else
+                try std.process.spawn(self.io, .{ .argv = argv });
+            const term = try child.wait(self.io);
+            if (options.check) try checkTerm(term);
+            return .{ .term = term };
+        }
+        const result = if (options.cwd) |cwd|
+            try std.process.run(self.gpa, self.io, .{
+                .argv = argv,
+                .cwd = .{ .path = cwd },
+                .stdout_limit = .limited(1024 * 1024),
+                .stderr_limit = .limited(1024 * 1024),
+            })
+        else
+            try std.process.run(self.gpa, self.io, .{
+                .argv = argv,
+                .stdout_limit = .limited(1024 * 1024),
+                .stderr_limit = .limited(1024 * 1024),
+            });
         errdefer self.gpa.free(result.stdout);
         errdefer self.gpa.free(result.stderr);
-        try checkTerm(result.term);
-        return result;
-    }
-
-    pub fn runCheckedDiscard(self: Runner, argv: []const []const u8) !void {
-        const result = try self.runChecked(argv);
-        self.gpa.free(result.stdout);
-        self.gpa.free(result.stderr);
-    }
-
-    pub fn runCwd(self: Runner, argv: []const []const u8, cwd: []const u8) !std.process.RunResult {
-        if (self.recorder) |recorder| return recorder.record(argv, cwd, false);
-        return std.process.run(self.gpa, self.io, .{
-            .argv = argv,
-            .cwd = .{ .path = cwd },
-            .stdout_limit = .limited(1024 * 1024),
-            .stderr_limit = .limited(1024 * 1024),
-        });
-    }
-
-    pub fn runCheckedCwd(self: Runner, argv: []const []const u8, cwd: []const u8) !std.process.RunResult {
-        const result = try self.runCwd(argv, cwd);
-        errdefer self.gpa.free(result.stdout);
-        errdefer self.gpa.free(result.stderr);
-        try checkTerm(result.term);
-        return result;
-    }
-
-    pub fn runInteractive(self: Runner, argv: []const []const u8) !std.process.Child.Term {
-        if (self.recorder) |recorder| {
-            const result = try recorder.record(argv, null, true);
+        if (options.check) try checkTerm(result.term);
+        if (options.discard) {
             self.gpa.free(result.stdout);
             self.gpa.free(result.stderr);
-            return result.term;
+            return .discarded;
         }
-        var child = try std.process.spawn(self.io, .{ .argv = argv });
-        return child.wait(self.io);
-    }
-
-    pub fn runInteractiveChecked(self: Runner, argv: []const []const u8) !std.process.Child.Term {
-        const term = try self.runInteractive(argv);
-        try checkTerm(term);
-        return term;
-    }
-
-    pub fn runInteractiveCwd(self: Runner, argv: []const []const u8, cwd: []const u8) !std.process.Child.Term {
-        if (self.recorder) |recorder| {
-            const result = try recorder.record(argv, cwd, true);
-            self.gpa.free(result.stdout);
-            self.gpa.free(result.stderr);
-            return result.term;
-        }
-        var child = try std.process.spawn(self.io, .{ .argv = argv, .cwd = .{ .path = cwd } });
-        return child.wait(self.io);
-    }
-
-    pub fn runInteractiveCheckedCwd(self: Runner, argv: []const []const u8, cwd: []const u8) !std.process.Child.Term {
-        const term = try self.runInteractiveCwd(argv, cwd);
-        try checkTerm(term);
-        return term;
+        return .{ .captured = result };
     }
 
     pub fn sleep(self: Runner, duration: std.Io.Duration) void {
         if (self.recorder != null) return;
         std.Io.sleep(self.io, duration, .awake) catch {};
     }
+
+    fn recordedRun(self: Runner, recorder: *Recorder, argv: []const []const u8, options: RunOptions) !RunOutput {
+        const result = try recorder.record(argv, options.cwd, options.interactive);
+        errdefer self.gpa.free(result.stdout);
+        errdefer self.gpa.free(result.stderr);
+        if (options.check) try checkTerm(result.term);
+        if (options.interactive) {
+            self.gpa.free(result.stdout);
+            self.gpa.free(result.stderr);
+            return .{ .term = result.term };
+        }
+        if (options.discard) {
+            self.gpa.free(result.stdout);
+            self.gpa.free(result.stderr);
+            return .discarded;
+        }
+        return .{ .captured = result };
+    }
 };
+
+pub const RunOptions = struct {
+    cwd: ?[]const u8 = null,
+    check: bool = false,
+    discard: bool = false,
+    interactive: bool = false,
+};
+
+pub const RunOutput = union(enum) {
+    captured: std.process.RunResult,
+    term: std.process.Child.Term,
+    discarded,
+};
+
+pub fn captured(output: RunOutput) std.process.RunResult {
+    return switch (output) {
+        .captured => |result| result,
+        else => unreachable,
+    };
+}
 
 fn checkTerm(term: std.process.Child.Term) !void {
     if (term == .exited and term.exited == 0) return;
@@ -174,7 +168,7 @@ test "recorder captures commands without spawning processes" {
     defer recorder.deinit();
     const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
 
-    const result = try run.runCwd(&.{ "echo", "ok" }, "/tmp/demo");
+    const result = captured(try run.run(&.{ "echo", "ok" }, .{ .cwd = "/tmp/demo" }));
     defer std.testing.allocator.free(result.stdout);
     defer std.testing.allocator.free(result.stderr);
     try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
@@ -183,7 +177,7 @@ test "recorder captures commands without spawning processes" {
     try std.testing.expectEqualStrings("/tmp/demo", recorder.commands.items[0].cwd.?);
     try std.testing.expect(!recorder.commands.items[0].interactive);
 
-    _ = try run.runInteractive(&.{"zsh"});
+    _ = try run.run(&.{"zsh"}, .{ .interactive = true });
     try std.testing.expect(recorder.commands.items[1].interactive);
 }
 
@@ -194,10 +188,10 @@ test "recorder returns queued responses in order" {
     try recorder.enqueue("second", "warn", .{ .exited = 1 });
     const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
 
-    const first = try run.run(&.{"one"});
+    const first = captured(try run.run(&.{"one"}, .{}));
     defer std.testing.allocator.free(first.stdout);
     defer std.testing.allocator.free(first.stderr);
-    const second = try run.run(&.{"two"});
+    const second = captured(try run.run(&.{"two"}, .{}));
     defer std.testing.allocator.free(second.stdout);
     defer std.testing.allocator.free(second.stderr);
 
@@ -213,7 +207,7 @@ test "checked runner rejects non-zero exits" {
     try recorder.enqueue("", "failed", .{ .exited = 2 });
     const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
 
-    try std.testing.expectError(error.CommandFailed, run.runCheckedDiscard(&.{"false"}));
+    try std.testing.expectError(error.CommandFailed, run.run(&.{"false"}, .{ .check = true, .discard = true }));
 }
 
 test "checked interactive runner rejects non-zero exits" {
@@ -222,5 +216,5 @@ test "checked interactive runner rejects non-zero exits" {
     try recorder.enqueue("", "", .{ .exited = 1 });
     const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
 
-    try std.testing.expectError(error.CommandFailed, run.runInteractiveChecked(&.{"tmux"}));
+    try std.testing.expectError(error.CommandFailed, run.run(&.{"tmux"}, .{ .interactive = true, .check = true }));
 }

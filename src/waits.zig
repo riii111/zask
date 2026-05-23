@@ -31,7 +31,7 @@ pub fn waitForPort(ctx: anytype, port: i64, timeout: i64, writer: *std.Io.Writer
     defer ctx.gpa.free(port_text);
     var elapsed: i64 = 0;
     while (elapsed < timeout) : (elapsed += port_wait_interval_seconds) {
-        if (ctx.runner.runCheckedDiscard(&.{ "nc", "-z", "localhost", port_text })) |_| return else |_| {}
+        if (ctx.runner.run(&.{ "nc", "-z", "localhost", port_text }, .{ .check = true, .discard = true })) |_| return else |_| {}
         ctx.runner.sleep(port_wait_interval);
     }
     try writeProgress(writer, "Warning: port {d} did not become ready within {d}s\n", .{ port, timeout });
