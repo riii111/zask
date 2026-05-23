@@ -28,6 +28,26 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ "tmux", "attach-session", "-t", self.session }, .{ .interactive = true, .check = true });
     }
 
+    pub fn newDetachedSession(self: Client, window: []const u8, cwd: []const u8, command: []const u8) !void {
+        _ = try self.runner.run(&.{ "tmux", "new-session", "-d", "-s", self.session, "-n", window, "-c", cwd, command }, .{ .check = true, .discard = true });
+    }
+
+    pub fn newWindow(self: Client, window: []const u8, cwd: []const u8, command: []const u8) !void {
+        _ = try self.runner.run(&.{ "tmux", "new-window", "-t", self.session, "-n", window, "-c", cwd, command }, .{ .check = true, .discard = true });
+    }
+
+    pub fn splitWindow(self: Client, window: []const u8, cwd: []const u8, command: []const u8) !void {
+        const pane_target = try self.target(window);
+        defer self.gpa.free(pane_target);
+        _ = try self.runner.run(&.{ "tmux", "split-window", "-t", pane_target, "-c", cwd, command }, .{ .check = true, .discard = true });
+    }
+
+    pub fn selectLayout(self: Client, window: []const u8, layout: []const u8) !void {
+        const pane_target = try self.target(window);
+        defer self.gpa.free(pane_target);
+        _ = try self.runner.run(&.{ "tmux", "select-layout", "-t", pane_target, layout }, .{ .check = true, .discard = true });
+    }
+
     pub fn detachClient(self: Client) !void {
         _ = try self.runner.run(&.{ "tmux", "detach-client" }, .{ .check = true, .discard = true });
     }
@@ -52,6 +72,12 @@ pub const Client = struct {
 
     pub fn setWindowOption(self: Client, name: []const u8, value: []const u8) !void {
         _ = try self.runner.run(&.{ "tmux", "set-window-option", "-t", self.session, name, value }, .{ .check = true, .discard = true });
+    }
+
+    pub fn setWindowOptionForWindow(self: Client, window: []const u8, name: []const u8, value: []const u8) !void {
+        const pane_target = try self.target(window);
+        defer self.gpa.free(pane_target);
+        _ = try self.runner.run(&.{ "tmux", "set-window-option", "-t", pane_target, name, value }, .{ .check = true, .discard = true });
     }
 
     pub fn showOption(self: Client, name: []const u8) !?[]const u8 {
@@ -210,6 +236,52 @@ test "sendKeys records tmux command through runner" {
     try std.testing.expectEqualStrings("demo:api", command.argv[3]);
     try std.testing.expectEqualStrings("echo ok", command.argv[4]);
     try std.testing.expectEqualStrings("Enter", command.argv[5]);
+}
+
+test "session construction records tmux commands through runner" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+    const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
+
+    try client.newDetachedSession("dashboard", "/tmp/demo app", "zask dashboard");
+    try client.splitWindow("dashboard", "/tmp/demo app", "zask monitor");
+    try client.setWindowOptionForWindow("dashboard", "main-pane-width", "50%");
+    try client.selectLayout("dashboard", "main-vertical");
+    try client.newWindow("api", "/tmp/demo app/backend", "echo waiting");
+
+    const session = recorder.commands.items[0];
+    try std.testing.expectEqualStrings("tmux", session.argv[0]);
+    try std.testing.expectEqualStrings("new-session", session.argv[1]);
+    try std.testing.expectEqualStrings("-d", session.argv[2]);
+    try std.testing.expectEqualStrings("demo", session.argv[4]);
+    try std.testing.expectEqualStrings("dashboard", session.argv[6]);
+    try std.testing.expectEqualStrings("/tmp/demo app", session.argv[8]);
+    try std.testing.expectEqualStrings("zask dashboard", session.argv[9]);
+
+    const split = recorder.commands.items[1];
+    try std.testing.expectEqualStrings("split-window", split.argv[1]);
+    try std.testing.expectEqualStrings("demo:dashboard", split.argv[3]);
+    try std.testing.expectEqualStrings("/tmp/demo app", split.argv[5]);
+    try std.testing.expectEqualStrings("zask monitor", split.argv[6]);
+
+    const option = recorder.commands.items[2];
+    try std.testing.expectEqualStrings("set-window-option", option.argv[1]);
+    try std.testing.expectEqualStrings("demo:dashboard", option.argv[3]);
+    try std.testing.expectEqualStrings("main-pane-width", option.argv[4]);
+    try std.testing.expectEqualStrings("50%", option.argv[5]);
+
+    const layout = recorder.commands.items[3];
+    try std.testing.expectEqualStrings("select-layout", layout.argv[1]);
+    try std.testing.expectEqualStrings("demo:dashboard", layout.argv[3]);
+    try std.testing.expectEqualStrings("main-vertical", layout.argv[4]);
+
+    const window = recorder.commands.items[4];
+    try std.testing.expectEqualStrings("new-window", window.argv[1]);
+    try std.testing.expectEqualStrings("demo", window.argv[3]);
+    try std.testing.expectEqualStrings("api", window.argv[5]);
+    try std.testing.expectEqualStrings("/tmp/demo app/backend", window.argv[7]);
+    try std.testing.expectEqualStrings("echo waiting", window.argv[8]);
 }
 
 test "paneRunning checks pane child processes" {
