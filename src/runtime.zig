@@ -49,16 +49,18 @@ pub const Runtime = struct {
     }
 
     pub fn attach(self: Runtime) !void {
+        const tx = try self.tmux();
         if (try self.inTmux()) {
-            try (try self.tmux()).switchClient();
+            try tx.switchClient();
         } else {
-            try (try self.tmux()).attachSession();
+            try tx.attachSession();
         }
     }
 
     pub fn detach(self: Runtime, writer: *std.Io.Writer) !void {
         if (try self.inTmux()) {
-            try (try self.tmux()).detachClient();
+            const tx = try self.tmux();
+            try tx.detachClient();
         } else {
             try writer.writeAll("Not in tmux session\n");
         }
@@ -71,10 +73,11 @@ pub const Runtime = struct {
             try writer.flush();
             return error.SessionNotRunning;
         }
+        const tx = try self.tmux();
         if (try self.inTmux()) {
-            try (try self.tmux()).switchClient();
+            try tx.switchClient();
         }
-        try (try self.tmux()).selectWindow(service);
+        try tx.selectWindow(service);
         if (!try self.inTmux()) try self.attach();
     }
 
@@ -98,7 +101,8 @@ pub const Runtime = struct {
         if (!try self.pathExists(log_file)) {
             try self.runner().runCheckedDiscard(&.{ "touch", log_file });
         }
-        try (try self.tmux()).popup(self.cfg.popupWidth(), self.cfg.popupHeight(), try std.fmt.allocPrint(self.gpa, "nvim -c 'terminal tail -F {s}'", .{try shell.quote(self.gpa, log_file)}));
+        const tx = try self.tmux();
+        try tx.popup(self.cfg.popupWidth(), self.cfg.popupHeight(), try std.fmt.allocPrint(self.gpa, "nvim -c 'terminal tail -F {s}'", .{try shell.quote(self.gpa, log_file)}));
     }
 
     pub fn hello(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
@@ -143,7 +147,8 @@ pub const Runtime = struct {
         }
         try (try self.lifecycle()).stopAll(writer);
         try self.cleanupPipePane();
-        try (try self.tmux()).killSession();
+        const tx = try self.tmux();
+        try tx.killSession();
     }
 
     pub fn kill(self: Runtime, writer: *std.Io.Writer) !void {
@@ -152,7 +157,8 @@ pub const Runtime = struct {
         try (try self.lifecycle()).stopDocker(writer);
         try self.cleanupPipePane();
         if (try self.sessionExists()) {
-            try (try self.tmux()).killSession();
+            const tx = try self.tmux();
+            try tx.killSession();
         } else {
             try writer.writeAll("Session not running\n");
         }
@@ -160,7 +166,8 @@ pub const Runtime = struct {
 
     pub fn re(self: Runtime, writer: *std.Io.Writer) !void {
         if (try self.inTmux()) {
-            try (try self.tmux()).detachClientExec(try std.fmt.allocPrint(self.gpa, "{s} --config {s} re", .{ try shell.quote(self.gpa, self.zask_path), try shell.quote(self.gpa, self.config_path) }));
+            const tx = try self.tmux();
+            try tx.detachClientExec(try std.fmt.allocPrint(self.gpa, "{s} --config {s} re", .{ try shell.quote(self.gpa, self.zask_path), try shell.quote(self.gpa, self.config_path) }));
             return;
         }
         const guard = try self.acquireLock();
@@ -273,17 +280,19 @@ pub const Runtime = struct {
 
     fn setupPipePane(self: Runtime) !void {
         const dir = try (try self.logSession()).dir();
+        const tx = try self.tmux();
         for (try self.cfg.services()) |service| {
             const name = try config.Config.serviceName(service);
-            _ = (try self.tmux()).pipePane(try (try self.tmux()).target(name), try std.fmt.allocPrint(self.gpa, "cat >> {s}", .{try shell.quote(self.gpa, try std.fs.path.join(self.gpa, &.{ dir, try std.fmt.allocPrint(self.gpa, "{s}.log", .{name}) }))})) catch {};
+            _ = tx.pipePane(try tx.target(name), try std.fmt.allocPrint(self.gpa, "cat >> {s}", .{try shell.quote(self.gpa, try std.fs.path.join(self.gpa, &.{ dir, try std.fmt.allocPrint(self.gpa, "{s}.log", .{name}) }))})) catch {};
         }
     }
 
     fn cleanupPipePane(self: Runtime) !void {
         if (!try self.sessionExists()) return;
+        const tx = try self.tmux();
         for (try self.cfg.services()) |service| {
             const name = try config.Config.serviceName(service);
-            _ = (try self.tmux()).pipePane(try (try self.tmux()).target(name), null) catch {};
+            _ = tx.pipePane(try tx.target(name), null) catch {};
         }
     }
 
