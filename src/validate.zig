@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub fn identifier(value: []const u8) !void {
     if (value.len == 0) return error.InvalidIdentifier;
     switch (value[0]) {
@@ -12,11 +14,28 @@ pub fn identifier(value: []const u8) !void {
     }
 }
 
+pub fn relativeSubPath(value: []const u8) !void {
+    if (value.len == 0) return;
+    if (std.fs.path.isAbsolute(value)) return error.InvalidPath;
+    var parts = std.mem.tokenizeAny(u8, value, "/\\");
+    while (parts.next()) |part| {
+        if (std.mem.eql(u8, part, "..")) return error.InvalidPath;
+    }
+}
+
 test "validates identifiers" {
     try identifier("nodex-agent");
     try identifier("studio_api");
-    try @import("std").testing.expectError(error.InvalidIdentifier, identifier("../nodex"));
-    try @import("std").testing.expectError(error.InvalidIdentifier, identifier("bad'name"));
-    try @import("std").testing.expectError(error.InvalidIdentifier, identifier("-rf"));
-    try @import("std").testing.expectError(error.InvalidIdentifier, identifier("bad\nname"));
+    try std.testing.expectError(error.InvalidIdentifier, identifier("../nodex"));
+    try std.testing.expectError(error.InvalidIdentifier, identifier("bad'name"));
+    try std.testing.expectError(error.InvalidIdentifier, identifier("-rf"));
+    try std.testing.expectError(error.InvalidIdentifier, identifier("bad\nname"));
+}
+
+test "validates relative subpaths" {
+    try relativeSubPath(".");
+    try relativeSubPath("backend/api");
+    try std.testing.expectError(error.InvalidPath, relativeSubPath("../escape"));
+    try std.testing.expectError(error.InvalidPath, relativeSubPath("backend/../escape"));
+    try std.testing.expectError(error.InvalidPath, relativeSubPath("/tmp/escape"));
 }

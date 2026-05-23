@@ -96,12 +96,12 @@ pub const Config = struct {
     }
 
     pub fn serviceHealthcheckType(service: Value) []const u8 {
-        const healthcheck = if (service == .object) service.object.get("healthcheck") orelse return "tcp" else return "tcp";
+        const healthcheck = serviceHealthcheck(service) orelse return "tcp";
         return config_value.optionalObjectString(healthcheck, "type", "tcp");
     }
 
     pub fn serviceHealthcheckPath(service: Value) []const u8 {
-        const healthcheck = if (service == .object) service.object.get("healthcheck") orelse return "/health" else return "/health";
+        const healthcheck = serviceHealthcheck(service) orelse return "/health";
         return config_value.optionalObjectString(healthcheck, "path", "/health");
     }
 
@@ -111,6 +111,7 @@ pub const Config = struct {
         if (external or std.fs.path.isAbsolute(dir) or std.mem.startsWith(u8, dir, "~")) {
             return self.expandHome(gpa, dir);
         }
+        try validate.relativeSubPath(dir);
         return std.fs.path.join(gpa, &.{ try self.projectRoot(gpa), dir });
     }
 
@@ -239,6 +240,11 @@ pub const Config = struct {
         return path;
     }
 };
+
+fn serviceHealthcheck(service: Value) ?Value {
+    if (service != .object) return null;
+    return service.object.get("healthcheck");
+}
 
 pub fn loadPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []const u8) !Config {
     const bytes = try readFile(gpa, io, path);
@@ -400,6 +406,34 @@ test "rejects invalid identifiers at config boundaries" {
 
     try std.testing.expectError(error.InvalidIdentifier, cfg.projectName());
     try std.testing.expectError(error.InvalidIdentifier, Config.serviceName((try cfg.services())[0]));
+}
+
+test "rejects project-relative service paths that escape root" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": [{"name":"api","dir":"../escape","command":"serve","group":"backend"}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+
+    try std.testing.expectError(error.InvalidPath, cfg.serviceDir(arena.allocator(), try cfg.findService("api")));
+}
+
+test "allows external service paths outside project root" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": [{"name":"api","dir":"../external","external":true,"command":"serve","group":"backend"}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+
+    try std.testing.expectEqualStrings("../external", try cfg.serviceDir(arena.allocator(), try cfg.findService("api")));
 }
 
 test "parses synthetic fixture" {

@@ -2,6 +2,7 @@ const std = @import("std");
 
 const config = @import("config.zig");
 const config_value = @import("config_value.zig");
+const validate = @import("validate.zig");
 const waits = @import("waits.zig");
 
 pub const PhaseKind = enum {
@@ -66,6 +67,7 @@ pub fn runServicePhase(ctx: anytype, phase: std.json.Value, profile: []const u8,
 
 fn phaseCwd(ctx: anytype, dir: []const u8) ![]const u8 {
     if (dir.len == 0) return ctx.cfg.projectRoot(ctx.gpa);
+    try validate.relativeSubPath(dir);
     return std.fs.path.join(ctx.gpa, &.{ try ctx.cfg.projectRoot(ctx.gpa), dir });
 }
 
@@ -114,4 +116,30 @@ test "precheck failure prints hint and preserves abort semantics" {
 
     try std.testing.expectError(error.PrecheckFailed, runPrechecks(lifecycle, &writer));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Hint: install tool") != null);
+}
+
+test "phase cwd rejects path traversal" {
+    const runner_mod = @import("infra/runner.zig");
+    const lifecycle_mod = @import("lifecycle.zig");
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = runner_mod.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = runner_mod.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const lifecycle = lifecycle_mod.Lifecycle{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
+        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+
+    try std.testing.expectError(error.InvalidPath, phaseCwd(lifecycle, "../escape"));
 }
