@@ -30,22 +30,11 @@ pub const Lifecycle = struct {
         }
         for (phases) |phase| {
             if (phase != .object) continue;
-            const phase_type = config_value.optionalObjectString(phase, "type", "");
-            if (std.mem.eql(u8, phase_type, "docker")) continue;
-            if (std.mem.eql(u8, phase_type, "command")) {
-                try self.runCommandPhase(phase, profile, writer);
-                continue;
+            switch (phaseKind(phase)) {
+                .docker => {},
+                .command => try self.runCommandPhase(phase, profile, writer),
+                .services => try self.runServicePhase(phase, profile, writer),
             }
-            if (phase.object.get("groups")) |groups| if (groups == .array) {
-                for (groups.array.items) |group_value| {
-                    if (group_value != .string) continue;
-                    const group = self.cfg.resolvePhaseGroup(profile, group_value.string);
-                    for (try self.cfg.resolveGroup(self.gpa, group)) |svc| try self.startService(svc, writer);
-                }
-            };
-            if (phase.object.get("wait_ports")) |ports| if (ports == .array) {
-                for (ports.array.items) |port_value| if (port_value == .integer) try self.waitForPort(port_value.integer, 120, writer);
-            };
         }
     }
 
@@ -181,6 +170,19 @@ pub const Lifecycle = struct {
         self.gpa.free(result.stderr);
     }
 
+    fn runServicePhase(self: Lifecycle, phase: std.json.Value, profile: []const u8, writer: *std.Io.Writer) !void {
+        if (phase.object.get("groups")) |groups| if (groups == .array) {
+            for (groups.array.items) |group_value| {
+                if (group_value != .string) continue;
+                const group = self.cfg.resolvePhaseGroup(profile, group_value.string);
+                for (try self.cfg.resolveGroup(self.gpa, group)) |svc| try self.startService(svc, writer);
+            }
+        };
+        if (phase.object.get("wait_ports")) |ports| if (ports == .array) {
+            for (ports.array.items) |port_value| if (port_value == .integer) try self.waitForPort(port_value.integer, 120, writer);
+        };
+    }
+
     fn waitForDocker(self: Lifecycle, writer: *std.Io.Writer) !void {
         try writer.writeAll("Waiting for Docker containers...\n");
         var attempt: i64 = 0;
@@ -232,6 +234,19 @@ pub const Lifecycle = struct {
     }
 };
 
+const PhaseKind = enum {
+    docker,
+    command,
+    services,
+};
+
+fn phaseKind(phase: std.json.Value) PhaseKind {
+    const value = config_value.optionalObjectString(phase, "type", "");
+    if (std.mem.eql(u8, value, "docker")) return .docker;
+    if (std.mem.eql(u8, value, "command")) return .command;
+    return .services;
+}
+
 fn sessionNotRunning(writer: *std.Io.Writer) !void {
     try writer.writeAll("Session not running. Run 'hello' first.\n");
     try writer.flush();
@@ -257,6 +272,22 @@ test "counts running docker compose rows" {
     try std.testing.expectEqual(@as(usize, 0), runningContainerCount(""));
     try std.testing.expectEqual(@as(usize, 0), runningContainerCount("NAME SERVICE STATUS\n"));
     try std.testing.expectEqual(@as(usize, 2), runningContainerCount("NAME SERVICE STATUS\none api running\ntwo db running\n"));
+}
+
+test "classifies lifecycle phase kinds" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(),
+        \\[
+        \\  {"type":"docker"},
+        \\  {"type":"command"},
+        \\  {"groups":["api"]}
+        \\]
+    , .{});
+
+    try std.testing.expectEqual(PhaseKind.docker, phaseKind(parsed.array.items[0]));
+    try std.testing.expectEqual(PhaseKind.command, phaseKind(parsed.array.items[1]));
+    try std.testing.expectEqual(PhaseKind.services, phaseKind(parsed.array.items[2]));
 }
 
 test "precheck abort stops startup and warn continues" {
