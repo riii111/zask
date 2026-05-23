@@ -61,6 +61,17 @@ pub fn waitForStopped(ctx: anytype, service: []const u8, writer: *std.Io.Writer)
     try writeProgress(writer, "Warning: {s} may not have stopped completely\n", .{service});
 }
 
+pub fn waitForPaneIdle(ctx: anytype, window: []const u8) bool {
+    var attempt: usize = 0;
+    while (attempt < stop_attempts) : (attempt += 1) {
+        const pane = ctx.tmux.observePane(window);
+        defer pane.deinit(ctx.gpa);
+        if (pane.state != .busy) return true;
+        ctx.runner.sleep(stop_interval);
+    }
+    return false;
+}
+
 pub fn windowReadyAttempts() usize {
     return window_ready_attempts;
 }

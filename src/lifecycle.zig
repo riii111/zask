@@ -1,6 +1,7 @@
 const std = @import("std");
 const config = @import("config.zig");
 const docker_client = @import("infra/docker.zig");
+const observations = @import("observations.zig");
 const phases = @import("phases.zig");
 const proc_runner = @import("infra/runner.zig");
 const shell = @import("infra/shell.zig");
@@ -162,17 +163,7 @@ pub const Lifecycle = struct {
     fn ensureDockerStarted(self: Lifecycle, writer: *std.Io.Writer) !void {
         if (!self.cfg.dockerEnabled()) return;
         try waits.ensureWindowReady(self, "docker");
-        const pane = self.tmux.observePane("docker");
-        defer pane.deinit(self.gpa);
-        switch (dockerStartDecision(pane.state)) {
-            .no_op => {
-                try writeProgress(writer, "Docker already running\n", .{});
-                return;
-            },
-            .send_start => {},
-            .window_not_ready => return error.WindowNotReady,
-            .tmux_unavailable => return error.TmuxUnavailable,
-        }
+        if (try self.dockerStartAlreadyHandled(writer)) return;
         try writeProgress(writer, "Starting Docker...\n", .{});
         const target = try self.tmux.target("docker");
         defer self.gpa.free(target);
@@ -180,6 +171,44 @@ pub const Lifecycle = struct {
         const compose_file = try shell.quote(self.gpa, self.cfg.dockerComposeFile());
         const cmd = try std.fmt.allocPrint(self.gpa, "cd {s} && COMPOSE_MENU=false docker compose -f {s} up", .{ docker_dir, compose_file });
         try self.tmux.sendKeys(target, &.{ cmd, "Enter" });
+    }
+
+    fn dockerStartAlreadyHandled(self: Lifecycle, writer: *std.Io.Writer) !bool {
+        var state = try self.dockerStartPaneState();
+        if (state == .busy) {
+            const compose = self.docker.observe();
+            defer compose.deinit(self.gpa);
+            switch (compose.state) {
+                .running => {
+                    try writeProgress(writer, "Docker already running\n", .{});
+                    return true;
+                },
+                .empty => {
+                    if (waits.waitForPaneIdle(self, "docker")) {
+                        state = try self.dockerStartPaneState();
+                    } else {
+                        try writeProgress(writer, "Docker already starting\n", .{});
+                        return true;
+                    }
+                },
+                .unavailable => {
+                    try writeProgress(writer, "Docker already starting\n", .{});
+                    return true;
+                },
+            }
+        }
+        return switch (dockerStartDecision(state)) {
+            .no_op => true,
+            .send_start => false,
+            .window_not_ready => error.WindowNotReady,
+            .tmux_unavailable => error.TmuxUnavailable,
+        };
+    }
+
+    fn dockerStartPaneState(self: Lifecycle) !observations.PaneState {
+        const pane = self.tmux.observePane("docker");
+        defer pane.deinit(self.gpa);
+        return pane.state;
     }
 
     pub fn stopDocker(self: Lifecycle, writer: *std.Io.Writer) !void {
@@ -222,7 +251,7 @@ const StopDecision = enum {
     tmux_unavailable,
 };
 
-fn serviceStartDecision(state: @import("observations.zig").PaneState) StartDecision {
+fn serviceStartDecision(state: observations.PaneState) StartDecision {
     return switch (state) {
         .busy => .no_op,
         .idle, .dead => .send_start,
@@ -231,7 +260,7 @@ fn serviceStartDecision(state: @import("observations.zig").PaneState) StartDecis
     };
 }
 
-fn serviceStopDecision(state: @import("observations.zig").PaneState) StopDecision {
+fn serviceStopDecision(state: observations.PaneState) StopDecision {
     return switch (state) {
         .busy => .send_stop,
         .idle, .dead, .window_missing => .no_op,
@@ -239,12 +268,11 @@ fn serviceStopDecision(state: @import("observations.zig").PaneState) StopDecisio
     };
 }
 
-fn dockerStartDecision(state: @import("observations.zig").PaneState) StartDecision {
+fn dockerStartDecision(state: observations.PaneState) StartDecision {
     return serviceStartDecision(state);
 }
 
 test "maps pane observations to lifecycle start and stop decisions" {
-    const observations = @import("observations.zig");
     const cases = [_]struct {
         state: observations.PaneState,
         start: StartDecision,
@@ -562,6 +590,7 @@ test "docker start is a no-op when docker pane is running" {
     try recorder.enqueue("0|0|12345|docker\n", "", .{ .exited = 0 });
     try recorder.enqueue("12346\n", "", .{ .exited = 0 });
     try recorder.enqueue("NAME SERVICE STATUS\none api running\n", "", .{ .exited = 0 });
+    try recorder.enqueue("NAME SERVICE STATUS\none api running\n", "", .{ .exited = 0 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     const lifecycle = Lifecycle{
@@ -580,6 +609,50 @@ test "docker start is a no-op when docker pane is running" {
     try std.testing.expectEqualStrings("list-panes", recorder.commands.items[1].argv[1]);
     try std.testing.expectEqualStrings("pgrep", recorder.commands.items[3].argv[0]);
     try std.testing.expectEqualStrings("ps", recorder.commands.items[4].argv[4]);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
+}
+
+test "docker start sends compose up after transient busy pane" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"enabled": true},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|docker\n", "", .{ .exited = 0 });
+    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 1 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("api\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const lifecycle = Lifecycle{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
+        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startTarget("docker", &writer);
+
+    const send_keys = recorder.commands.items[9];
+    try std.testing.expectEqualStrings("send-keys", send_keys.argv[1]);
+    try std.testing.expect(std.mem.indexOf(u8, send_keys.argv[4], "docker compose") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting Docker...") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }
 
