@@ -58,6 +58,7 @@ pub const Runtime = struct {
 
     pub fn attach(self: Runtime) !void {
         const tx = self.tmux();
+        try self.setWindowSizesLatest();
         if (try self.inTmux()) {
             try tx.switchClient();
             self.runner().sleep(std.Io.Duration.fromMilliseconds(100));
@@ -135,7 +136,7 @@ pub const Runtime = struct {
         errdefer tx.killSession() catch {};
         try tmux_setup.applySessionOptions(tx, self.zask_path, self.config_path);
         try tmux_setup.bindControlKeys(self.gpa, tx);
-        try self.resizeWindows();
+        try self.setWindowSizesLatest();
         try self.logSession().init();
         try self.setupPipePane(writer);
         try self.lifecycle().startAll(profile, writer);
@@ -313,12 +314,25 @@ pub const Runtime = struct {
 
     fn resizeWindows(self: Runtime) !void {
         const tx = self.tmux();
-        tx.resizeWindowToActiveClient("dashboard") catch {};
+        try resizeWindow(tx, "dashboard");
         for (try self.cfg.services()) |service| {
-            tx.resizeWindowToActiveClient(try config.Config.serviceName(service)) catch {};
+            try resizeWindow(tx, try config.Config.serviceName(service));
         }
-        if (self.cfg.dockerEnabled()) tx.resizeWindowToActiveClient("docker") catch {};
-        try tx.setWindowOption("window-size", "latest");
+        if (self.cfg.dockerEnabled()) try resizeWindow(tx, "docker");
+    }
+
+    fn resizeWindow(tx: tmux_client.Client, window: []const u8) !void {
+        tx.resizeWindowToActiveClient(window) catch {};
+        tx.setWindowOptionForWindow(window, "window-size", "latest") catch {};
+    }
+
+    fn setWindowSizesLatest(self: Runtime) !void {
+        const tx = self.tmux();
+        tx.setWindowOptionForWindow("dashboard", "window-size", "latest") catch {};
+        for (try self.cfg.services()) |service| {
+            tx.setWindowOptionForWindow(try config.Config.serviceName(service), "window-size", "latest") catch {};
+        }
+        if (self.cfg.dockerEnabled()) tx.setWindowOptionForWindow("docker", "window-size", "latest") catch {};
     }
 
     fn sessionExists(self: Runtime) !bool {
@@ -454,9 +468,10 @@ test "attach from tmux resizes windows after switching client" {
 
     try runtime.attach();
 
-    try std.testing.expectEqualStrings("switch-client", recorder.commands.items[0].argv[1]);
-    try std.testing.expectEqualStrings("resize-window", recorder.commands.items[1].argv[1]);
-    try std.testing.expectEqualStrings("set-window-option", recorder.commands.items[2].argv[1]);
+    try std.testing.expectEqualStrings("set-window-option", recorder.commands.items[0].argv[1]);
+    try std.testing.expectEqualStrings("switch-client", recorder.commands.items[1].argv[1]);
+    try std.testing.expectEqualStrings("resize-window", recorder.commands.items[2].argv[1]);
+    try std.testing.expectEqualStrings("set-window-option", recorder.commands.items[3].argv[1]);
 }
 
 test "hello attaches existing session when another hello holds the lock" {
@@ -498,7 +513,8 @@ test "hello attaches existing session when another hello holds the lock" {
     try runtime.hello("all", &writer);
 
     try std.testing.expectEqualStrings("has-session", recorder.commands.items[0].argv[1]);
-    try std.testing.expectEqualStrings("switch-client", recorder.commands.items[1].argv[1]);
+    try std.testing.expectEqualStrings("set-window-option", recorder.commands.items[1].argv[1]);
+    try std.testing.expectEqualStrings("switch-client", recorder.commands.items[2].argv[1]);
 }
 
 fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.Config) Runtime {
