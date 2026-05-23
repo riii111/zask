@@ -250,7 +250,11 @@ pub const Lifecycle = struct {
     fn ensureWindowReady(self: Lifecycle, window: []const u8) !void {
         var attempt: usize = 0;
         while (attempt < 20) : (attempt += 1) {
-            if (self.tmux.observeWindow(window) == .present) return;
+            switch (self.tmux.observeWindow(window)) {
+                .present => return,
+                .missing => {},
+                .unavailable => return error.TmuxUnavailable,
+            }
             self.runner.runDiscard(&.{ "sleep", "0.3" }) catch {};
         }
         return error.WindowNotReady;
@@ -464,6 +468,58 @@ test "wait helpers report timeouts" {
 
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: port 5432") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api may not have stopped") != null);
+}
+
+test "window readiness distinguishes missing windows from unavailable tmux" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .signal = @enumFromInt(1) });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const lifecycle = Lifecycle{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
+        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+
+    try std.testing.expectError(error.TmuxUnavailable, lifecycle.ensureWindowReady("api"));
+    try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
+}
+
+test "window readiness retries missing windows until timeout" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    recorder.term = .{ .exited = 1 };
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const lifecycle = Lifecycle{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
+        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+
+    try std.testing.expectError(error.WindowNotReady, lifecycle.ensureWindowReady("api"));
+    try std.testing.expectEqual(@as(usize, 40), recorder.commands.items.len);
 }
 
 test "stop and restart targets require an active session" {

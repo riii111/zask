@@ -135,7 +135,7 @@ fn serviceMonitorRow(ctx: Context, service: std.json.Value) !MonitorRow {
 
 fn dockerMonitorRow(ctx: Context) !MonitorRow {
     const pane = ctx.tmux.observePane("docker");
-    const compose = try observeDocker(ctx);
+    const compose = if (shouldObserveCompose(pane)) try observeDocker(ctx) else observations.ComposeObservation{ .state = .empty };
     defer compose.deinit(ctx.gpa);
     return .{ .name = "docker", .status = dockerMonitorStatus(pane, compose), .exit_code = pane.exit_code, .command = pane.command, .port = "compose" };
 }
@@ -143,8 +143,16 @@ fn dockerMonitorRow(ctx: Context) !MonitorRow {
 fn observeService(ctx: Context, service: std.json.Value) !observations.ServiceObservation {
     const name = try config.Config.serviceName(service);
     const pane = ctx.tmux.observePane(name);
-    const health = try observeHealth(ctx, service);
+    const health = if (shouldObserveHealth(pane)) try observeHealth(ctx, service) else observations.HealthObservation.no_check;
     return .{ .pane = pane, .health = health };
+}
+
+fn shouldObserveHealth(pane: observations.PaneObservation) bool {
+    return pane.state == .busy and !tmux_client.isShellCommand(pane.command);
+}
+
+fn shouldObserveCompose(pane: observations.PaneObservation) bool {
+    return pane.state == .busy and !tmux_client.isShellCommand(pane.command);
 }
 
 fn observeHealth(ctx: Context, service: std.json.Value) !observations.HealthObservation {
@@ -233,4 +241,60 @@ fn countMonitorRow(row: MonitorRow, live_count: *usize, warn_count: *usize, dead
         .dead => dead_count.* += 1,
         else => warn_count.* += 1,
     }
+}
+
+fn recordedCommandCount(recorder: *const proc_runner.Recorder, name: []const u8) usize {
+    var count: usize = 0;
+    for (recorder.commands.items) |command| {
+        if (command.argv.len > 0 and std.mem.eql(u8, command.argv[0], name)) count += 1;
+    }
+    return count;
+}
+
+test "service monitor skips health checks unless pane is busy" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": [{"name":"api","dir":"api","command":"serve","port":3000}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const ctx: Context = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+
+    const row = try serviceMonitorRow(ctx, (try cfg.services())[0]);
+
+    try std.testing.expectEqual(MonitorStatus.stop, row.status);
+    try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "nc"));
+    try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "curl"));
+}
+
+test "docker monitor skips compose observation unless pane is busy" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"enabled": true},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const ctx: Context = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+
+    const row = try dockerMonitorRow(ctx);
+
+    try std.testing.expectEqual(MonitorStatus.stop, row.status);
+    try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "docker"));
 }
