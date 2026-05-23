@@ -343,3 +343,67 @@ test "maps observations to status text" {
     try std.testing.expectEqualStrings("stopped", paneStatusText(.idle));
     try std.testing.expectEqualStrings("unknown", composeStatusText(.unavailable));
 }
+
+test "exec rejects disabled or unavailable containers" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"enabled": false},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.DockerDisabled, runtime.exec("api", false, &writer));
+}
+
+test "exec reports missing containers and uses shell override" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"enabled": true, "exec_defaults": {"db": "psql"}},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try recorder.enqueue("\n", "", .{ .exited = 0 });
+    try std.testing.expectError(error.ContainerNotRunning, runtime.exec("db", false, &writer));
+    try recorder.enqueue("api\n", "", .{ .exited = 0 });
+    try std.testing.expectError(error.ContainerNotRunning, runtime.exec("db", false, &writer));
+    try recorder.enqueue("db\n", "", .{ .exited = 0 });
+    try runtime.exec("db", true, &writer);
+
+    const command = recorder.commands.items[3];
+    try std.testing.expect(command.interactive);
+    try std.testing.expectEqualStrings("bash", command.argv[6]);
+}
+
+fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.Config) Runtime {
+    return .{
+        .gpa = gpa,
+        .io = undefined,
+        .cfg = cfg,
+        .config_path = "/tmp/demo/config.json",
+        .zask_path = "zask",
+        .runner_impl = runner,
+        .tmux_impl = .{ .gpa = gpa, .runner = runner, .session = "demo" },
+        .docker_impl = .{ .gpa = gpa, .runner = runner, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+}

@@ -93,3 +93,21 @@ test "lock blocks concurrent acquire and releases directory" {
     const second = try Lock.acquire(gpa, run, name, base);
     second.release();
 }
+
+test "lock recovers stale pid files" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    const run = runner.Runner{ .gpa = gpa, .io = io };
+    const name = try std.fmt.allocPrint(gpa, "zask-test-stale-{d}", .{std.c.getpid()});
+    const base = try std.fs.path.join(gpa, &.{ "/tmp", "zask-test-locks" });
+    const dir = try std.fs.path.join(gpa, &.{ base, try std.fmt.allocPrint(gpa, "{s}.lock", .{name}) });
+    const pid_path = try std.fs.path.join(gpa, &.{ dir, "pid" });
+    _ = try std.Io.Dir.cwd().createDirPathStatus(io, dir, private_dir_permissions);
+    try paths.writeFileMode(io, pid_path, "99999999", private_file_permissions);
+
+    const lock = try Lock.acquire(gpa, run, name, base);
+    lock.release();
+}

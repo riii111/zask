@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const captured_output_limit = 1024 * 1024;
+
 pub const Runner = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -22,14 +24,14 @@ pub const Runner = struct {
             try std.process.run(self.gpa, self.io, .{
                 .argv = argv,
                 .cwd = .{ .path = cwd },
-                .stdout_limit = .limited(1024 * 1024),
-                .stderr_limit = .limited(1024 * 1024),
+                .stdout_limit = .limited(captured_output_limit),
+                .stderr_limit = .limited(captured_output_limit),
             })
         else
             try std.process.run(self.gpa, self.io, .{
                 .argv = argv,
-                .stdout_limit = .limited(1024 * 1024),
-                .stderr_limit = .limited(1024 * 1024),
+                .stdout_limit = .limited(captured_output_limit),
+                .stderr_limit = .limited(captured_output_limit),
             });
         errdefer self.gpa.free(result.stdout);
         errdefer self.gpa.free(result.stderr);

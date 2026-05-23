@@ -171,11 +171,6 @@ fn writeRule(writer: *std.Io.Writer, left: []const u8, fill: []const u8, right: 
     try writer.writeAll(right);
 }
 
-fn truncate(text: []const u8, width: usize) []const u8 {
-    if (text.len <= width) return text;
-    return text[0..width];
-}
-
 test "renders launcher frame with grouped services" {
     const json =
         \\{
