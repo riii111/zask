@@ -1,12 +1,15 @@
 const std = @import("std");
 const config = @import("../config.zig");
 const shell = @import("../infra/shell.zig");
+const yaml = @import("../infra/yaml.zig");
 
 pub fn renderTmuxp(cfg: config.Config, gpa: std.mem.Allocator, writer: *std.Io.Writer, zask_path: []const u8, config_path: []const u8) !void {
     const project = try cfg.projectName();
     const root = try cfg.projectRoot(gpa);
     const quoted_zask_path = try shell.quote(gpa, zask_path);
     const quoted_config_path = try shell.quote(gpa, config_path);
+    const dashboard_command = try yaml.quote(gpa, try std.fmt.allocPrint(gpa, "{s} --config {s} dashboard", .{ quoted_zask_path, quoted_config_path }));
+    const monitor_command = try yaml.quote(gpa, try std.fmt.allocPrint(gpa, "{s} --config {s} monitor", .{ quoted_zask_path, quoted_config_path }));
     try writer.print(
         \\session_name: {s}
         \\start_directory: {s}
@@ -26,11 +29,11 @@ pub fn renderTmuxp(cfg: config.Config, gpa: std.mem.Allocator, writer: *std.Io.W
         \\      main-pane-width: 50%
         \\    panes:
         \\      - shell_command:
-        \\          - {s} --config {s} dashboard
+        \\          - {s}
         \\      - shell_command:
-        \\          - {s} --config {s} monitor
+        \\          - {s}
         \\
-    , .{ try cfg.sessionName(), root, project, quoted_zask_path, quoted_config_path, quoted_zask_path, quoted_config_path });
+    , .{ try cfg.sessionName(), root, project, dashboard_command, monitor_command });
 
     for (try cfg.services()) |service| {
         const name = try config.Config.serviceName(service);
@@ -72,8 +75,8 @@ test "renders service and docker windows" {
     defer out.deinit();
     try renderTmuxp(cfg, arena.allocator(), &out.writer, "zask path", "/tmp/demo config.json");
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "window_name: dashboard") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "'zask path' --config '/tmp/demo config.json' dashboard") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "'zask path' --config '/tmp/demo config.json' monitor") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "'''zask path'' --config ''/tmp/demo config.json'' dashboard'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "'''zask path'' --config ''/tmp/demo config.json'' monitor'") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "window_name: api") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "start_directory: /tmp/demo/backend") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "window_name: docker") != null);

@@ -14,35 +14,35 @@ pub const Client = struct {
     }
 
     pub fn switchClient(self: Client) !void {
-        _ = try self.runner.run(&.{ "tmux", "switch-client", "-t", self.session });
+        try self.runner.runCheckedDiscard(&.{ "tmux", "switch-client", "-t", self.session });
     }
 
     pub fn attachSession(self: Client) !void {
-        _ = try self.runner.runInteractive(&.{ "tmux", "attach-session", "-t", self.session });
+        _ = try self.runner.runInteractiveChecked(&.{ "tmux", "attach-session", "-t", self.session });
     }
 
     pub fn detachClient(self: Client) !void {
-        _ = try self.runner.run(&.{ "tmux", "detach-client" });
+        try self.runner.runCheckedDiscard(&.{ "tmux", "detach-client" });
     }
 
     pub fn detachClientExec(self: Client, command: []const u8) !void {
-        _ = try self.runner.run(&.{ "tmux", "detach-client", "-E", command });
+        try self.runner.runCheckedDiscard(&.{ "tmux", "detach-client", "-E", command });
     }
 
     pub fn selectWindow(self: Client, window: []const u8) !void {
-        _ = try self.runner.run(&.{ "tmux", "select-window", "-t", try self.target(window) });
+        try self.runner.runCheckedDiscard(&.{ "tmux", "select-window", "-t", try self.target(window) });
     }
 
     pub fn killSession(self: Client) !void {
-        _ = try self.runner.run(&.{ "tmux", "kill-session", "-t", self.session });
+        try self.runner.runCheckedDiscard(&.{ "tmux", "kill-session", "-t", self.session });
     }
 
     pub fn setOption(self: Client, name: []const u8, value: []const u8) !void {
-        _ = try self.runner.run(&.{ "tmux", "set-option", "-t", self.session, name, value });
+        try self.runner.runCheckedDiscard(&.{ "tmux", "set-option", "-t", self.session, name, value });
     }
 
     pub fn setWindowOption(self: Client, name: []const u8, value: []const u8) !void {
-        _ = try self.runner.run(&.{ "tmux", "set-window-option", "-t", self.session, name, value });
+        try self.runner.runCheckedDiscard(&.{ "tmux", "set-window-option", "-t", self.session, name, value });
     }
 
     pub fn showOption(self: Client, name: []const u8) !?[]const u8 {
@@ -55,15 +55,15 @@ pub const Client = struct {
     }
 
     pub fn bindRunShell(self: Client, key: []const u8, command: []const u8) !void {
-        _ = try self.runner.run(&.{ "tmux", "bind-key", "-T", "prefix", key, "run-shell", command });
+        try self.runner.runCheckedDiscard(&.{ "tmux", "bind-key", "-T", "prefix", key, "run-shell", command });
     }
 
     pub fn resizeWindowToActiveClient(self: Client, window: []const u8) !void {
-        _ = try self.runner.run(&.{ "tmux", "resize-window", "-a", "-t", try self.target(window) });
+        try self.runner.runCheckedDiscard(&.{ "tmux", "resize-window", "-a", "-t", try self.target(window) });
     }
 
     pub fn popup(self: Client, width: []const u8, height: []const u8, command: []const u8) !void {
-        _ = try self.runner.run(&.{ "tmux", "popup", "-w", width, "-h", height, "-E", command });
+        try self.runner.runCheckedDiscard(&.{ "tmux", "popup", "-w", width, "-h", height, "-E", command });
     }
 
     pub fn sendKeys(self: Client, pane_target: []const u8, keys: []const []const u8) !void {
@@ -71,14 +71,14 @@ pub const Client = struct {
         defer argv.deinit(self.gpa);
         try argv.appendSlice(self.gpa, &.{ "tmux", "send-keys", "-t", pane_target });
         try argv.appendSlice(self.gpa, keys);
-        _ = try self.runner.run(argv.items);
+        try self.runner.runCheckedDiscard(argv.items);
     }
 
     pub fn pipePane(self: Client, pane_target: []const u8, command: ?[]const u8) !void {
         if (command) |cmd| {
-            _ = try self.runner.run(&.{ "tmux", "pipe-pane", "-t", pane_target, cmd });
+            try self.runner.runCheckedDiscard(&.{ "tmux", "pipe-pane", "-t", pane_target, cmd });
         } else {
-            _ = try self.runner.run(&.{ "tmux", "pipe-pane", "-t", pane_target });
+            try self.runner.runCheckedDiscard(&.{ "tmux", "pipe-pane", "-t", pane_target });
         }
     }
 

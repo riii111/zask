@@ -23,7 +23,7 @@ pub const Compose = struct {
     }
 
     pub fn down(self: Compose) !void {
-        const result = try self.runner.runCwd(&.{ "docker", "compose", "-f", self.file, "down" }, self.dir);
+        const result = try self.runner.runCheckedCwd(&.{ "docker", "compose", "-f", self.file, "down" }, self.dir);
         self.gpa.free(result.stdout);
         self.gpa.free(result.stderr);
     }
@@ -34,7 +34,7 @@ pub const Compose = struct {
         try argv.appendSlice(self.gpa, &.{ "docker", "compose", "-f", self.file, "exec", container });
         var parts = std.mem.tokenizeScalar(u8, command, ' ');
         while (parts.next()) |part| try argv.append(self.gpa, part);
-        _ = try self.runner.runInteractiveCwd(argv.items, self.dir);
+        _ = try self.runner.runInteractiveCheckedCwd(argv.items, self.dir);
     }
 };
 

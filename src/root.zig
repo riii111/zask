@@ -14,6 +14,7 @@ pub const runtime = @import("runtime.zig");
 pub const shell = @import("infra/shell.zig");
 pub const tmux = @import("infra/tmux.zig");
 pub const validate = @import("validate.zig");
+pub const yaml = @import("infra/yaml.zig");
 
 pub fn greeting() []const u8 {
     return "Hello from zask";

@@ -54,20 +54,36 @@ pub const Runner = struct {
 
     pub fn runInteractive(self: Runner, argv: []const []const u8) !std.process.Child.Term {
         if (self.recorder) |recorder| {
-            _ = try recorder.record(argv, null, true);
-            return .{ .exited = 0 };
+            const result = try recorder.record(argv, null, true);
+            self.gpa.free(result.stdout);
+            self.gpa.free(result.stderr);
+            return result.term;
         }
         var child = try std.process.spawn(self.io, .{ .argv = argv });
         return child.wait(self.io);
     }
 
+    pub fn runInteractiveChecked(self: Runner, argv: []const []const u8) !std.process.Child.Term {
+        const term = try self.runInteractive(argv);
+        try checkTerm(term);
+        return term;
+    }
+
     pub fn runInteractiveCwd(self: Runner, argv: []const []const u8, cwd: []const u8) !std.process.Child.Term {
         if (self.recorder) |recorder| {
-            _ = try recorder.record(argv, cwd, true);
-            return .{ .exited = 0 };
+            const result = try recorder.record(argv, cwd, true);
+            self.gpa.free(result.stdout);
+            self.gpa.free(result.stderr);
+            return result.term;
         }
         var child = try std.process.spawn(self.io, .{ .argv = argv, .cwd = .{ .path = cwd } });
         return child.wait(self.io);
+    }
+
+    pub fn runInteractiveCheckedCwd(self: Runner, argv: []const []const u8, cwd: []const u8) !std.process.Child.Term {
+        const term = try self.runInteractiveCwd(argv, cwd);
+        try checkTerm(term);
+        return term;
     }
 };
 
@@ -193,4 +209,13 @@ test "checked runner rejects non-zero exits" {
     const run = Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
 
     try std.testing.expectError(error.CommandFailed, run.runCheckedDiscard(&.{"false"}));
+}
+
+test "checked interactive runner rejects non-zero exits" {
+    var recorder = Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const run = Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
+
+    try std.testing.expectError(error.CommandFailed, run.runInteractiveChecked(&.{"tmux"}));
 }

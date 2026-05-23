@@ -66,7 +66,8 @@ pub const Runtime = struct {
         _ = try self.cfg.findService(service);
         if (!try self.sessionExists()) {
             try writer.writeAll("Session not running\n");
-            return;
+            try writer.flush();
+            return error.SessionNotRunning;
         }
         if (try self.inTmux()) {
             try (try self.tmux()).switchClient();
@@ -79,19 +80,21 @@ pub const Runtime = struct {
         _ = try self.cfg.findService(service);
         if (!try self.sessionExists()) {
             try writer.writeAll("Session not running\n");
-            return;
+            try writer.flush();
+            return error.SessionNotRunning;
         }
         const log_dir = self.logDir() catch |err| switch (err) {
             error.LogSessionNotInitialized => {
                 try writer.writeAll("Log session not initialized. Run 'hello' first.\n");
-                return;
+                try writer.flush();
+                return error.LogSessionNotInitialized;
             },
             else => return err,
         };
-        try self.runner().runDiscard(&.{ "mkdir", "-p", log_dir });
+        try self.runner().runCheckedDiscard(&.{ "mkdir", "-p", log_dir });
         const log_file = try std.fs.path.join(self.gpa, &.{ log_dir, try std.fmt.allocPrint(self.gpa, "{s}.log", .{service}) });
         if (!try self.pathExists(log_file)) {
-            try self.runner().runDiscard(&.{ "touch", log_file });
+            try self.runner().runCheckedDiscard(&.{ "touch", log_file });
         }
         try (try self.tmux()).popup(self.cfg.popupWidth(), self.cfg.popupHeight(), try std.fmt.allocPrint(self.gpa, "nvim -c 'terminal tail -F {s}'", .{try shell.quote(self.gpa, log_file)}));
     }
@@ -109,7 +112,7 @@ pub const Runtime = struct {
             return;
         }
         const session_file = try self.writeSessionFile();
-        _ = try self.run(&.{ "tmuxp", "load", "-d", session_file });
+        try self.runner().runCheckedDiscard(&.{ "tmuxp", "load", "-d", session_file });
         const tx = try self.tmux();
         try tx.setOption("prefix", "C-q");
         try tx.setOption("status-format[0]", "#[align=left]#{T;=/#{status-left-length}:status-left}#[align=right]#{T;=/#{status-right-length}:status-right}");
@@ -246,7 +249,7 @@ pub const Runtime = struct {
 
     fn writeSessionFile(self: Runtime) ![]const u8 {
         const dir = try std.fs.path.join(self.gpa, &.{ try paths.configBase(self.gpa, self.environ), try self.cfg.projectName() });
-        try self.runner().runDiscard(&.{ "mkdir", "-p", dir });
+        try self.runner().runCheckedDiscard(&.{ "mkdir", "-p", dir });
         const path = try std.fs.path.join(self.gpa, &.{ dir, "session.yml" });
         var out: std.Io.Writer.Allocating = .init(self.gpa);
         defer out.deinit();
@@ -258,7 +261,7 @@ pub const Runtime = struct {
     fn initLogDir(self: Runtime) !void {
         const session_id = try self.logSessionId();
         const dir = try self.logDirForSession(session_id);
-        try self.runner().runDiscard(&.{ "mkdir", "-p", dir });
+        try self.runner().runCheckedDiscard(&.{ "mkdir", "-p", dir });
         try (try self.tmux()).setOption("@zask_log_session_id", session_id);
         try self.cleanupOldLogs();
     }
@@ -307,7 +310,9 @@ pub const Runtime = struct {
 
     fn logDir(self: Runtime) ![]const u8 {
         const session_id = (try self.tmux()).showOption("@zask_log_session_id") catch null;
-        return self.logDirForSession(session_id orelse return error.LogSessionNotInitialized);
+        const value = session_id orelse return error.LogSessionNotInitialized;
+        try validateLogSessionId(value);
+        return self.logDirForSession(value);
     }
 
     fn logBaseDir(self: Runtime) ![]const u8 {
@@ -328,8 +333,30 @@ pub const Runtime = struct {
     fn cleanupOldLogs(self: Runtime) !void {
         const base = try self.logBaseDir();
         const keep = self.cfg.logKeepSessions();
-        const script = try std.fmt.allocPrint(self.gpa, "ls -dt {s}/*/ 2>/dev/null | tail -n +{d} | xargs rm -rf", .{ try shell.quote(self.gpa, base), keep + 1 });
-        self.runner().runDiscard(&.{ "bash", "-c", script }) catch return;
+        if (keep < 0) return;
+        var dir = std.Io.Dir.openDirAbsolute(self.io, base, .{ .iterate = true }) catch return;
+        defer dir.close(self.io);
+
+        var entries: std.ArrayList(LogEntry) = .empty;
+        defer {
+            for (entries.items) |entry| self.gpa.free(entry.name);
+            entries.deinit(self.gpa);
+        }
+        var it = dir.iterate();
+        while (try it.next(self.io)) |entry| {
+            if (entry.kind != .directory) continue;
+            validateLogSessionId(entry.name) catch continue;
+            const stat = dir.statFile(self.io, entry.name, .{}) catch continue;
+            try entries.append(self.gpa, .{ .name = try self.gpa.dupe(u8, entry.name), .mtime = stat.mtime.nanoseconds });
+        }
+        std.mem.sort(LogEntry, entries.items, {}, logEntryNewer);
+
+        const keep_count: usize = @intCast(keep);
+        if (entries.items.len <= keep_count) return;
+        for (entries.items[keep_count..]) |entry| {
+            const path = try std.fs.path.join(self.gpa, &.{ base, entry.name });
+            std.Io.Dir.cwd().deleteTree(self.io, path) catch {};
+        }
     }
 
     fn pathExists(self: Runtime, path: []const u8) !bool {
@@ -349,7 +376,32 @@ fn serviceListContains(output: []const u8, name: []const u8) bool {
     return false;
 }
 
+const LogEntry = struct {
+    name: []const u8,
+    mtime: i96,
+};
+
+fn logEntryNewer(_: void, lhs: LogEntry, rhs: LogEntry) bool {
+    return lhs.mtime > rhs.mtime;
+}
+
+fn validateLogSessionId(value: []const u8) !void {
+    if (value.len == 0) return error.InvalidLogSessionId;
+    for (value) |byte| {
+        switch (byte) {
+            '0'...'9', '_' => {},
+            else => return error.InvalidLogSessionId,
+        }
+    }
+}
+
 test "matches docker compose services by full line" {
     try std.testing.expect(serviceListContains("api\ndb\n", "db"));
     try std.testing.expect(!serviceListContains("mydb\ndb-replica\n", "db"));
+}
+
+test "validates log session ids" {
+    try validateLogSessionId("20260523_010203");
+    try std.testing.expectError(error.InvalidLogSessionId, validateLogSessionId("../bad"));
+    try std.testing.expectError(error.InvalidLogSessionId, validateLogSessionId("bad name"));
 }

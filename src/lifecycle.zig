@@ -63,7 +63,8 @@ pub const Lifecycle = struct {
     pub fn startTarget(self: Lifecycle, target: ?[]const u8, writer: *std.Io.Writer) !void {
         if (!self.tmux.hasSession()) {
             try writer.writeAll("Session not running. Run 'hello' first.\n");
-            return;
+            try writer.flush();
+            return error.SessionNotRunning;
         }
         const t = target orelse "--all";
         if (std.mem.eql(u8, t, "--all")) return self.startAll("all", writer);
@@ -229,6 +230,8 @@ pub const Lifecycle = struct {
 
 fn sessionNotRunning(writer: *std.Io.Writer) !void {
     try writer.writeAll("Session not running. Run 'hello' first.\n");
+    try writer.flush();
+    return error.SessionNotRunning;
 }
 
 fn writeProgress(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytype) !void {
@@ -276,8 +279,8 @@ test "stop and restart targets require an active session" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try lifecycle.stopTarget("api", &writer);
-    try lifecycle.restartTarget("api", &writer);
+    try std.testing.expectError(error.SessionNotRunning, lifecycle.stopTarget("api", &writer));
+    try std.testing.expectError(error.SessionNotRunning, lifecycle.restartTarget("api", &writer));
 
     const output = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "Session not running. Run 'hello' first.") != null);
