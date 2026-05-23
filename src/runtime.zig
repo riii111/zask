@@ -112,7 +112,13 @@ pub const Runtime = struct {
     }
 
     pub fn hello(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
-        const guard = try self.acquireLock();
+        const guard = self.acquireLock() catch |err| switch (err) {
+            error.LockBusy => {
+                if (try self.sessionExists()) return self.attach();
+                return err;
+            },
+            else => return err,
+        };
         defer guard.release();
         try self.helloUnlocked(profile, writer);
     }
@@ -451,6 +457,48 @@ test "attach from tmux resizes windows after switching client" {
     try std.testing.expectEqualStrings("switch-client", recorder.commands.items[0].argv[1]);
     try std.testing.expectEqualStrings("resize-window", recorder.commands.items[1].argv[1]);
     try std.testing.expectEqualStrings("set-window-option", recorder.commands.items[2].argv[1]);
+}
+
+test "hello attaches existing session when another hello holds the lock" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    const base = try std.fmt.allocPrint(arena.allocator(), "/private/tmp/zask-test-runtime-{d}", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    const lock_dir = try std.fs.path.join(arena.allocator(), &.{ base, "zask", "demo.lock" });
+    _ = try std.Io.Dir.cwd().createDirPathStatus(io, lock_dir, @enumFromInt(0o700));
+    const pid_path = try std.fs.path.join(arena.allocator(), &.{ lock_dir, "pid" });
+    try paths.writeFileMode(io, pid_path, try std.fmt.allocPrint(arena.allocator(), "{d}", .{std.c.getpid()}), @enumFromInt(0o600));
+
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    try environ.put("XDG_RUNTIME_DIR", base);
+    try environ.put("TMUX", "/tmp/tmux");
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    var runtime = testRuntime(arena.allocator(), run, cfg);
+    runtime.io = io;
+    runtime.environ = &environ;
+    runtime.runner_impl = run;
+    runtime.tmux_impl.runner = run;
+    runtime.docker_impl.runner = run;
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.hello("all", &writer);
+
+    try std.testing.expectEqualStrings("has-session", recorder.commands.items[0].argv[1]);
+    try std.testing.expectEqualStrings("switch-client", recorder.commands.items[1].argv[1]);
 }
 
 fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.Config) Runtime {
