@@ -1,7 +1,7 @@
 const std = @import("std");
 
-const tmux_client = @import("infra/tmux.zig");
-const tmux_options = @import("tmux_options.zig");
+const tmux_client = @import("../platform/tmux.zig");
+const tmux_options = @import("../model/tmux_options.zig");
 
 pub fn applySessionOptions(tx: tmux_client.Client, zask_path: []const u8, config_path: []const u8) !void {
     try tx.setOption("prefix", "C-q");

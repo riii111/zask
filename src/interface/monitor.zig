@@ -1,11 +1,11 @@
 const std = @import("std");
 const ansi = @import("ansi.zig");
-const config = @import("../config.zig");
-const docker_client = @import("../infra/docker.zig");
-const observations = @import("../observations.zig");
-const proc_runner = @import("../infra/runner.zig");
-const tmux_client = @import("../infra/tmux.zig");
-const tmux_options = @import("../tmux_options.zig");
+const config = @import("../model/config.zig");
+const docker_client = @import("../platform/docker.zig");
+const observations = @import("../model/observations.zig");
+const proc_runner = @import("../platform/runner.zig");
+const tmux_client = @import("../platform/tmux.zig");
+const tmux_options = @import("../model/tmux_options.zig");
 const Context = @import("context.zig").Context;
 
 const monitor_name_width = 12;

@@ -1,5 +1,5 @@
 const std = @import("std");
-const observations = @import("../observations.zig");
+const observations = @import("../model/observations.zig");
 const runner = @import("runner.zig");
 
 pub const Compose = struct {

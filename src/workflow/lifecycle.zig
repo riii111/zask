@@ -1,11 +1,11 @@
 const std = @import("std");
-const config = @import("config.zig");
-const docker_client = @import("infra/docker.zig");
-const observations = @import("observations.zig");
+const config = @import("../model/config.zig");
+const docker_client = @import("../platform/docker.zig");
+const observations = @import("../model/observations.zig");
 const phases = @import("phases.zig");
-const proc_runner = @import("infra/runner.zig");
-const shell = @import("infra/shell.zig");
-const tmux_client = @import("infra/tmux.zig");
+const proc_runner = @import("../platform/runner.zig");
+const shell = @import("../platform/shell.zig");
+const tmux_client = @import("../platform/tmux.zig");
 const waits = @import("waits.zig");
 
 pub const Lifecycle = struct {
