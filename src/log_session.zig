@@ -84,8 +84,7 @@ pub const Manager = struct {
 };
 
 fn makePrivateDir(io: std.Io, path: []const u8) !void {
-    const status = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
-    if (status != .created) return;
+    _ = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
     var dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .follow_symlinks = false });
     defer dir.close(io);
     try dir.setPermissions(io, private_dir_permissions);

@@ -134,7 +134,9 @@ pub const Lifecycle = struct {
         }
         const target = try self.tmux.target(service);
         defer self.gpa.free(target);
-        const cmd = try std.fmt.allocPrint(self.gpa, "cd {s} && {s}", .{ try shell.quote(self.gpa, try self.cfg.serviceDir(self.gpa, value)), try config.Config.serviceStartCommand(self.gpa, value) });
+        const service_dir = try shell.quote(self.gpa, try self.cfg.serviceDir(self.gpa, value));
+        const start_command = try config.Config.serviceStartCommand(self.gpa, value);
+        const cmd = try std.fmt.allocPrint(self.gpa, "cd {s} && {s}", .{ service_dir, start_command });
         try writeProgress(writer, "Starting {s}...\n", .{service});
         try self.tmux.sendKeys(target, &.{ cmd, "Enter" });
     }
@@ -175,7 +177,10 @@ pub const Lifecycle = struct {
         try writeProgress(writer, "Starting Docker...\n", .{});
         const target = try self.tmux.target("docker");
         defer self.gpa.free(target);
-        try self.tmux.sendKeys(target, &.{ try std.fmt.allocPrint(self.gpa, "cd {s} && COMPOSE_MENU=false docker compose -f {s} up", .{ try shell.quote(self.gpa, try self.cfg.dockerDir(self.gpa)), try shell.quote(self.gpa, self.cfg.dockerComposeFile()) }), "Enter" });
+        const docker_dir = try shell.quote(self.gpa, try self.cfg.dockerDir(self.gpa));
+        const compose_file = try shell.quote(self.gpa, self.cfg.dockerComposeFile());
+        const cmd = try std.fmt.allocPrint(self.gpa, "cd {s} && COMPOSE_MENU=false docker compose -f {s} up", .{ docker_dir, compose_file });
+        try self.tmux.sendKeys(target, &.{ cmd, "Enter" });
     }
 
     pub fn stopDocker(self: Lifecycle, writer: *std.Io.Writer) !void {

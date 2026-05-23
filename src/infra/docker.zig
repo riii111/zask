@@ -74,7 +74,6 @@ fn splitCommand(gpa: std.mem.Allocator, command: []const u8) ![][]const u8 {
         }
         if (byte == '\\' and quote != '\'' and index + 1 < command.len and command[index + 1] == '\n') {
             index += 1;
-            in_token = true;
             continue;
         }
         if (byte == '\\' and quote == '"') {
@@ -238,6 +237,14 @@ test "splitCommand removes backslash newline continuations" {
     try std.testing.expectEqualStrings("psql", args[0]);
     try std.testing.expectEqualStrings("-c", args[1]);
     try std.testing.expectEqualStrings("select 1", args[2]);
+}
+
+test "splitCommand drops trailing backslash newline without empty token" {
+    const args = try splitCommand(std.testing.allocator, "foo \\\n");
+    defer freeArgs(std.testing.allocator, args);
+
+    try std.testing.expectEqual(@as(usize, 1), args.len);
+    try std.testing.expectEqualStrings("foo", args[0]);
 }
 
 test "splitCommand rejects empty and incomplete input" {

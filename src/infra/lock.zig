@@ -34,10 +34,10 @@ pub const Lock = struct {
 };
 
 fn ensurePrivateDir(io: std.Io, path: []const u8) !void {
-    const status = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
+    _ = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
     var dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .follow_symlinks = false });
     defer dir.close(io);
-    if (status == .created) try dir.setPermissions(io, private_dir_permissions);
+    try dir.setPermissions(io, private_dir_permissions);
 }
 
 fn acquireDir(io: std.Io, path: []const u8) !bool {
@@ -87,7 +87,6 @@ test "lock blocks concurrent acquire and releases directory" {
 
     const base = try std.fs.path.join(gpa, &.{ "/tmp", "zask-test-locks" });
     const first = try Lock.acquire(gpa, run, name, base);
-    defer first.release();
     try std.testing.expectError(error.LockBusy, Lock.acquire(gpa, run, name, base));
     first.release();
     const second = try Lock.acquire(gpa, run, name, base);

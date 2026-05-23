@@ -146,7 +146,7 @@ pub const Runtime = struct {
             return;
         }
         try self.lifecycle().stopAll(writer);
-        try self.cleanupPipePane();
+        self.cleanupPipePane() catch {};
         self.runner().sleep(std.Io.Duration.fromSeconds(1));
         const tx = self.tmux();
         try tx.killSession();
@@ -393,6 +393,36 @@ test "exec reports missing containers and uses shell override" {
     const command = recorder.commands.items[3];
     try std.testing.expect(command.interactive);
     try std.testing.expectEqualStrings("bash", command.argv[6]);
+}
+
+test "bye kills session even when pipe cleanup fails" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": [{"name":"api","dir":"backend","command":"serve","group":"backend"}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
+    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.byeUnlocked(&writer);
+
+    const kill = recorder.commands.items[recorder.commands.items.len - 1];
+    try std.testing.expectEqualStrings("tmux", kill.argv[0]);
+    try std.testing.expectEqualStrings("kill-session", kill.argv[1]);
 }
 
 fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.Config) Runtime {
