@@ -133,7 +133,8 @@ pub const Recorder = struct {
     }
 
     pub fn recordSleep(self: *Recorder, duration: std.Io.Duration) void {
-        self.sleeps.append(self.gpa, .{ .duration = duration, .commands_before = self.commands.items.len }) catch @panic("failed to record sleep");
+        self.sleeps.append(self.gpa, .{ .duration = duration, .commands_before = self.commands.items.len }) catch |err|
+            std.debug.panic("failed to record sleep: {s}", .{@errorName(err)});
     }
 
     fn record(self: *Recorder, argv: []const []const u8, cwd: ?[]const u8, interactive: bool) !std.process.RunResult {
@@ -194,11 +195,13 @@ pub fn expectCommandContaining(recorder: *const Recorder, needle: []const u8) !v
 
 pub fn expectCommandOrder(recorder: *const Recorder, before: []const u8, after: []const u8) !void {
     const before_index = findCommandIndexContaining(recorder, before, 0) orelse return error.CommandNotFound;
-    const after_index = findCommandIndexContaining(recorder, after, before_index + 1) orelse return error.CommandNotFound;
+    const same_command = commandContains(recorder.commands.items[before_index], after);
+    if (same_command) return error.SameCommandMatchesBothNeedles;
+    const after_index = findCommandIndexContaining(recorder, after, 0) orelse return error.CommandNotFound;
     try std.testing.expect(before_index < after_index);
 }
 
-pub fn expectNoSizingCommands(recorder: *const Recorder) !void {
+pub fn expectNoTmuxSizingCommands(recorder: *const Recorder) !void {
     for (recorder.commands.items) |command| {
         if (std.mem.eql(u8, command.argv[0], "tmux") and command.argv.len > 1) {
             try std.testing.expect(!std.mem.eql(u8, command.argv[1], "resize-window"));

@@ -363,7 +363,7 @@ test "startAll starts idle docker before service command" {
     try proc_runner.expectCommandContaining(&recorder, "docker compose");
     try proc_runner.expectCommandContaining(&recorder, "cd '/tmp/demo/backend' && serve");
     try proc_runner.expectCommandOrder(&recorder, "docker compose", "cd '/tmp/demo/backend' && serve");
-    try proc_runner.expectNoSizingCommands(&recorder);
+    try proc_runner.expectNoTmuxSizingCommands(&recorder);
     try proc_runner.expectNoRemainingResponses(&recorder);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }

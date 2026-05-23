@@ -556,13 +556,14 @@ test "hello creates session with interactive tmuxp and no sizing commands" {
 
     try runtime.helloUnlocked("all", &writer);
 
-    const load = findRecordedCommand(&recorder, "tmuxp").?;
+    const load = proc_runner.findCommandContaining(&recorder, "tmuxp").?;
     try std.testing.expect(load.interactive);
     try std.testing.expectEqualStrings("load", load.argv[1]);
     try proc_runner.expectCommandContaining(&recorder, "set-option");
     try proc_runner.expectCommandContaining(&recorder, "@zask_dash_mode");
     try proc_runner.expectCommandContaining(&recorder, "bind-key");
-    try proc_runner.expectNoSizingCommands(&recorder);
+    try proc_runner.expectNoTmuxSizingCommands(&recorder);
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
 test "hello attaches existing session when another hello holds the lock" {
@@ -605,13 +606,6 @@ test "hello attaches existing session when another hello holds the lock" {
 
     try std.testing.expectEqualStrings("has-session", recorder.commands.items[0].argv[1]);
     try std.testing.expectEqualStrings("switch-client", recorder.commands.items[1].argv[1]);
-}
-
-fn findRecordedCommand(recorder: *const proc_runner.Recorder, executable: []const u8) ?proc_runner.RecordedCommand {
-    for (recorder.commands.items) |command| {
-        if (std.mem.eql(u8, command.argv[0], executable)) return command;
-    }
-    return null;
 }
 
 fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.Config) Runtime {
