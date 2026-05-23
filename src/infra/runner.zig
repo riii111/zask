@@ -45,7 +45,10 @@ pub const Runner = struct {
     }
 
     pub fn sleep(self: Runner, duration: std.Io.Duration) void {
-        if (self.recorder != null) return;
+        if (self.recorder) |recorder| {
+            recorder.recordSleep(duration);
+            return;
+        }
         std.Io.sleep(self.io, duration, .awake) catch {};
     }
 
@@ -97,12 +100,13 @@ pub const Recorder = struct {
     gpa: std.mem.Allocator,
     commands: std.ArrayList(RecordedCommand),
     responses: std.ArrayList(RecordedResponse),
+    sleeps: std.ArrayList(RecordedSleep),
     stdout: []const u8 = "",
     stderr: []const u8 = "",
     term: std.process.Child.Term = .{ .exited = 0 },
 
     pub fn init(gpa: std.mem.Allocator) Recorder {
-        return .{ .gpa = gpa, .commands = .empty, .responses = .empty };
+        return .{ .gpa = gpa, .commands = .empty, .responses = .empty, .sleeps = .empty };
     }
 
     pub fn deinit(self: *Recorder) void {
@@ -117,6 +121,7 @@ pub const Recorder = struct {
             self.gpa.free(response.stderr);
         }
         self.responses.deinit(self.gpa);
+        self.sleeps.deinit(self.gpa);
     }
 
     pub fn enqueue(self: *Recorder, stdout: []const u8, stderr: []const u8, term: std.process.Child.Term) !void {
@@ -125,6 +130,11 @@ pub const Recorder = struct {
             .stderr = try self.gpa.dupe(u8, stderr),
             .term = term,
         });
+    }
+
+    pub fn recordSleep(self: *Recorder, duration: std.Io.Duration) void {
+        self.sleeps.append(self.gpa, .{ .duration = duration, .commands_before = self.commands.items.len }) catch |err|
+            std.debug.panic("failed to record sleep: {s}", .{@errorName(err)});
     }
 
     fn record(self: *Recorder, argv: []const []const u8, cwd: ?[]const u8, interactive: bool) !std.process.RunResult {
@@ -159,6 +169,61 @@ pub const RecordedCommand = struct {
     interactive: bool,
 };
 
+pub const RecordedSleep = struct {
+    duration: std.Io.Duration,
+    commands_before: usize,
+};
+
+pub fn commandContains(command: RecordedCommand, needle: []const u8) bool {
+    for (command.argv) |arg| {
+        if (std.mem.indexOf(u8, arg, needle) != null) return true;
+    }
+    if (command.cwd) |cwd| return std.mem.indexOf(u8, cwd, needle) != null;
+    return false;
+}
+
+pub fn findCommandContaining(recorder: *const Recorder, needle: []const u8) ?RecordedCommand {
+    for (recorder.commands.items) |command| {
+        if (commandContains(command, needle)) return command;
+    }
+    return null;
+}
+
+pub fn expectCommandContaining(recorder: *const Recorder, needle: []const u8) !void {
+    try std.testing.expect(findCommandContaining(recorder, needle) != null);
+}
+
+pub fn expectCommandOrder(recorder: *const Recorder, before: []const u8, after: []const u8) !void {
+    const before_index = findCommandIndexContaining(recorder, before, 0) orelse return error.CommandNotFound;
+    const same_command = commandContains(recorder.commands.items[before_index], after);
+    if (same_command) return error.SameCommandMatchesBothNeedles;
+    const after_index = findCommandIndexContaining(recorder, after, 0) orelse return error.CommandNotFound;
+    try std.testing.expect(before_index < after_index);
+}
+
+pub fn expectNoTmuxSizingCommands(recorder: *const Recorder) !void {
+    for (recorder.commands.items) |command| {
+        if (std.mem.eql(u8, command.argv[0], "tmux") and command.argv.len > 1) {
+            try std.testing.expect(!std.mem.eql(u8, command.argv[1], "resize-window"));
+            try std.testing.expect(!std.mem.eql(u8, command.argv[1], "resize-pane"));
+            if (std.mem.eql(u8, command.argv[1], "set-option") or std.mem.eql(u8, command.argv[1], "set-window-option")) {
+                for (command.argv) |arg| try std.testing.expect(!std.mem.eql(u8, arg, "window-size"));
+            }
+        }
+    }
+}
+
+pub fn expectNoRemainingResponses(recorder: *const Recorder) !void {
+    try std.testing.expectEqual(@as(usize, 0), recorder.responses.items.len);
+}
+
+fn findCommandIndexContaining(recorder: *const Recorder, needle: []const u8, start: usize) ?usize {
+    for (recorder.commands.items[start..], start..) |command, index| {
+        if (commandContains(command, needle)) return index;
+    }
+    return null;
+}
+
 const RecordedResponse = struct {
     stdout: []const u8,
     stderr: []const u8,
@@ -181,6 +246,11 @@ test "recorder captures commands without spawning processes" {
 
     _ = try run.run(&.{"zsh"}, .{ .interactive = true });
     try std.testing.expect(recorder.commands.items[1].interactive);
+
+    run.sleep(std.Io.Duration.fromSeconds(2));
+    try std.testing.expectEqual(@as(usize, 1), recorder.sleeps.items.len);
+    try std.testing.expectEqual(std.Io.Duration.fromSeconds(2), recorder.sleeps.items[0].duration);
+    try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items[0].commands_before);
 }
 
 test "recorder returns queued responses in order" {

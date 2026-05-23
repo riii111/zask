@@ -323,6 +323,49 @@ test "precheck abort stops startup and warn continues" {
 
     try std.testing.expectError(error.PrecheckFailed, lifecycle.startAll("all", &writer));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: warn-check check failed") != null);
+    try proc_runner.expectCommandContaining(&recorder, "false");
+}
+
+test "startAll starts idle docker before service command" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"enabled": true},
+        \\  "services": [{"name":"api","dir":"backend","command":"serve","group":"backend"}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("api\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const lifecycle = Lifecycle{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
+        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startAll("all", &writer);
+
+    try proc_runner.expectCommandContaining(&recorder, "docker compose");
+    try proc_runner.expectCommandContaining(&recorder, "cd '/tmp/demo/backend' && serve");
+    try proc_runner.expectCommandOrder(&recorder, "docker compose", "cd '/tmp/demo/backend' && serve");
+    try proc_runner.expectNoTmuxSizingCommands(&recorder);
+    try proc_runner.expectNoRemainingResponses(&recorder);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }
 
 test "command phase runs interactively" {
@@ -724,6 +767,48 @@ test "docker restart stops compose before reporting missing session" {
     try std.testing.expectEqualStrings("docker", recorder.commands.items[1].argv[0]);
     try std.testing.expectEqualStrings("down", recorder.commands.items[1].argv[4]);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Session not running") != null);
+}
+
+test "docker restart runs compose down before compose up" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"enabled": true},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("api\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const lifecycle = Lifecycle{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
+        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.restartTarget("docker", &writer);
+
+    try proc_runner.expectCommandOrder(&recorder, "down", "docker compose");
+    try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items.len);
+    try std.testing.expectEqual(waits.docker_ready_settle, recorder.sleeps.items[0].duration);
+    try proc_runner.expectCommandContaining(&recorder, "docker compose");
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
 test "startAll dispatches quoted service command to tmux" {

@@ -14,6 +14,9 @@ const shell = @import("infra/shell.zig");
 const tmux_client = @import("infra/tmux.zig");
 const tmux_setup = @import("tmux_setup.zig");
 const validate = @import("validate.zig");
+const waits = @import("waits.zig");
+
+const bye_kill_settle = std.Io.Duration.fromSeconds(1);
 
 pub const Runtime = struct {
     gpa: std.mem.Allocator,
@@ -152,7 +155,7 @@ pub const Runtime = struct {
         }
         try self.lifecycle().stopAll(writer);
         self.cleanupPipePane() catch {};
-        self.runner().sleep(std.Io.Duration.fromSeconds(1));
+        self.runner().sleep(bye_kill_settle);
         const tx = self.tmux();
         try tx.killSession();
     }
@@ -390,6 +393,38 @@ test "exec reports missing containers and uses shell override" {
     try std.testing.expectEqualStrings("bash", command.argv[6]);
 }
 
+test "exec passes default command without shell wrapping" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"enabled": true, "exec_defaults": {"db": "psql -c 'select 1'"}},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("db\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.exec("db", false, &writer);
+
+    const command = recorder.commands.items[1];
+    try std.testing.expect(command.interactive);
+    try std.testing.expectEqualStrings("docker", command.argv[0]);
+    try std.testing.expectEqualStrings("exec", command.argv[4]);
+    try std.testing.expectEqualStrings("db", command.argv[5]);
+    try std.testing.expectEqualStrings("psql", command.argv[6]);
+    try std.testing.expectEqualStrings("-c", command.argv[7]);
+    try std.testing.expectEqualStrings("select 1", command.argv[8]);
+    try std.testing.expect(!proc_runner.commandContains(command, "bash -lc"));
+}
+
 test "bye kills session even when pipe cleanup fails" {
     const json =
         \\{
@@ -418,6 +453,48 @@ test "bye kills session even when pipe cleanup fails" {
     const kill = recorder.commands.items[recorder.commands.items.len - 1];
     try std.testing.expectEqualStrings("tmux", kill.argv[0]);
     try std.testing.expectEqualStrings("kill-session", kill.argv[1]);
+}
+
+test "bye reaches kill-session after cleanup failure" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"enabled": true},
+        \\  "services": [{"name":"api","dir":"backend","command":"serve","group":"backend"}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
+    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.byeUnlocked(&writer);
+
+    const kill_index = recorder.commands.items.len - 1;
+    try proc_runner.expectCommandOrder(&recorder, "C-c", "down");
+    try proc_runner.expectCommandOrder(&recorder, "down", "pipe-pane");
+    try std.testing.expectEqualStrings("kill-session", recorder.commands.items[kill_index].argv[1]);
+    try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items.len);
+    try std.testing.expectEqual(waits.docker_ready_settle, recorder.sleeps.items[0].duration);
+    try std.testing.expectEqual(bye_kill_settle, recorder.sleeps.items[1].duration);
+    try std.testing.expectEqual(kill_index, recorder.sleeps.items[1].commands_before);
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
 test "attach from tmux switches client without mutating window sizes" {
@@ -479,10 +556,14 @@ test "hello creates session with interactive tmuxp and no sizing commands" {
 
     try runtime.helloUnlocked("all", &writer);
 
-    const load = findRecordedCommand(&recorder, "tmuxp").?;
+    const load = proc_runner.findCommandContaining(&recorder, "tmuxp").?;
     try std.testing.expect(load.interactive);
     try std.testing.expectEqualStrings("load", load.argv[1]);
-    try assertNoSizingCommands(&recorder);
+    try proc_runner.expectCommandContaining(&recorder, "set-option");
+    try proc_runner.expectCommandContaining(&recorder, "@zask_dash_mode");
+    try proc_runner.expectCommandContaining(&recorder, "bind-key");
+    try proc_runner.expectNoTmuxSizingCommands(&recorder);
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
 test "hello attaches existing session when another hello holds the lock" {
@@ -525,25 +606,6 @@ test "hello attaches existing session when another hello holds the lock" {
 
     try std.testing.expectEqualStrings("has-session", recorder.commands.items[0].argv[1]);
     try std.testing.expectEqualStrings("switch-client", recorder.commands.items[1].argv[1]);
-}
-
-fn findRecordedCommand(recorder: *const proc_runner.Recorder, executable: []const u8) ?proc_runner.RecordedCommand {
-    for (recorder.commands.items) |command| {
-        if (std.mem.eql(u8, command.argv[0], executable)) return command;
-    }
-    return null;
-}
-
-fn assertNoSizingCommands(recorder: *const proc_runner.Recorder) !void {
-    for (recorder.commands.items) |command| {
-        if (std.mem.eql(u8, command.argv[0], "tmux") and command.argv.len > 1) {
-            try std.testing.expect(!std.mem.eql(u8, command.argv[1], "resize-window"));
-            try std.testing.expect(!std.mem.eql(u8, command.argv[1], "resize-pane"));
-            if (std.mem.eql(u8, command.argv[1], "set-option") or std.mem.eql(u8, command.argv[1], "set-window-option")) {
-                for (command.argv) |arg| try std.testing.expect(!std.mem.eql(u8, arg, "window-size"));
-            }
-        }
-    }
 }
 
 fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.Config) Runtime {

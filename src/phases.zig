@@ -121,6 +121,46 @@ test "precheck failure prints hint and preserves abort semantics" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Hint: install tool") != null);
 }
 
+test "command phase warn continues and abort fails startup" {
+    const lifecycle_mod = @import("lifecycle.zig");
+    const runner_mod = @import("infra/runner.zig");
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "phases": [
+        \\    {"type":"command","command":"warn setup","on_fail":"warn"},
+        \\    {"type":"command","command":"abort setup","on_fail":"abort"}
+        \\  ],
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = runner_mod.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const run = runner_mod.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const lifecycle = lifecycle_mod.Lifecycle{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
+        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runCommandPhase(lifecycle, cfg.phases()[0], "all", &writer);
+    try std.testing.expectError(error.CommandPhaseFailed, runCommandPhase(lifecycle, cfg.phases()[1], "all", &writer));
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: command phase failed") != null);
+    try std.testing.expectEqualStrings("warn setup", recorder.commands.items[0].argv[2]);
+    try std.testing.expectEqualStrings("abort setup", recorder.commands.items[1].argv[2]);
+    try runner_mod.expectNoRemainingResponses(&recorder);
+}
+
 test "phase cwd rejects path traversal" {
     const runner_mod = @import("infra/runner.zig");
     const lifecycle_mod = @import("lifecycle.zig");
