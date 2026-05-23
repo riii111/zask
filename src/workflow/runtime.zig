@@ -257,7 +257,7 @@ pub const Runtime = struct {
         errdefer tx.killSession() catch {};
         try tmux_setup.applySessionOptions(self.gpa, tx, try self.cfg.projectName(), self.zask_path, self.config_path);
         try tx.splitWindow("dashboard", root, try self.zaskCommand("monitor"));
-        try tx.setWindowOptionForWindow("dashboard", "main-pane-width", "50%");
+        try tx.setWindowOption("dashboard", "main-pane-width", "50%");
         try tx.selectLayout("dashboard", "main-vertical");
 
         for (try self.cfg.services()) |service| {
@@ -268,6 +268,7 @@ pub const Runtime = struct {
         if (self.cfg.dockerEnabled()) {
             try tx.newWindow("docker", try self.cfg.dockerDir(self.gpa), "echo \"=== Docker Services ===\" && echo \"Waiting for start command...\"");
         }
+        try tx.selectWindow("dashboard");
     }
 
     fn zaskCommand(self: Runtime, command: []const u8) ![]const u8 {
@@ -551,6 +552,7 @@ test "session skeleton creates dashboard service and docker windows" {
     try proc_runner.expectCommandContaining(&recorder, "/tmp/demo/backend");
     try proc_runner.expectCommandContaining(&recorder, "/tmp/demo/infra");
     try proc_runner.expectCommandOrder(&recorder, "remain-on-exit", "api");
+    try proc_runner.expectCommandOrder(&recorder, "docker", "select-window");
     try proc_runner.expectCommandContaining(&recorder, "@zask_dash_mode");
     try proc_runner.expectNoTmuxSizingCommands(&recorder);
     try proc_runner.expectNoRemainingResponses(&recorder);

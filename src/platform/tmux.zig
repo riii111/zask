@@ -28,12 +28,12 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ "tmux", "attach-session", "-t", self.session }, .{ .interactive = true, .check = true });
     }
 
-    pub fn newDetachedSession(self: Client, window: []const u8, cwd: []const u8, command: []const u8) !void {
-        _ = try self.runner.run(&.{ "tmux", "new-session", "-d", "-s", self.session, "-n", window, "-c", cwd, command }, .{ .check = true, .discard = true });
+    pub fn newDetachedSession(self: Client, window_name: []const u8, cwd: []const u8, command: []const u8) !void {
+        _ = try self.runner.run(&.{ "tmux", "new-session", "-d", "-s", self.session, "-n", window_name, "-c", cwd, command }, .{ .check = true, .discard = true });
     }
 
-    pub fn newWindow(self: Client, window: []const u8, cwd: []const u8, command: []const u8) !void {
-        _ = try self.runner.run(&.{ "tmux", "new-window", "-t", self.session, "-n", window, "-c", cwd, command }, .{ .check = true, .discard = true });
+    pub fn newWindow(self: Client, window_name: []const u8, cwd: []const u8, command: []const u8) !void {
+        _ = try self.runner.run(&.{ "tmux", "new-window", "-d", "-t", self.session, "-n", window_name, "-c", cwd, command }, .{ .check = true, .discard = true });
     }
 
     pub fn splitWindow(self: Client, window: []const u8, cwd: []const u8, command: []const u8) !void {
@@ -70,11 +70,7 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ "tmux", "set-option", "-t", self.session, name, value }, .{ .check = true, .discard = true });
     }
 
-    pub fn setWindowOption(self: Client, name: []const u8, value: []const u8) !void {
-        _ = try self.runner.run(&.{ "tmux", "set-window-option", "-t", self.session, name, value }, .{ .check = true, .discard = true });
-    }
-
-    pub fn setWindowOptionForWindow(self: Client, window: []const u8, name: []const u8, value: []const u8) !void {
+    pub fn setWindowOption(self: Client, window: []const u8, name: []const u8, value: []const u8) !void {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
         _ = try self.runner.run(&.{ "tmux", "set-window-option", "-t", pane_target, name, value }, .{ .check = true, .discard = true });
@@ -246,7 +242,7 @@ test "session construction records tmux commands through runner" {
 
     try client.newDetachedSession("dashboard", "/tmp/demo app", "zask dashboard");
     try client.splitWindow("dashboard", "/tmp/demo app", "zask monitor");
-    try client.setWindowOptionForWindow("dashboard", "main-pane-width", "50%");
+    try client.setWindowOption("dashboard", "main-pane-width", "50%");
     try client.selectLayout("dashboard", "main-vertical");
     try client.newWindow("api", "/tmp/demo app/backend", "echo waiting");
 
@@ -278,10 +274,11 @@ test "session construction records tmux commands through runner" {
 
     const window = recorder.commands.items[4];
     try std.testing.expectEqualStrings("new-window", window.argv[1]);
-    try std.testing.expectEqualStrings("demo", window.argv[3]);
-    try std.testing.expectEqualStrings("api", window.argv[5]);
-    try std.testing.expectEqualStrings("/tmp/demo app/backend", window.argv[7]);
-    try std.testing.expectEqualStrings("echo waiting", window.argv[8]);
+    try std.testing.expectEqualStrings("-d", window.argv[2]);
+    try std.testing.expectEqualStrings("demo", window.argv[4]);
+    try std.testing.expectEqualStrings("api", window.argv[6]);
+    try std.testing.expectEqualStrings("/tmp/demo app/backend", window.argv[8]);
+    try std.testing.expectEqualStrings("echo waiting", window.argv[9]);
 }
 
 test "paneRunning checks pane child processes" {
