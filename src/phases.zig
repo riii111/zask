@@ -45,10 +45,13 @@ pub fn runCommandPhase(ctx: anytype, phase: std.json.Value, profile: []const u8,
     const command = try config.Config.commandPhaseCommand(phase, profile);
     const dir = config_value.optionalObjectString(phase, "dir", "");
     const cwd = try phaseCwd(ctx, dir);
-    _ = ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd, .interactive = true, .check = true }) catch {
-        if (std.mem.eql(u8, config_value.optionalObjectString(phase, "on_fail", "abort"), "abort")) return error.CommandPhaseFailed;
-        try writer.writeAll("Warning: command phase failed\n");
-        return;
+    _ = ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd, .interactive = true, .check = true }) catch |err| switch (err) {
+        error.CommandFailed => {
+            if (std.mem.eql(u8, config_value.optionalObjectString(phase, "on_fail", "abort"), "abort")) return error.CommandPhaseFailed;
+            try writer.writeAll("Warning: command phase failed\n");
+            return;
+        },
+        else => return err,
     };
 }
 

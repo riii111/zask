@@ -40,6 +40,7 @@ pub const Config = struct {
         const root = try self.projectRoot(gpa);
         const dir = self.optionalString(&.{ "docker", "dir" }, "");
         if (dir.len == 0) return root;
+        try validate.relativeSubPath(dir);
         return std.fs.path.join(gpa, &.{ root, dir });
     }
 
@@ -434,6 +435,21 @@ test "allows external service paths outside project root" {
     const cfg = try Config.parse(arena.allocator(), json, "/home/me");
 
     try std.testing.expectEqualStrings("../external", try cfg.serviceDir(arena.allocator(), try cfg.findService("api")));
+}
+
+test "rejects docker paths that escape project root" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"enabled": true, "dir": "../escape"},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+
+    try std.testing.expectError(error.InvalidPath, cfg.dockerDir(arena.allocator()));
 }
 
 test "parses synthetic fixture" {

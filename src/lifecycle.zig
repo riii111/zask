@@ -114,11 +114,11 @@ pub const Lifecycle = struct {
         waits.ensureWindowReady(self, service) catch |err| switch (err) {
             error.WindowNotReady => {
                 try writeProgress(writer, "Warning: window for {s} not ready\n", .{service});
-                return;
+                return error.WindowNotReady;
             },
             error.TmuxUnavailable => {
                 try writeProgress(writer, "Warning: tmux unavailable for {s}\n", .{service});
-                return;
+                return error.TmuxUnavailable;
             },
         };
         const pane = self.tmux.observePane(service);
@@ -412,6 +412,34 @@ test "window readiness retries missing windows until timeout" {
 
     try std.testing.expectError(error.WindowNotReady, waits.ensureWindowReady(lifecycle, "api"));
     try std.testing.expectEqual(@as(usize, waits.windowReadyAttempts()), recorder.commands.items.len);
+}
+
+test "service start reports missing window as failure" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": [{"name":"api","dir":"backend","command":"serve","group":"backend"}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    recorder.term = .{ .exited = 1 };
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const lifecycle = Lifecycle{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
+        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.WindowNotReady, lifecycle.startAll("all", &writer));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: window for api not ready") != null);
 }
 
 test "stop and restart targets require an active session" {
