@@ -107,7 +107,8 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
     }
     const rt = try loadRuntime(context, parsed);
     return switch (command) {
-        .version, .help => unreachable,
+        .version => printVersion(writer),
+        .help => printHelp(writer),
         .render_session => rt.renderSession(writer),
         .list => rt.list(writer),
         .status => rt.status(writer),

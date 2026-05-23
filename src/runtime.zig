@@ -10,6 +10,7 @@ const render = @import("ui/render.zig");
 const proc_runner = @import("infra/runner.zig");
 const shell = @import("infra/shell.zig");
 const tmux_client = @import("infra/tmux.zig");
+const tmux_options = @import("tmux_options.zig");
 const validate = @import("validate.zig");
 
 pub const Runtime = struct {
@@ -116,11 +117,11 @@ pub const Runtime = struct {
         const tx = try self.tmux();
         try tx.setOption("prefix", "C-q");
         try tx.setOption("status-format[0]", "#[align=left]#{T;=/#{status-left-length}:status-left}#[align=right]#{T;=/#{status-right-length}:status-right}");
-        try tx.setOption("@zask_dash_mode", "all");
-        try tx.setOption("@zask_path", self.zask_path);
-        try tx.setOption("@zask_config_path", self.config_path);
-        try tx.bindRunShell("m", "session=\"#{session_name}\"; mode=$(tmux show-option -t \"$session\" -qv @zask_dash_mode); if [ \"$mode\" = \"all\" ]; then tmux set-option -t \"$session\" @zask_dash_mode bad; else tmux set-option -t \"$session\" @zask_dash_mode all; fi");
-        try tx.bindRunShell("f", "session=\"#{session_name}\"; zask=$(tmux show-option -t \"$session\" -qv @zask_path); config=$(tmux show-option -t \"$session\" -qv @zask_config_path); \"$zask\" --config \"$config\" follow \"#{window_name}\"");
+        try tx.setOption(tmux_options.dash_mode, "all");
+        try tx.setOption(tmux_options.zask_path, self.zask_path);
+        try tx.setOption(tmux_options.config_path, self.config_path);
+        try tx.bindRunShell("m", try std.fmt.allocPrint(self.gpa, "session=\"#{{session_name}}\"; mode=$(tmux show-option -t \"$session\" -qv {s}); if [ \"$mode\" = \"all\" ]; then tmux set-option -t \"$session\" {s} bad; else tmux set-option -t \"$session\" {s} all; fi", .{ tmux_options.dash_mode, tmux_options.dash_mode, tmux_options.dash_mode }));
+        try tx.bindRunShell("f", try std.fmt.allocPrint(self.gpa, "session=\"#{{session_name}}\"; zask=$(tmux show-option -t \"$session\" -qv {s}); config=$(tmux show-option -t \"$session\" -qv {s}); \"$zask\" --config \"$config\" follow \"#{{window_name}}\"", .{ tmux_options.zask_path, tmux_options.config_path }));
         try self.resizeWindows();
         try self.initLogDir();
         try self.setupPipePane();
@@ -262,7 +263,7 @@ pub const Runtime = struct {
         const session_id = try self.logSessionId();
         const dir = try self.logDirForSession(session_id);
         try self.runner().runCheckedDiscard(&.{ "mkdir", "-p", dir });
-        try (try self.tmux()).setOption("@zask_log_session_id", session_id);
+        try (try self.tmux()).setOption(tmux_options.log_session_id, session_id);
         try self.cleanupOldLogs();
     }
 
@@ -309,7 +310,7 @@ pub const Runtime = struct {
     }
 
     fn logDir(self: Runtime) ![]const u8 {
-        const session_id = (try self.tmux()).showOption("@zask_log_session_id") catch null;
+        const session_id = (try self.tmux()).showOption(tmux_options.log_session_id) catch null;
         const value = session_id orelse return error.LogSessionNotInitialized;
         try validateLogSessionId(value);
         return self.logDirForSession(value);

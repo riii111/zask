@@ -114,8 +114,7 @@ pub const Config = struct {
         return std.fs.path.join(gpa, &.{ try self.projectRoot(gpa), dir });
     }
 
-    pub fn serviceStartCommand(self: Config, gpa: std.mem.Allocator, service: Value) ![]const u8 {
-        _ = self;
+    pub fn serviceStartCommand(gpa: std.mem.Allocator, service: Value) ![]const u8 {
         const command = try config_value.requiredObjectString(service, "command");
         const runtime = config_value.optionalObjectString(service, "runtime", "");
         if (runtime.len == 0) return command;
@@ -136,6 +135,7 @@ pub const Config = struct {
         }
 
         var list: std.ArrayList([]const u8) = .empty;
+        errdefer list.deinit(gpa);
         for (try self.services()) |service| {
             if (std.mem.eql(u8, serviceGroup(service), name)) {
                 try list.append(gpa, try serviceName(service));
@@ -186,8 +186,7 @@ pub const Config = struct {
         return group;
     }
 
-    pub fn commandPhaseCommand(self: Config, phase: Value, start_profile: []const u8) ![]const u8 {
-        _ = self;
+    pub fn commandPhaseCommand(phase: Value, start_profile: []const u8) ![]const u8 {
         if (phase != .object) return error.InvalidConfig;
         if (phase.object.get("commands")) |commands| {
             if (commands == .object) {
@@ -252,6 +251,7 @@ fn readFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
 
 fn stringArray(gpa: std.mem.Allocator, values: []const Value) ![][]const u8 {
     var list: std.ArrayList([]const u8) = .empty;
+    errdefer list.deinit(gpa);
     for (values) |value| {
         if (value != .string) return error.InvalidConfig;
         try list.append(gpa, value.string);
@@ -284,7 +284,7 @@ test "loads defaults and resolves paths" {
     try std.testing.expectEqualStrings("demo", try cfg.projectName());
     try std.testing.expectEqualStrings("/home/me/work/demo", try cfg.projectRoot(arena.allocator()));
     try std.testing.expectEqualStrings("/home/me/work/demo/backend", try cfg.serviceDir(arena.allocator(), try cfg.findService("api")));
-    try std.testing.expectEqualStrings("npm run dev", try cfg.serviceStartCommand(arena.allocator(), try cfg.findService("web")));
+    try std.testing.expectEqualStrings("npm run dev", try Config.serviceStartCommand(arena.allocator(), try cfg.findService("web")));
     const group = try cfg.resolveGroup(arena.allocator(), "all");
     try std.testing.expectEqualStrings("api", group[0]);
 }
@@ -332,7 +332,7 @@ test "rejects unknown runtimes and missing services" {
     defer arena.deinit();
     const cfg = try Config.parse(arena.allocator(), json, "/home/me");
 
-    try std.testing.expectError(error.UnknownRuntime, cfg.serviceStartCommand(arena.allocator(), try cfg.findService("api")));
+    try std.testing.expectError(error.UnknownRuntime, Config.serviceStartCommand(arena.allocator(), try cfg.findService("api")));
     try std.testing.expectError(error.UnknownService, cfg.findService("missing"));
     try std.testing.expectError(error.UnknownGroup, cfg.resolveGroup(arena.allocator(), "missing"));
 }

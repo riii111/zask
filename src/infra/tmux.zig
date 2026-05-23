@@ -120,13 +120,6 @@ pub const Client = struct {
         };
     }
 
-    pub fn panePid(self: Client, pane_target: []const u8) !?[]const u8 {
-        const result = self.runner.run(&.{ "tmux", "list-panes", "-t", pane_target, "-F", "#{pane_pid}" }) catch return null;
-        defer self.gpa.free(result.stdout);
-        defer self.gpa.free(result.stderr);
-        return try self.gpa.dupe(u8, std.mem.trim(u8, result.stdout, " \t\r\n"));
-    }
-
     pub fn capturePane(self: Client, window: []const u8) ![]const u8 {
         const result = self.runner.run(&.{ "tmux", "capture-pane", "-t", try self.target(window), "-p" }) catch return "";
         defer self.gpa.free(result.stderr);

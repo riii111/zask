@@ -111,7 +111,7 @@ pub const Lifecycle = struct {
             return;
         }
         const target = try self.tmux.target(service);
-        const cmd = try std.fmt.allocPrint(self.gpa, "cd {s} && {s}", .{ try shell.quote(self.gpa, try self.cfg.serviceDir(self.gpa, value)), try self.cfg.serviceStartCommand(self.gpa, value) });
+        const cmd = try std.fmt.allocPrint(self.gpa, "cd {s} && {s}", .{ try shell.quote(self.gpa, try self.cfg.serviceDir(self.gpa, value)), try config.Config.serviceStartCommand(self.gpa, value) });
         try writeProgress(writer, "Starting {s}...\n", .{service});
         try self.tmux.sendKeys(target, &.{ cmd, "Enter" });
     }
@@ -169,7 +169,7 @@ pub const Lifecycle = struct {
     }
 
     fn runCommandPhase(self: Lifecycle, phase: std.json.Value, profile: []const u8, writer: *std.Io.Writer) !void {
-        const command = try self.cfg.commandPhaseCommand(phase, profile);
+        const command = try config.Config.commandPhaseCommand(phase, profile);
         const dir = config_value.optionalObjectString(phase, "dir", "");
         const cwd = if (dir.len == 0) try self.cfg.projectRoot(self.gpa) else try std.fs.path.join(self.gpa, &.{ try self.cfg.projectRoot(self.gpa), dir });
         const result = self.runner.runCheckedCwd(&.{ "bash", "-c", command }, cwd) catch {

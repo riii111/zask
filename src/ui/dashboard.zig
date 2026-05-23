@@ -4,6 +4,7 @@ const docker_client = @import("../infra/docker.zig");
 const env = @import("../infra/env.zig");
 const proc_runner = @import("../infra/runner.zig");
 const tmux_client = @import("../infra/tmux.zig");
+const tmux_options = @import("../tmux_options.zig");
 
 pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env.Map, cfg: config.Config, writer: *std.Io.Writer) !void {
     const run: proc_runner.Runner = .{ .gpa = gpa, .io = io };
@@ -54,8 +55,6 @@ const monitor_name_width = 12;
 const monitor_port_width = 6;
 const monitor_status_width = 8;
 const monitor_log_width = 35;
-const dash_mode_option = "@zask_dash_mode";
-
 const Context = struct {
     gpa: std.mem.Allocator,
     cfg: config.Config,
@@ -138,13 +137,14 @@ fn renderLauncher(ctx: Context, writer: *std.Io.Writer) !void {
     }
 
     const groups = try serviceGroups(ctx);
+    defer ctx.gpa.free(groups);
     for (groups) |group| {
         try writer.print("{s}{s}[{s}]{s}\n", .{ bold, yellow, group, reset });
         for (try ctx.cfg.services()) |service| {
             if (!std.mem.eql(u8, config.Config.serviceGroup(service), group)) continue;
             const name = try config.Config.serviceName(service);
             const port = config.Config.servicePort(service);
-            const command = try ctx.cfg.serviceStartCommand(ctx.gpa, service);
+            const command = try config.Config.serviceStartCommand(ctx.gpa, service);
             try writer.print("  {s}", .{green});
             try writePadded(writer, name, service_name_width);
             try writer.print("{s} {s}", .{ reset, dim });
@@ -210,6 +210,7 @@ fn renderMonitor(ctx: Context, writer: *std.Io.Writer) !void {
     var warn_count: usize = 0;
     var dead_count: usize = 0;
     var rows: std.ArrayList(MonitorRow) = .empty;
+    defer rows.deinit(ctx.gpa);
 
     if (ctx.cfg.dockerEnabled()) {
         const row = try dockerMonitorRow(ctx);
@@ -235,6 +236,7 @@ fn renderMonitor(ctx: Context, writer: *std.Io.Writer) !void {
 
 fn serviceGroups(ctx: Context) ![][]const u8 {
     var groups: std.ArrayList([]const u8) = .empty;
+    errdefer groups.deinit(ctx.gpa);
     for (try ctx.cfg.services()) |service| {
         const group = config.Config.serviceGroup(service);
         var seen = false;
@@ -250,7 +252,7 @@ fn serviceGroups(ctx: Context) ![][]const u8 {
 }
 
 fn dashboardMode(ctx: Context) ![]const u8 {
-    return try ctx.tmux.showOption(dash_mode_option) orelse "all";
+    return try ctx.tmux.showOption(tmux_options.dash_mode) orelse "all";
 }
 
 fn serviceMonitorRow(ctx: Context, service: std.json.Value) !MonitorRow {
