@@ -45,7 +45,10 @@ pub const Runner = struct {
     }
 
     pub fn sleep(self: Runner, duration: std.Io.Duration) void {
-        if (self.recorder != null) return;
+        if (self.recorder) |recorder| {
+            recorder.recordSleep(duration) catch return;
+            return;
+        }
         std.Io.sleep(self.io, duration, .awake) catch {};
     }
 
@@ -97,12 +100,13 @@ pub const Recorder = struct {
     gpa: std.mem.Allocator,
     commands: std.ArrayList(RecordedCommand),
     responses: std.ArrayList(RecordedResponse),
+    sleeps: std.ArrayList(RecordedSleep),
     stdout: []const u8 = "",
     stderr: []const u8 = "",
     term: std.process.Child.Term = .{ .exited = 0 },
 
     pub fn init(gpa: std.mem.Allocator) Recorder {
-        return .{ .gpa = gpa, .commands = .empty, .responses = .empty };
+        return .{ .gpa = gpa, .commands = .empty, .responses = .empty, .sleeps = .empty };
     }
 
     pub fn deinit(self: *Recorder) void {
@@ -117,6 +121,7 @@ pub const Recorder = struct {
             self.gpa.free(response.stderr);
         }
         self.responses.deinit(self.gpa);
+        self.sleeps.deinit(self.gpa);
     }
 
     pub fn enqueue(self: *Recorder, stdout: []const u8, stderr: []const u8, term: std.process.Child.Term) !void {
@@ -125,6 +130,10 @@ pub const Recorder = struct {
             .stderr = try self.gpa.dupe(u8, stderr),
             .term = term,
         });
+    }
+
+    pub fn recordSleep(self: *Recorder, duration: std.Io.Duration) !void {
+        try self.sleeps.append(self.gpa, .{ .duration = duration, .command_count = self.commands.items.len });
     }
 
     fn record(self: *Recorder, argv: []const []const u8, cwd: ?[]const u8, interactive: bool) !std.process.RunResult {
@@ -159,6 +168,11 @@ pub const RecordedCommand = struct {
     interactive: bool,
 };
 
+pub const RecordedSleep = struct {
+    duration: std.Io.Duration,
+    command_count: usize,
+};
+
 const RecordedResponse = struct {
     stdout: []const u8,
     stderr: []const u8,
@@ -181,6 +195,11 @@ test "recorder captures commands without spawning processes" {
 
     _ = try run.run(&.{"zsh"}, .{ .interactive = true });
     try std.testing.expect(recorder.commands.items[1].interactive);
+
+    run.sleep(std.Io.Duration.fromSeconds(2));
+    try std.testing.expectEqual(@as(usize, 1), recorder.sleeps.items.len);
+    try std.testing.expectEqual(std.Io.Duration.fromSeconds(2), recorder.sleeps.items[0].duration);
+    try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items[0].command_count);
 }
 
 test "recorder returns queued responses in order" {

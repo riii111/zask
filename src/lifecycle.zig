@@ -323,6 +323,48 @@ test "precheck abort stops startup and warn continues" {
 
     try std.testing.expectError(error.PrecheckFailed, lifecycle.startAll("all", &writer));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: warn-check check failed") != null);
+    try assertRecordedCommandContains(&recorder, "false");
+}
+
+test "startAll with idle docker and service records compose and service startup" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"enabled": true},
+        \\  "services": [{"name":"api","dir":"backend","command":"serve","group":"backend"}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("api\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const lifecycle = Lifecycle{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
+        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startAll("all", &writer);
+
+    try assertRecordedCommandContains(&recorder, "docker compose");
+    try assertRecordedCommandContains(&recorder, "cd '/tmp/demo/backend' && serve");
+    try assertRecordedCommandOrder(&recorder, "docker compose", "cd '/tmp/demo/backend' && serve");
+    try assertNoSizingCommands(&recorder);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }
 
 test "command phase runs interactively" {
@@ -726,6 +768,47 @@ test "docker restart stops compose before reporting missing session" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Session not running") != null);
 }
 
+test "docker restart records compose down before compose up" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"enabled": true},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("api\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const lifecycle = Lifecycle{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
+        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.restartTarget("docker", &writer);
+
+    try assertRecordedCommandOrder(&recorder, "down", "docker compose");
+    try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items.len);
+    try std.testing.expectEqual(std.Io.Duration.fromSeconds(2), recorder.sleeps.items[0].duration);
+    try assertRecordedCommandContains(&recorder, "docker compose");
+}
+
 test "startAll dispatches quoted service command to tmux" {
     const json =
         \\{
@@ -757,4 +840,47 @@ test "startAll dispatches quoted service command to tmux" {
     try std.testing.expectEqualStrings("demo:api", send_keys.argv[3]);
     try std.testing.expectEqualStrings("cd '/tmp/demo app/backend' && serve", send_keys.argv[4]);
     try std.testing.expectEqualStrings("Enter", send_keys.argv[5]);
+}
+
+fn assertRecordedCommandContains(recorder: *const proc_runner.Recorder, needle: []const u8) !void {
+    try std.testing.expect(findRecordedCommandContaining(recorder, needle) != null);
+}
+
+fn assertRecordedCommandOrder(recorder: *const proc_runner.Recorder, before: []const u8, after: []const u8) !void {
+    var before_index: ?usize = null;
+    var after_index: ?usize = null;
+    for (recorder.commands.items, 0..) |command, index| {
+        if (before_index == null and recordedCommandContains(command, before)) before_index = index;
+        if (after_index == null and recordedCommandContains(command, after)) after_index = index;
+    }
+    try std.testing.expect(before_index != null);
+    try std.testing.expect(after_index != null);
+    try std.testing.expect(before_index.? < after_index.?);
+}
+
+fn findRecordedCommandContaining(recorder: *const proc_runner.Recorder, needle: []const u8) ?proc_runner.RecordedCommand {
+    for (recorder.commands.items) |command| {
+        if (recordedCommandContains(command, needle)) return command;
+    }
+    return null;
+}
+
+fn recordedCommandContains(command: proc_runner.RecordedCommand, needle: []const u8) bool {
+    for (command.argv) |arg| {
+        if (std.mem.indexOf(u8, arg, needle) != null) return true;
+    }
+    if (command.cwd) |cwd| return std.mem.indexOf(u8, cwd, needle) != null;
+    return false;
+}
+
+fn assertNoSizingCommands(recorder: *const proc_runner.Recorder) !void {
+    for (recorder.commands.items) |command| {
+        if (std.mem.eql(u8, command.argv[0], "tmux") and command.argv.len > 1) {
+            try std.testing.expect(!std.mem.eql(u8, command.argv[1], "resize-window"));
+            try std.testing.expect(!std.mem.eql(u8, command.argv[1], "resize-pane"));
+            if (std.mem.eql(u8, command.argv[1], "set-option") or std.mem.eql(u8, command.argv[1], "set-window-option")) {
+                for (command.argv) |arg| try std.testing.expect(!std.mem.eql(u8, arg, "window-size"));
+            }
+        }
+    }
 }
