@@ -2,8 +2,11 @@ const std = @import("std");
 const build_options = @import("build_options");
 const root = @import("root.zig");
 const config = @import("config.zig");
+const docker_client = @import("infra/docker.zig");
 const env = @import("infra/env.zig");
 const paths = @import("infra/paths.zig");
+const proc_runner = @import("infra/runner.zig");
+const tmux_client = @import("infra/tmux.zig");
 const validate = @import("validate.zig");
 const Runtime = @import("runtime.zig").Runtime;
 
@@ -227,6 +230,7 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
     const io = context.io orelse return error.MissingIo;
     const path = try absoluteConfigPath(context.gpa, io, if (parsed.config_path) |p| p else try projectConfigPath(context.gpa, context.environ, parsed.project orelse return error.ProjectRequired));
     const cfg = try config.loadPath(context.gpa, io, path, try paths.home(context.environ));
+    const runner: proc_runner.Runner = .{ .gpa = context.gpa, .io = io };
     return .{
         .gpa = context.gpa,
         .io = io,
@@ -234,6 +238,9 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
         .cfg = cfg,
         .config_path = path,
         .zask_path = try zaskExecutablePath(context.gpa, io, context.argv0),
+        .runner_impl = runner,
+        .tmux_impl = tmux_client.Client{ .gpa = context.gpa, .runner = runner, .session = try cfg.sessionName() },
+        .docker_impl = docker_client.Compose{ .gpa = context.gpa, .runner = runner, .dir = try cfg.dockerDir(context.gpa), .file = cfg.dockerComposeFile() },
     };
 }
 

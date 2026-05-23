@@ -12,7 +12,7 @@ const render = @import("ui/render.zig");
 const proc_runner = @import("infra/runner.zig");
 const shell = @import("infra/shell.zig");
 const tmux_client = @import("infra/tmux.zig");
-const tmux_options = @import("tmux_options.zig");
+const tmux_setup = @import("tmux_setup.zig");
 const validate = @import("validate.zig");
 
 pub const Runtime = struct {
@@ -22,6 +22,9 @@ pub const Runtime = struct {
     cfg: config.Config,
     config_path: []const u8,
     zask_path: []const u8,
+    runner_impl: proc_runner.Runner,
+    tmux_impl: tmux_client.Client,
+    docker_impl: docker_client.Compose,
 
     pub fn renderSession(self: Runtime, writer: *std.Io.Writer) !void {
         try render.renderTmuxp(self.cfg, self.gpa, writer, self.zask_path, self.config_path);
@@ -121,13 +124,9 @@ pub const Runtime = struct {
         const session_file = try self.writeSessionFile();
         try self.runner().runCheckedDiscard(&.{ "tmuxp", "load", "-d", session_file });
         const tx = try self.tmux();
-        try tx.setOption("prefix", "C-q");
-        try tx.setOption("status-format[0]", "#[align=left]#{T;=/#{status-left-length}:status-left}#[align=right]#{T;=/#{status-right-length}:status-right}");
-        try tx.setOption(tmux_options.dash_mode, "all");
-        try tx.setOption(tmux_options.zask_path, self.zask_path);
-        try tx.setOption(tmux_options.config_path, self.config_path);
-        try tx.bindRunShell("m", try std.fmt.allocPrint(self.gpa, "session=\"#{{session_name}}\"; mode=$(tmux show-option -t \"$session\" -qv {s}); if [ \"$mode\" = \"all\" ]; then tmux set-option -t \"$session\" {s} bad; else tmux set-option -t \"$session\" {s} all; fi", .{ tmux_options.dash_mode, tmux_options.dash_mode, tmux_options.dash_mode }));
-        try tx.bindRunShell("f", try std.fmt.allocPrint(self.gpa, "session=\"#{{session_name}}\"; zask=$(tmux show-option -t \"$session\" -qv {s}); config=$(tmux show-option -t \"$session\" -qv {s}); \"$zask\" --config \"$config\" follow \"#{{window_name}}\"", .{ tmux_options.zask_path, tmux_options.config_path }));
+        errdefer tx.killSession() catch {};
+        try tmux_setup.applySessionOptions(tx, self.zask_path, self.config_path);
+        try tmux_setup.bindControlKeys(self.gpa, tx);
         try self.resizeWindows();
         try (try self.logSession()).init();
         try self.setupPipePane();
@@ -222,20 +221,15 @@ pub const Runtime = struct {
     }
 
     fn runner(self: Runtime) proc_runner.Runner {
-        return .{ .gpa = self.gpa, .io = self.io };
+        return self.runner_impl;
     }
 
     fn tmux(self: Runtime) !tmux_client.Client {
-        return .{ .gpa = self.gpa, .runner = self.runner(), .session = try self.cfg.sessionName() };
+        return self.tmux_impl;
     }
 
     fn docker(self: Runtime) !docker_client.Compose {
-        return .{
-            .gpa = self.gpa,
-            .runner = self.runner(),
-            .dir = try self.cfg.dockerDir(self.gpa),
-            .file = self.cfg.dockerComposeFile(),
-        };
+        return self.docker_impl;
     }
 
     fn lifecycle(self: Runtime) !lifecycle_mod.Lifecycle {

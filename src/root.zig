@@ -16,6 +16,7 @@ pub const runner = @import("infra/runner.zig");
 pub const runtime = @import("runtime.zig");
 pub const shell = @import("infra/shell.zig");
 pub const tmux = @import("infra/tmux.zig");
+pub const tmux_setup = @import("tmux_setup.zig");
 pub const validate = @import("validate.zig");
 pub const waits = @import("waits.zig");
 pub const yaml = @import("infra/yaml.zig");
