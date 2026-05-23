@@ -18,6 +18,7 @@ pub const tmux = @import("platform/tmux.zig");
 pub const tmux_setup = @import("workflow/tmux_setup.zig");
 pub const validate = @import("model/validate.zig");
 pub const waits = @import("workflow/waits.zig");
+pub const zask_command = @import("workflow/zask_command.zig");
 
 pub fn greeting() []const u8 {
     return "Hello from zask";

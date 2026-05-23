@@ -13,6 +13,7 @@ const tmux_client = @import("../platform/tmux.zig");
 const tmux_setup = @import("tmux_setup.zig");
 const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
+const zask_command = @import("zask_command.zig");
 
 const bye_kill_settle = std.Io.Duration.fromSeconds(1);
 
@@ -168,7 +169,7 @@ pub const Runtime = struct {
     pub fn re(self: Runtime, writer: *std.Io.Writer) !void {
         if (try self.inTmux()) {
             const tx = self.tmux();
-            try tx.detachClientExec(try std.fmt.allocPrint(self.gpa, "{s} --config {s} re", .{ try shell.quote(self.gpa, self.zask_path), try shell.quote(self.gpa, self.config_path) }));
+            try tx.detachClientExec(try zask_command.invoke(self.gpa, self.zask_path, self.config_path, "re"));
             return;
         }
         const guard = try self.acquireLock();
@@ -251,32 +252,31 @@ pub const Runtime = struct {
     }
 
     fn createSessionSkeleton(self: Runtime) !void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const scratch = arena.allocator();
         const tx = self.tmux();
-        const root = try self.cfg.projectRoot(self.gpa);
-        try tx.newDetachedSession("dashboard", root, try self.zaskCommand("dashboard"));
+        const root = try self.cfg.projectRoot(scratch);
+        try tx.newDetachedSession("dashboard", root, try zask_command.invoke(scratch, self.zask_path, self.config_path, "dashboard"));
         errdefer tx.killSession() catch {};
-        try tmux_setup.applySessionOptions(self.gpa, tx, try self.cfg.projectName(), self.zask_path, self.config_path);
-        try tx.splitWindow("dashboard", root, try self.zaskCommand("monitor"));
+        try tmux_setup.applySessionOptions(scratch, tx, .{
+            .project = try self.cfg.projectName(),
+            .zask_path = self.zask_path,
+            .config_path = self.config_path,
+        });
+        try tx.splitWindow("dashboard", root, try zask_command.invoke(scratch, self.zask_path, self.config_path, "monitor"));
         try tx.setWindowOption("dashboard", "main-pane-width", "50%");
         try tx.selectLayout("dashboard", "main-vertical");
 
         for (try self.cfg.services()) |service| {
             const name = try config.Config.serviceName(service);
-            try tx.newWindow(name, try self.cfg.serviceDir(self.gpa, service), try self.placeholderCommand(name));
+            try tx.newWindow(name, try self.cfg.serviceDir(scratch, service), try zask_command.waitingPlaceholder(scratch, name));
         }
 
         if (self.cfg.dockerEnabled()) {
-            try tx.newWindow("docker", try self.cfg.dockerDir(self.gpa), "echo \"=== Docker Services ===\" && echo \"Waiting for start command...\"");
+            try tx.newWindow("docker", try self.cfg.dockerDir(scratch), try zask_command.waitingPlaceholder(scratch, "Docker Services"));
         }
         try tx.selectWindow("dashboard");
-    }
-
-    fn zaskCommand(self: Runtime, command: []const u8) ![]const u8 {
-        return std.fmt.allocPrint(self.gpa, "{s} --config {s} {s}", .{ try shell.quote(self.gpa, self.zask_path), try shell.quote(self.gpa, self.config_path), command });
-    }
-
-    fn placeholderCommand(self: Runtime, name: []const u8) ![]const u8 {
-        return std.fmt.allocPrint(self.gpa, "echo \"=== {s} ===\" && echo \"Waiting for start command...\"", .{name});
     }
 
     fn setupPipePane(self: Runtime, writer: *std.Io.Writer) !void {
