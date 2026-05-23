@@ -257,7 +257,7 @@ pub const Runtime = struct {
         const scratch = arena.allocator();
         const tx = self.tmux();
         const root = try self.cfg.projectRoot(scratch);
-        try tx.newDetachedSession("dashboard", root, try zask_command.invoke(scratch, self.zask_path, self.config_path, "dashboard"));
+        try tx.newSession("dashboard", root, try zask_command.invoke(scratch, self.zask_path, self.config_path, "dashboard"));
         errdefer tx.killSession() catch {};
         try tmux_setup.applySessionOptions(scratch, tx, .{
             .project = try self.cfg.projectName(),

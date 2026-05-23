@@ -28,7 +28,7 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ "tmux", "attach-session", "-t", self.session }, .{ .interactive = true, .check = true });
     }
 
-    pub fn newDetachedSession(self: Client, window_name: []const u8, cwd: []const u8, command: []const u8) !void {
+    pub fn newSession(self: Client, window_name: []const u8, cwd: []const u8, command: []const u8) !void {
         _ = try self.runner.run(&.{ "tmux", "new-session", "-d", "-s", self.session, "-n", window_name, "-c", cwd, command }, .{ .check = true, .discard = true });
     }
 
@@ -240,7 +240,7 @@ test "session construction records tmux commands through runner" {
     const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
     const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
 
-    try client.newDetachedSession("dashboard", "/tmp/demo app", "zask dashboard");
+    try client.newSession("dashboard", "/tmp/demo app", "zask dashboard");
     try client.splitWindow("dashboard", "/tmp/demo app", "zask monitor");
     try client.setWindowOption("dashboard", "main-pane-width", "50%");
     try client.selectLayout("dashboard", "main-vertical");
@@ -279,6 +279,52 @@ test "session construction records tmux commands through runner" {
     try std.testing.expectEqualStrings("api", window.argv[6]);
     try std.testing.expectEqualStrings("/tmp/demo app/backend", window.argv[8]);
     try std.testing.expectEqualStrings("echo waiting", window.argv[9]);
+}
+
+test "client lifecycle commands record tmux argv" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+    const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
+
+    try client.switchClient();
+    try client.attachSession();
+    try client.detachClient();
+    try client.detachClientExec("zask re");
+    try client.killSession();
+
+    try std.testing.expectEqualStrings("switch-client", recorder.commands.items[0].argv[1]);
+    try std.testing.expectEqualStrings("attach-session", recorder.commands.items[1].argv[1]);
+    try std.testing.expect(recorder.commands.items[1].interactive);
+    try std.testing.expectEqualStrings("detach-client", recorder.commands.items[2].argv[1]);
+    try std.testing.expectEqualStrings("-E", recorder.commands.items[3].argv[2]);
+    try std.testing.expectEqualStrings("zask re", recorder.commands.items[3].argv[3]);
+    try std.testing.expectEqualStrings("kill-session", recorder.commands.items[4].argv[1]);
+}
+
+test "options popup and pipe helpers record tmux argv" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+    const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
+
+    try client.setOption("@mode", "all");
+    try client.bindRunShell("f", "zask follow api");
+    try client.popup("80%", "60%", "tail -f log");
+    try client.pipePane("demo:api", "cat >> api.log");
+    try client.pipePane("demo:api", null);
+
+    try std.testing.expectEqualStrings("set-option", recorder.commands.items[0].argv[1]);
+    try std.testing.expectEqualStrings("@mode", recorder.commands.items[0].argv[4]);
+    try std.testing.expectEqualStrings("bind-key", recorder.commands.items[1].argv[1]);
+    try std.testing.expectEqualStrings("f", recorder.commands.items[1].argv[4]);
+    try std.testing.expectEqualStrings("run-shell", recorder.commands.items[1].argv[5]);
+    try std.testing.expectEqualStrings("popup", recorder.commands.items[2].argv[1]);
+    try std.testing.expectEqualStrings("80%", recorder.commands.items[2].argv[3]);
+    try std.testing.expectEqualStrings("tail -f log", recorder.commands.items[2].argv[7]);
+    try std.testing.expectEqualStrings("pipe-pane", recorder.commands.items[3].argv[1]);
+    try std.testing.expectEqualStrings("cat >> api.log", recorder.commands.items[3].argv[4]);
+    try std.testing.expectEqual(@as(usize, 4), recorder.commands.items[4].argv.len);
 }
 
 test "paneRunning checks pane child processes" {
@@ -321,4 +367,62 @@ test "showOption trims empty output to null" {
     const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
 
     try std.testing.expect(try client.showOption("@zask_dash_mode") == null);
+}
+
+test "showOption returns non-empty trimmed output" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue(" all \n", "", .{ .exited = 0 });
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+    const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
+
+    const value = (try client.showOption("@zask_dash_mode")).?;
+    defer std.testing.allocator.free(value);
+
+    try std.testing.expectEqualStrings("all", value);
+}
+
+test "capturePane returns captured stdout" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("line one\nline two\n", "", .{ .exited = 0 });
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+    const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
+
+    const output = try client.capturePane("api");
+    defer std.testing.allocator.free(output);
+
+    try std.testing.expectEqualStrings("line one\nline two\n", output);
+}
+
+test "paneInfo uses first pane line and preserves parsed fields" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("0|0|111|zsh\n0|0|222|node\n", "", .{ .exited = 0 });
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+    const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
+
+    const info = try client.paneInfo("api");
+    defer info.deinit(std.testing.allocator);
+
+    try std.testing.expect(!info.dead);
+    try std.testing.expectEqualStrings("0", info.exit_code);
+    try std.testing.expectEqualStrings("111", info.pid);
+    try std.testing.expectEqualStrings("zsh", info.command);
+}
+
+test "paneInfo defaults missing fields" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("1\n", "", .{ .exited = 0 });
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+    const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
+
+    const info = try client.paneInfo("api");
+    defer info.deinit(std.testing.allocator);
+
+    try std.testing.expect(info.dead);
+    try std.testing.expectEqualStrings("0", info.exit_code);
+    try std.testing.expectEqualStrings("0", info.pid);
+    try std.testing.expectEqualStrings("", info.command);
 }
