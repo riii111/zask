@@ -40,7 +40,6 @@ pub const Lifecycle = struct {
     }
 
     pub fn stopAll(self: Lifecycle, writer: *std.Io.Writer) !void {
-        try writeProgress(writer, "Stopping services...\n", .{});
         const services = try self.cfg.services();
         var i = services.len;
         while (i > 0) {
