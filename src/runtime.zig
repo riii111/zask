@@ -115,7 +115,9 @@ pub const Runtime = struct {
         try tx.setOption("status-format[0]", "#[align=left]#{T;=/#{status-left-length}:status-left}#[align=right]#{T;=/#{status-right-length}:status-right}");
         try tx.setOption("@zask_dash_mode", "all");
         try tx.bindRunShell("m", "mode=$(tmux show-option -qv @zask_dash_mode); if [ \"$mode\" = \"all\" ]; then tmux set-option @zask_dash_mode bad; else tmux set-option @zask_dash_mode all; fi");
-        try tx.bindRunShell("f", try std.fmt.allocPrint(self.gpa, "{s} --config {s} follow \"#{{window_name}}\"", .{ self.zask_path, self.config_path }));
+        const quoted_zask_path = try shell.quote(self.gpa, self.zask_path);
+        const quoted_config_path = try shell.quote(self.gpa, self.config_path);
+        try tx.bindRunShell("f", try std.fmt.allocPrint(self.gpa, "{s} --config {s} follow \"#{{window_name}}\"", .{ quoted_zask_path, quoted_config_path }));
         try self.resizeWindows();
         try self.initLogDir();
         try self.setupPipePane();
@@ -153,7 +155,7 @@ pub const Runtime = struct {
 
     pub fn re(self: Runtime, writer: *std.Io.Writer) !void {
         if (try self.inTmux()) {
-            try (try self.tmux()).detachClientExec(try std.fmt.allocPrint(self.gpa, "{s} --config {s} re", .{ self.zask_path, self.config_path }));
+            try (try self.tmux()).detachClientExec(try std.fmt.allocPrint(self.gpa, "{s} --config {s} re", .{ try shell.quote(self.gpa, self.zask_path), try shell.quote(self.gpa, self.config_path) }));
             return;
         }
         const guard = try self.acquireLock();

@@ -20,6 +20,20 @@ pub const Runner = struct {
         self.gpa.free(result.stderr);
     }
 
+    pub fn runChecked(self: Runner, argv: []const []const u8) !std.process.RunResult {
+        const result = try self.run(argv);
+        errdefer self.gpa.free(result.stdout);
+        errdefer self.gpa.free(result.stderr);
+        try checkTerm(result.term);
+        return result;
+    }
+
+    pub fn runCheckedDiscard(self: Runner, argv: []const []const u8) !void {
+        const result = try self.runChecked(argv);
+        self.gpa.free(result.stdout);
+        self.gpa.free(result.stderr);
+    }
+
     pub fn runCwd(self: Runner, argv: []const []const u8, cwd: []const u8) !std.process.RunResult {
         if (self.recorder) |recorder| return recorder.record(argv, cwd, false);
         return std.process.run(self.gpa, self.io, .{
@@ -28,6 +42,14 @@ pub const Runner = struct {
             .stdout_limit = .limited(1024 * 1024),
             .stderr_limit = .limited(1024 * 1024),
         });
+    }
+
+    pub fn runCheckedCwd(self: Runner, argv: []const []const u8, cwd: []const u8) !std.process.RunResult {
+        const result = try self.runCwd(argv, cwd);
+        errdefer self.gpa.free(result.stdout);
+        errdefer self.gpa.free(result.stderr);
+        try checkTerm(result.term);
+        return result;
     }
 
     pub fn runInteractive(self: Runner, argv: []const []const u8) !std.process.Child.Term {
@@ -48,6 +70,11 @@ pub const Runner = struct {
         return child.wait(self.io);
     }
 };
+
+fn checkTerm(term: std.process.Child.Term) !void {
+    if (term == .exited and term.exited == 0) return;
+    return error.CommandFailed;
+}
 
 pub const Recorder = struct {
     gpa: std.mem.Allocator,
@@ -157,4 +184,13 @@ test "recorder returns queued responses in order" {
     try std.testing.expectEqualStrings("second", second.stdout);
     try std.testing.expectEqualStrings("warn", second.stderr);
     try std.testing.expectEqual(@as(u8, 1), second.term.exited);
+}
+
+test "checked runner rejects non-zero exits" {
+    var recorder = Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("", "failed", .{ .exited = 2 });
+    const run = Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
+
+    try std.testing.expectError(error.CommandFailed, run.runCheckedDiscard(&.{"false"}));
 }

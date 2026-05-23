@@ -156,7 +156,7 @@ pub const Lifecycle = struct {
             const on_fail = config_value.optionalObjectString(check, "on_fail", "warn");
             const dir = config_value.optionalObjectString(check, "dir", "");
             const cwd = if (dir.len == 0) try self.cfg.projectRoot(self.gpa) else try std.fs.path.join(self.gpa, &.{ try self.cfg.projectRoot(self.gpa), dir });
-            const result = self.runner.runCwd(&.{ "bash", "-c", command }, cwd) catch {
+            const result = self.runner.runCheckedCwd(&.{ "bash", "-c", command }, cwd) catch {
                 if (std.mem.eql(u8, on_fail, "abort")) return error.PrecheckFailed;
                 try writer.print("Warning: {s} check failed\n", .{name});
                 continue;
@@ -170,7 +170,7 @@ pub const Lifecycle = struct {
         const command = try self.cfg.commandPhaseCommand(phase, profile);
         const dir = config_value.optionalObjectString(phase, "dir", "");
         const cwd = if (dir.len == 0) try self.cfg.projectRoot(self.gpa) else try std.fs.path.join(self.gpa, &.{ try self.cfg.projectRoot(self.gpa), dir });
-        const result = self.runner.runCwd(&.{ "bash", "-c", command }, cwd) catch {
+        const result = self.runner.runCheckedCwd(&.{ "bash", "-c", command }, cwd) catch {
             if (std.mem.eql(u8, config_value.optionalObjectString(phase, "on_fail", "abort"), "abort")) return error.CommandPhaseFailed;
             try writer.writeAll("Warning: command phase failed\n");
             return;
@@ -204,7 +204,7 @@ pub const Lifecycle = struct {
     fn waitForPort(self: Lifecycle, port: i64, timeout: i64) !void {
         var elapsed: i64 = 0;
         while (elapsed < timeout) : (elapsed += 2) {
-            if (self.runner.runDiscard(&.{ "nc", "-z", "localhost", try std.fmt.allocPrint(self.gpa, "{d}", .{port}) })) |_| return else |_| {}
+            if (self.runner.runCheckedDiscard(&.{ "nc", "-z", "localhost", try std.fmt.allocPrint(self.gpa, "{d}", .{port}) })) |_| return else |_| {}
             self.runner.runDiscard(&.{ "sleep", "2" }) catch {};
         }
     }
