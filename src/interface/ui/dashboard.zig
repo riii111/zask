@@ -1,10 +1,10 @@
 const std = @import("std");
 const ansi = @import("ansi.zig");
-const config = @import("../model/config.zig");
-const env = @import("../platform/env.zig");
+const config = @import("../../model/config.zig");
+const env = @import("../../platform/env.zig");
 const monitor = @import("monitor.zig");
-const proc_runner = @import("../platform/runner.zig");
-const tmux_client = @import("../platform/tmux.zig");
+const proc_runner = @import("../../platform/runner.zig");
+const tmux_client = @import("../../platform/tmux.zig");
 const Context = @import("context.zig").Context;
 
 pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env.Map, cfg: config.Config, writer: *std.Io.Writer) !void {
