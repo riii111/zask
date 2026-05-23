@@ -70,7 +70,7 @@ pub const Client = struct {
     pub fn resizeWindowToActiveClient(self: Client, window: []const u8) !void {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
-        _ = try self.runner.run(&.{ "tmux", "resize-window", "-a", "-t", pane_target }, .{ .check = true, .discard = true });
+        _ = try self.runner.run(&.{ "tmux", "resize-window", "-A", "-t", pane_target }, .{ .check = true, .discard = true });
     }
 
     pub fn popup(self: Client, width: []const u8, height: []const u8, command: []const u8) !void {
@@ -229,7 +229,7 @@ test "resizeWindowToActiveClient records resize command" {
     const command = recorder.commands.items[0];
     try std.testing.expectEqualStrings("tmux", command.argv[0]);
     try std.testing.expectEqualStrings("resize-window", command.argv[1]);
-    try std.testing.expectEqualStrings("-a", command.argv[2]);
+    try std.testing.expectEqualStrings("-A", command.argv[2]);
     try std.testing.expectEqualStrings("demo:api", command.argv[4]);
 }
 
