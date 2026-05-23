@@ -1,8 +1,8 @@
 const std = @import("std");
 
-const config = @import("config.zig");
-const config_value = @import("config_value.zig");
-const validate = @import("validate.zig");
+const config = @import("../model/config.zig");
+const config_value = @import("../model/config_value.zig");
+const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
 
 pub const PhaseKind = enum {
@@ -92,7 +92,7 @@ test "classifies lifecycle phase kinds" {
 
 test "precheck failure prints hint and preserves abort semantics" {
     const lifecycle_mod = @import("lifecycle.zig");
-    const runner_mod = @import("infra/runner.zig");
+    const runner_mod = @import("../platform/runner.zig");
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -123,7 +123,7 @@ test "precheck failure prints hint and preserves abort semantics" {
 
 test "command phase warn continues and abort fails startup" {
     const lifecycle_mod = @import("lifecycle.zig");
-    const runner_mod = @import("infra/runner.zig");
+    const runner_mod = @import("../platform/runner.zig");
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -162,7 +162,7 @@ test "command phase warn continues and abort fails startup" {
 }
 
 test "phase cwd rejects path traversal" {
-    const runner_mod = @import("infra/runner.zig");
+    const runner_mod = @import("../platform/runner.zig");
     const lifecycle_mod = @import("lifecycle.zig");
     const json =
         \\{

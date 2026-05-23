@@ -1,10 +1,10 @@
 const std = @import("std");
-const config = @import("config.zig");
-const env = @import("infra/env.zig");
-const paths = @import("infra/paths.zig");
-const runner_mod = @import("infra/runner.zig");
-const tmux_client = @import("infra/tmux.zig");
-const tmux_options = @import("tmux_options.zig");
+const config = @import("../model/config.zig");
+const env = @import("../platform/env.zig");
+const paths = @import("../platform/paths.zig");
+const runner_mod = @import("../platform/runner.zig");
+const tmux_client = @import("../platform/tmux.zig");
+const tmux_options = @import("../model/tmux_options.zig");
 
 pub const Manager = struct {
     gpa: std.mem.Allocator,

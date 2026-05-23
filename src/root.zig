@@ -1,25 +1,25 @@
 const std = @import("std");
 
-pub const cli = @import("cli.zig");
-pub const config = @import("config.zig");
-pub const config_value = @import("config_value.zig");
-pub const dashboard = @import("ui/dashboard.zig");
-pub const docker = @import("infra/docker.zig");
-pub const lifecycle = @import("lifecycle.zig");
-pub const lock = @import("infra/lock.zig");
-pub const log_session = @import("log_session.zig");
-pub const observations = @import("observations.zig");
-pub const phases = @import("phases.zig");
-pub const paths = @import("infra/paths.zig");
-pub const render = @import("ui/render.zig");
-pub const runner = @import("infra/runner.zig");
-pub const runtime = @import("runtime.zig");
-pub const shell = @import("infra/shell.zig");
-pub const tmux = @import("infra/tmux.zig");
-pub const tmux_setup = @import("tmux_setup.zig");
-pub const validate = @import("validate.zig");
-pub const waits = @import("waits.zig");
-pub const yaml = @import("infra/yaml.zig");
+pub const cli = @import("interface/cli.zig");
+pub const config = @import("model/config.zig");
+pub const config_value = @import("model/config_value.zig");
+pub const dashboard = @import("interface/dashboard.zig");
+pub const docker = @import("platform/docker.zig");
+pub const lifecycle = @import("workflow/lifecycle.zig");
+pub const lock = @import("platform/lock.zig");
+pub const log_session = @import("workflow/log_session.zig");
+pub const observations = @import("model/observations.zig");
+pub const phases = @import("workflow/phases.zig");
+pub const paths = @import("platform/paths.zig");
+pub const render = @import("workflow/render.zig");
+pub const runner = @import("platform/runner.zig");
+pub const runtime = @import("workflow/runtime.zig");
+pub const shell = @import("platform/shell.zig");
+pub const tmux = @import("platform/tmux.zig");
+pub const tmux_setup = @import("workflow/tmux_setup.zig");
+pub const validate = @import("model/validate.zig");
+pub const waits = @import("workflow/waits.zig");
+pub const yaml = @import("platform/yaml.zig");
 
 pub fn greeting() []const u8 {
     return "Hello from zask";

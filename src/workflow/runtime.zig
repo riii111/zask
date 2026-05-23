@@ -1,19 +1,18 @@
 const std = @import("std");
-const config = @import("config.zig");
-const dashboard_ui = @import("ui/dashboard.zig");
-const docker_client = @import("infra/docker.zig");
-const env = @import("infra/env.zig");
+const config = @import("../model/config.zig");
+const docker_client = @import("../platform/docker.zig");
+const env = @import("../platform/env.zig");
 const lifecycle_mod = @import("lifecycle.zig");
-const lock = @import("infra/lock.zig");
+const lock = @import("../platform/lock.zig");
 const log_session = @import("log_session.zig");
-const observations = @import("observations.zig");
-const paths = @import("infra/paths.zig");
-const render = @import("ui/render.zig");
-const proc_runner = @import("infra/runner.zig");
-const shell = @import("infra/shell.zig");
-const tmux_client = @import("infra/tmux.zig");
+const observations = @import("../model/observations.zig");
+const paths = @import("../platform/paths.zig");
+const render = @import("render.zig");
+const proc_runner = @import("../platform/runner.zig");
+const shell = @import("../platform/shell.zig");
+const tmux_client = @import("../platform/tmux.zig");
 const tmux_setup = @import("tmux_setup.zig");
-const validate = @import("validate.zig");
+const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
 
 const bye_kill_settle = std.Io.Duration.fromSeconds(1);
@@ -219,14 +218,6 @@ pub const Runtime = struct {
         }
         const exec_cmd = if (use_shell) "bash" else self.cfg.dockerExecDefault(container);
         try dc.execInteractive(container, exec_cmd);
-    }
-
-    pub fn dashboard(self: Runtime, writer: *std.Io.Writer) !void {
-        try dashboard_ui.runLauncher(self.gpa, self.io, self.environ, self.cfg, writer);
-    }
-
-    pub fn monitor(self: Runtime, writer: *std.Io.Writer) !void {
-        try dashboard_ui.runMonitor(self.gpa, self.io, self.cfg, writer);
     }
 
     fn runner(self: Runtime) proc_runner.Runner {

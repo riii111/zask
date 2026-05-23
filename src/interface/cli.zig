@@ -1,14 +1,15 @@
 const std = @import("std");
 const build_options = @import("build_options");
-const root = @import("root.zig");
-const config = @import("config.zig");
-const docker_client = @import("infra/docker.zig");
-const env = @import("infra/env.zig");
-const paths = @import("infra/paths.zig");
-const proc_runner = @import("infra/runner.zig");
-const tmux_client = @import("infra/tmux.zig");
-const validate = @import("validate.zig");
-const Runtime = @import("runtime.zig").Runtime;
+const root = @import("../root.zig");
+const config = @import("../model/config.zig");
+const dashboard_ui = @import("dashboard.zig");
+const docker_client = @import("../platform/docker.zig");
+const env = @import("../platform/env.zig");
+const paths = @import("../platform/paths.zig");
+const proc_runner = @import("../platform/runner.zig");
+const tmux_client = @import("../platform/tmux.zig");
+const validate = @import("../model/validate.zig");
+const Runtime = @import("../workflow/runtime.zig").Runtime;
 
 const ParsedArgs = struct {
     config_path: ?[]const u8 = null,
@@ -148,8 +149,8 @@ fn dispatchRuntimeCommand(rt: Runtime, command: Command, args: []const []const u
         .stop => rt.stop(optionalTarget(args), writer),
         .restart => rt.restart(try requiredTarget(args), writer),
         .exec => rt.exec(try oneArg(args), try execUseShell(args), writer),
-        .dashboard => rt.dashboard(writer),
-        .monitor => rt.monitor(writer),
+        .dashboard => dashboard_ui.runLauncher(rt.gpa, rt.io, rt.environ, rt.cfg, writer),
+        .monitor => dashboard_ui.runMonitor(rt.gpa, rt.io, rt.cfg, writer),
     };
 }
 

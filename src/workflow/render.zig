@@ -1,7 +1,7 @@
 const std = @import("std");
-const config = @import("../config.zig");
-const shell = @import("../infra/shell.zig");
-const yaml = @import("../infra/yaml.zig");
+const config = @import("../model/config.zig");
+const shell = @import("../platform/shell.zig");
+const yaml = @import("../platform/yaml.zig");
 
 pub fn renderTmuxp(cfg: config.Config, gpa: std.mem.Allocator, writer: *std.Io.Writer, zask_path: []const u8, config_path: []const u8) !void {
     const project = try cfg.projectName();
