@@ -18,6 +18,7 @@ pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env.Map,
 
 pub fn runMonitor(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.Io.Writer) !void {
     var previous: []u8 = &.{};
+    defer if (previous.len > 0) gpa.free(previous);
     while (true) {
         var frame_arena = std.heap.ArenaAllocator.init(gpa);
         defer frame_arena.deinit();
@@ -34,8 +35,7 @@ pub fn runMonitor(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer
             if (previous.len > 0) gpa.free(previous);
             previous = try gpa.dupe(u8, output);
         }
-        const outer_runner: proc_runner.Runner = .{ .gpa = gpa, .io = io };
-        outer_runner.runDiscard(&.{ "sleep", "1" }) catch {};
+        std.Io.sleep(io, .fromSeconds(1), .awake) catch {};
     }
 }
 
