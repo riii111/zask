@@ -88,7 +88,8 @@ pub const Runtime = struct {
             try writer.flush();
             return error.SessionNotRunning;
         }
-        const log_dir = (try self.logSession()).dir() catch |err| switch (err) {
+        const manager = try self.logSession();
+        const log_file = manager.prepareLogFile(service) catch |err| switch (err) {
             error.LogSessionNotInitialized => {
                 try writer.writeAll("Log session not initialized. Run 'hello' first.\n");
                 try writer.flush();
@@ -96,11 +97,6 @@ pub const Runtime = struct {
             },
             else => return err,
         };
-        try self.runner().runCheckedDiscard(&.{ "mkdir", "-p", log_dir });
-        const log_file = try std.fs.path.join(self.gpa, &.{ log_dir, try std.fmt.allocPrint(self.gpa, "{s}.log", .{service}) });
-        if (!try self.pathExists(log_file)) {
-            try self.runner().runCheckedDiscard(&.{ "touch", log_file });
-        }
         const tx = try self.tmux();
         try tx.popup(self.cfg.popupWidth(), self.cfg.popupHeight(), try std.fmt.allocPrint(self.gpa, "nvim -c 'terminal tail -F {s}'", .{try shell.quote(self.gpa, log_file)}));
     }
@@ -279,11 +275,13 @@ pub const Runtime = struct {
     }
 
     fn setupPipePane(self: Runtime) !void {
-        const dir = try (try self.logSession()).dir();
+        const manager = try self.logSession();
         const tx = try self.tmux();
         for (try self.cfg.services()) |service| {
             const name = try config.Config.serviceName(service);
-            _ = tx.pipePane(try tx.target(name), try std.fmt.allocPrint(self.gpa, "cat >> {s}", .{try shell.quote(self.gpa, try std.fs.path.join(self.gpa, &.{ dir, try std.fmt.allocPrint(self.gpa, "{s}.log", .{name}) }))})) catch {};
+            const target = try tx.target(name);
+            defer self.gpa.free(target);
+            _ = tx.pipePane(target, try std.fmt.allocPrint(self.gpa, "cat >> {s}", .{try shell.quote(self.gpa, try manager.prepareLogFile(name))})) catch {};
         }
     }
 
@@ -292,7 +290,9 @@ pub const Runtime = struct {
         const tx = try self.tmux();
         for (try self.cfg.services()) |service| {
             const name = try config.Config.serviceName(service);
-            _ = tx.pipePane(try tx.target(name), null) catch {};
+            const target = try tx.target(name);
+            defer self.gpa.free(target);
+            _ = tx.pipePane(target, null) catch {};
         }
     }
 
@@ -320,10 +320,6 @@ pub const Runtime = struct {
 
     fn inTmux(self: Runtime) !bool {
         return env.exists(self.environ, "TMUX");
-    }
-
-    fn pathExists(self: Runtime, path: []const u8) !bool {
-        return paths.exists(self.io, path);
     }
 
     fn run(self: Runtime, argv: []const []const u8) !std.process.RunResult {

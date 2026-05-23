@@ -18,6 +18,7 @@ pub const Manager = struct {
         const session_id = try self.sessionId();
         const session_dir = try self.dirForSession(session_id);
         try self.runner.runCheckedDiscard(&.{ "mkdir", "-p", session_dir });
+        try self.runner.runCheckedDiscard(&.{ "chmod", "700", session_dir });
         try self.tmux.setOption(tmux_options.log_session_id, session_id);
         try self.cleanupOld();
     }
@@ -27,6 +28,16 @@ pub const Manager = struct {
         const value = session_id orelse return error.LogSessionNotInitialized;
         try validateSessionId(value);
         return self.dirForSession(value);
+    }
+
+    pub fn prepareLogFile(self: Manager, service: []const u8) ![]const u8 {
+        const log_dir = try self.dir();
+        try self.runner.runCheckedDiscard(&.{ "mkdir", "-p", log_dir });
+        try self.runner.runCheckedDiscard(&.{ "chmod", "700", log_dir });
+        const log_file = try std.fs.path.join(self.gpa, &.{ log_dir, try std.fmt.allocPrint(self.gpa, "{s}.log", .{service}) });
+        try self.runner.runCheckedDiscard(&.{ "touch", log_file });
+        try self.runner.runCheckedDiscard(&.{ "chmod", "600", log_file });
+        return log_file;
     }
 
     fn baseDir(self: Manager) ![]const u8 {

@@ -30,7 +30,9 @@ pub const Client = struct {
     }
 
     pub fn selectWindow(self: Client, window: []const u8) !void {
-        try self.runner.runCheckedDiscard(&.{ "tmux", "select-window", "-t", try self.target(window) });
+        const pane_target = try self.target(window);
+        defer self.gpa.free(pane_target);
+        try self.runner.runCheckedDiscard(&.{ "tmux", "select-window", "-t", pane_target });
     }
 
     pub fn killSession(self: Client) !void {
@@ -59,7 +61,9 @@ pub const Client = struct {
     }
 
     pub fn resizeWindowToActiveClient(self: Client, window: []const u8) !void {
-        try self.runner.runCheckedDiscard(&.{ "tmux", "resize-window", "-a", "-t", try self.target(window) });
+        const pane_target = try self.target(window);
+        defer self.gpa.free(pane_target);
+        try self.runner.runCheckedDiscard(&.{ "tmux", "resize-window", "-a", "-t", pane_target });
     }
 
     pub fn popup(self: Client, width: []const u8, height: []const u8, command: []const u8) !void {
@@ -83,7 +87,9 @@ pub const Client = struct {
     }
 
     pub fn windowExists(self: Client, window: []const u8) bool {
-        const result = self.runner.run(&.{ "tmux", "list-panes", "-t", self.target(window) catch return false }) catch return false;
+        const pane_target = self.target(window) catch return false;
+        defer self.gpa.free(pane_target);
+        const result = self.runner.run(&.{ "tmux", "list-panes", "-t", pane_target }) catch return false;
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
         return result.term == .exited and result.term.exited == 0;
@@ -100,7 +106,9 @@ pub const Client = struct {
     }
 
     pub fn paneInfo(self: Client, window: []const u8) !PaneInfo {
-        const result = self.runner.run(&.{ "tmux", "list-panes", "-t", try self.target(window), "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}" }) catch return .{};
+        const pane_target = try self.target(window);
+        defer self.gpa.free(pane_target);
+        const result = self.runner.run(&.{ "tmux", "list-panes", "-t", pane_target, "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}" }) catch return .{};
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
 
@@ -121,7 +129,9 @@ pub const Client = struct {
     }
 
     pub fn capturePane(self: Client, window: []const u8) ![]const u8 {
-        const result = self.runner.run(&.{ "tmux", "capture-pane", "-t", try self.target(window), "-p" }) catch return "";
+        const pane_target = try self.target(window);
+        defer self.gpa.free(pane_target);
+        const result = self.runner.run(&.{ "tmux", "capture-pane", "-t", pane_target, "-p" }) catch return "";
         defer self.gpa.free(result.stderr);
         return result.stdout;
     }
@@ -153,7 +163,7 @@ pub fn isShellCommand(command: []const u8) bool {
 test "sendKeys records tmux command through runner" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
-    const run = runner.Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
     const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
 
     try client.sendKeys("demo:api", &.{ "echo ok", "Enter" });
@@ -169,7 +179,7 @@ test "sendKeys records tmux command through runner" {
 test "resizeWindowToActiveClient records resize command" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
-    const run = runner.Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
     const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
 
     try client.resizeWindowToActiveClient("api");
@@ -186,7 +196,7 @@ test "paneRunning checks pane child processes" {
     defer recorder.deinit();
     try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
     try recorder.enqueue("12346\n", "", .{ .exited = 0 });
-    const run = runner.Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
     const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
 
     try std.testing.expect(client.paneRunning("api"));
@@ -199,7 +209,7 @@ test "paneRunning rejects dead panes and panes without children" {
     var dead_recorder = runner.Recorder.init(std.testing.allocator);
     defer dead_recorder.deinit();
     try dead_recorder.enqueue("1|130|12345|node\n", "", .{ .exited = 0 });
-    const dead_run = runner.Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &dead_recorder };
+    const dead_run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &dead_recorder };
     const dead_client = Client{ .gpa = std.testing.allocator, .runner = dead_run, .session = "demo" };
     try std.testing.expect(!dead_client.paneRunning("api"));
     try std.testing.expectEqual(@as(usize, 1), dead_recorder.commands.items.len);
@@ -208,7 +218,7 @@ test "paneRunning rejects dead panes and panes without children" {
     defer idle_recorder.deinit();
     try idle_recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
     try idle_recorder.enqueue("\n", "", .{ .exited = 1 });
-    const idle_run = runner.Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &idle_recorder };
+    const idle_run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &idle_recorder };
     const idle_client = Client{ .gpa = std.testing.allocator, .runner = idle_run, .session = "demo" };
     try std.testing.expect(!idle_client.paneRunning("api"));
 }
@@ -217,7 +227,7 @@ test "showOption trims empty output to null" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue(" \n", "", .{ .exited = 0 });
-    const run = runner.Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
     const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
 
     try std.testing.expect(try client.showOption("@zask_dash_mode") == null);

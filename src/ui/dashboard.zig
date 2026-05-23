@@ -193,8 +193,8 @@ test "renders launcher frame with grouped services" {
     const ctx: Context = .{
         .gpa = arena.allocator(),
         .cfg = cfg,
-        .runner = .{ .gpa = arena.allocator(), .io = std.Io.null },
-        .tmux = .{ .gpa = arena.allocator(), .runner = .{ .gpa = arena.allocator(), .io = std.Io.null }, .session = "demo" },
+        .runner = .{ .gpa = arena.allocator(), .io = undefined },
+        .tmux = .{ .gpa = arena.allocator(), .runner = .{ .gpa = arena.allocator(), .io = undefined }, .session = "demo" },
     };
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();

@@ -167,7 +167,7 @@ const RecordedResponse = struct {
 test "recorder captures commands without spawning processes" {
     var recorder = Recorder.init(std.testing.allocator);
     defer recorder.deinit();
-    const run = Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
+    const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
 
     const result = try run.runCwd(&.{ "echo", "ok" }, "/tmp/demo");
     defer std.testing.allocator.free(result.stdout);
@@ -187,7 +187,7 @@ test "recorder returns queued responses in order" {
     defer recorder.deinit();
     try recorder.enqueue("first", "", .{ .exited = 0 });
     try recorder.enqueue("second", "warn", .{ .exited = 1 });
-    const run = Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
+    const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
 
     const first = try run.run(&.{"one"});
     defer std.testing.allocator.free(first.stdout);
@@ -206,7 +206,7 @@ test "checked runner rejects non-zero exits" {
     var recorder = Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("", "failed", .{ .exited = 2 });
-    const run = Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
+    const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
 
     try std.testing.expectError(error.CommandFailed, run.runCheckedDiscard(&.{"false"}));
 }
@@ -215,7 +215,7 @@ test "checked interactive runner rejects non-zero exits" {
     var recorder = Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("", "", .{ .exited = 1 });
-    const run = Runner{ .gpa = std.testing.allocator, .io = std.Io.null, .recorder = &recorder };
+    const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
 
     try std.testing.expectError(error.CommandFailed, run.runInteractiveChecked(&.{"tmux"}));
 }

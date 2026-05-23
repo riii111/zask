@@ -24,3 +24,7 @@ pub fn greeting() []const u8 {
 test "greeting returns the hello world message" {
     try std.testing.expectEqualStrings("Hello from zask", greeting());
 }
+
+test {
+    std.testing.refAllDecls(@This());
+}

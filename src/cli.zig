@@ -165,13 +165,13 @@ fn writeSpaces(writer: *std.Io.Writer, count: usize) !void {
 
 fn parseArgs(context: CommandContext, args: []const []const u8) !ParsedArgs {
     if (args.len == 0) return error.InvalidArguments;
-    if (isProjectAlias(context.argv0)) {
-        const basename = std.fs.path.basename(context.argv0);
-        return .{ .project = basename, .command = args[0], .args = args[1..] };
-    }
     if (std.mem.eql(u8, args[0], "--config")) {
         if (args.len < 3) return error.InvalidArguments;
         return .{ .config_path = args[1], .command = args[2], .args = args[3..] };
+    }
+    if (isProjectAlias(context.argv0)) {
+        const basename = std.fs.path.basename(context.argv0);
+        return .{ .project = basename, .command = args[0], .args = args[1..] };
     }
     if (isGlobalCommand(args[0])) return .{ .command = args[0], .args = args[1..] };
     if (args.len < 2) return error.ProjectRequired;
@@ -212,7 +212,7 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
         .environ = context.environ,
         .cfg = cfg,
         .config_path = path,
-        .zask_path = try absoluteExePath(context.gpa, io, context.argv0),
+        .zask_path = try zaskExecutablePath(context.gpa, io, context.argv0),
     };
 }
 
@@ -232,6 +232,13 @@ fn absoluteExePath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]cons
         return std.Io.Dir.cwd().realPathFileAlloc(io, path, gpa);
     }
     return path;
+}
+
+fn zaskExecutablePath(gpa: std.mem.Allocator, io: std.Io, argv0: []const u8) ![]const u8 {
+    if (!isProjectAlias(argv0)) return absoluteExePath(gpa, io, argv0);
+    if (std.mem.indexOfScalar(u8, argv0, '/') == null) return "zask";
+    const sibling = try std.fs.path.join(gpa, &.{ std.fs.path.dirname(argv0) orelse ".", "zask" });
+    return absoluteExePath(gpa, io, sibling);
 }
 
 fn oneArg(args: []const []const u8) ![]const u8 {
@@ -326,6 +333,14 @@ test "parses explicit config command form" {
     try std.testing.expectEqualStrings("demo.json", parsed.config_path.?);
     try std.testing.expectEqualStrings("list", parsed.command);
     try std.testing.expectEqual(@as(usize, 0), parsed.args.len);
+}
+
+test "project alias accepts explicit config command form" {
+    const parsed = try parseArgs(.{ .gpa = std.testing.allocator, .argv0 = "nodex" }, &.{ "--config", "demo.json", "follow", "api" });
+    try std.testing.expectEqualStrings("demo.json", parsed.config_path.?);
+    try std.testing.expectEqualStrings("follow", parsed.command);
+    try std.testing.expectEqualStrings("api", parsed.args[0]);
+    try std.testing.expect(parsed.project == null);
 }
 
 test "rejects incomplete config and project command forms" {

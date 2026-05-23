@@ -77,7 +77,8 @@ test "lock blocks concurrent acquire and releases directory" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    const run = runner.Runner{ .gpa = gpa, .io = std.Io.null };
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const run = runner.Runner{ .gpa = gpa, .io = threaded.io() };
     const name = try std.fmt.allocPrint(gpa, "zask-test-{d}", .{std.c.getpid()});
 
     const base = try std.fs.path.join(gpa, &.{ "/tmp", "zask-test-locks" });

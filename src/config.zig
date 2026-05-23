@@ -403,9 +403,31 @@ test "rejects invalid identifiers at config boundaries" {
 }
 
 test "parses synthetic fixture" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": [
+        \\    {"name":"api","dir":"backend","command":"serve","group":"backend"},
+        \\    {"name":"web","dir":"frontend","command":"dev","group":"frontend"},
+        \\    {"name":"worker","dir":"worker","command":"work","group":"backend"}
+        \\  ],
+        \\  "group_aliases": {"core-backend":["api","worker"]},
+        \\  "start_profiles": {
+        \\    "core": {
+        \\      "profile":"core",
+        \\      "group_overrides":{"backend":"core-backend"}
+        \\    }
+        \\  },
+        \\  "phases": [
+        \\    {"type":"docker"},
+        \\    {"type":"command","command":"echo setup"},
+        \\    {"groups":["backend"]}
+        \\  ]
+        \\}
+    ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const cfg = try Config.parse(arena.allocator(), @embedFile("../testdata/synthetic.json"), "/home/me");
+    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
 
     try std.testing.expectEqualStrings("demo", try cfg.projectName());
     try std.testing.expectEqual(@as(usize, 3), (try cfg.services()).len);
