@@ -268,13 +268,15 @@ pub const Runtime = struct {
         try tx.setWindowOption("dashboard", "main-pane-width", "50%");
         try tx.selectLayout("dashboard", "main-vertical");
 
+        var previous_window: []const u8 = "dashboard";
         for (try self.cfg.services()) |service| {
             const name = try config.Config.serviceName(service);
-            try tx.newWindow(name, try self.cfg.serviceDir(scratch, service), try zask_command.waitingPlaceholder(scratch, name));
+            try tx.newWindowAfter(previous_window, name, try self.cfg.serviceDir(scratch, service), try zask_command.waitingPlaceholder(scratch, name));
+            previous_window = name;
         }
 
         if (self.cfg.dockerEnabled()) {
-            try tx.newWindow("docker", try self.cfg.dockerDir(scratch), try zask_command.waitingPlaceholder(scratch, "Docker Services"));
+            try tx.newWindowAfter(previous_window, "docker", try self.cfg.dockerDir(scratch), try zask_command.waitingPlaceholder(scratch, "Docker Services"));
         }
         try tx.selectWindow("dashboard");
     }
@@ -549,6 +551,7 @@ test "session skeleton creates dashboard service and docker windows" {
     try proc_runner.expectCommandContaining(&recorder, "main-vertical");
     try proc_runner.expectCommandContaining(&recorder, "new-window");
     try proc_runner.expectCommandContaining(&recorder, "demo:dashboard");
+    try proc_runner.expectCommandContaining(&recorder, "demo:api");
     try proc_runner.expectCommandContaining(&recorder, "/tmp/demo/backend");
     try proc_runner.expectCommandContaining(&recorder, "/tmp/demo/infra");
     try proc_runner.expectCommandOrder(&recorder, "remain-on-exit", "api");

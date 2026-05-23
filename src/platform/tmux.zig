@@ -36,6 +36,12 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ "tmux", "new-window", "-d", "-t", self.session, "-n", window_name, "-c", cwd, command }, .{ .check = true, .discard = true });
     }
 
+    pub fn newWindowAfter(self: Client, after_window: []const u8, window_name: []const u8, cwd: []const u8, command: []const u8) !void {
+        const target_window = try self.target(after_window);
+        defer self.gpa.free(target_window);
+        _ = try self.runner.run(&.{ "tmux", "new-window", "-d", "-a", "-t", target_window, "-n", window_name, "-c", cwd, command }, .{ .check = true, .discard = true });
+    }
+
     pub fn splitWindow(self: Client, window: []const u8, cwd: []const u8, command: []const u8) !void {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
@@ -245,6 +251,7 @@ test "session construction records tmux commands through runner" {
     try client.setWindowOption("dashboard", "main-pane-width", "50%");
     try client.selectLayout("dashboard", "main-vertical");
     try client.newWindow("api", "/tmp/demo app/backend", "echo waiting");
+    try client.newWindowAfter("api", "worker", "/tmp/demo app/worker", "echo worker");
 
     const session = recorder.commands.items[0];
     try std.testing.expectEqualStrings("tmux", session.argv[0]);
@@ -279,6 +286,15 @@ test "session construction records tmux commands through runner" {
     try std.testing.expectEqualStrings("api", window.argv[6]);
     try std.testing.expectEqualStrings("/tmp/demo app/backend", window.argv[8]);
     try std.testing.expectEqualStrings("echo waiting", window.argv[9]);
+
+    const after_window = recorder.commands.items[5];
+    try std.testing.expectEqualStrings("new-window", after_window.argv[1]);
+    try std.testing.expectEqualStrings("-d", after_window.argv[2]);
+    try std.testing.expectEqualStrings("-a", after_window.argv[3]);
+    try std.testing.expectEqualStrings("demo:api", after_window.argv[5]);
+    try std.testing.expectEqualStrings("worker", after_window.argv[7]);
+    try std.testing.expectEqualStrings("/tmp/demo app/worker", after_window.argv[9]);
+    try std.testing.expectEqualStrings("echo worker", after_window.argv[10]);
 }
 
 test "client lifecycle commands record tmux argv" {

@@ -10,7 +10,7 @@ pub fn invoke(gpa: std.mem.Allocator, zask_path: []const u8, config_path: []cons
 }
 
 pub fn waitingPlaceholder(gpa: std.mem.Allocator, label: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(gpa, "echo \"=== {s} ===\" && echo \"Waiting for start command...\"", .{label});
+    return std.fmt.allocPrint(gpa, "printf '=== {s} ===\\nWaiting for start command...\\n'; exec \"${{SHELL:-sh}}\"", .{label});
 }
 
 test "invoke quotes zask and config paths" {
@@ -24,5 +24,5 @@ test "waiting placeholder includes display label" {
     const command = try waitingPlaceholder(std.testing.allocator, "Docker Services");
     defer std.testing.allocator.free(command);
 
-    try std.testing.expectEqualStrings("echo \"=== Docker Services ===\" && echo \"Waiting for start command...\"", command);
+    try std.testing.expectEqualStrings("printf '=== Docker Services ===\\nWaiting for start command...\\n'; exec \"${SHELL:-sh}\"", command);
 }

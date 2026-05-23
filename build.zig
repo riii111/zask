@@ -51,6 +51,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tests/integration/tmux_session.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zask", .module = zask_mod },
+        },
     });
     tmux_integration_mod.addOptions("tmux_integration_options", tmux_integration_options);
     const tmux_integration_tests = b.addTest(.{ .root_module = tmux_integration_mod });
