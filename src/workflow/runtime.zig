@@ -7,7 +7,6 @@ const lock = @import("../platform/lock.zig");
 const log_session = @import("log_session.zig");
 const observations = @import("../model/observations.zig");
 const paths = @import("../platform/paths.zig");
-const render = @import("render.zig");
 const proc_runner = @import("../platform/runner.zig");
 const shell = @import("../platform/shell.zig");
 const tmux_client = @import("../platform/tmux.zig");
@@ -27,10 +26,6 @@ pub const Runtime = struct {
     runner_impl: proc_runner.Runner,
     tmux_impl: tmux_client.Client,
     docker_impl: docker_client.Compose,
-
-    pub fn renderSession(self: Runtime, writer: *std.Io.Writer) !void {
-        try render.renderTmuxp(self.cfg, self.gpa, writer, self.zask_path, self.config_path);
-    }
 
     pub fn list(self: Runtime, writer: *std.Io.Writer) !void {
         if (self.cfg.dockerEnabled()) try writer.writeAll("docker\n");
@@ -129,11 +124,9 @@ pub const Runtime = struct {
             try self.attach();
             return;
         }
-        const session_file = try self.writeSessionFile();
-        _ = try self.runner().run(&.{ "tmuxp", "load", "-d", session_file }, .{ .interactive = true, .check = true });
         const tx = self.tmux();
+        try self.createSessionSkeleton();
         errdefer tx.killSession() catch {};
-        try tmux_setup.applySessionOptions(tx, self.zask_path, self.config_path);
         try tmux_setup.bindControlKeys(self.gpa, tx);
         try self.logSession().init();
         try self.setupPipePane(writer);
@@ -257,15 +250,32 @@ pub const Runtime = struct {
         return lock.Lock.acquire(self.gpa, self.runner(), try self.cfg.projectName(), try paths.runtimeBase(self.gpa, self.environ));
     }
 
-    fn writeSessionFile(self: Runtime) ![]const u8 {
-        const dir = try std.fs.path.join(self.gpa, &.{ try paths.configBase(self.gpa, self.environ), try self.cfg.projectName() });
-        _ = try self.runner().run(&.{ "mkdir", "-p", dir }, .{ .check = true, .discard = true });
-        const path = try std.fs.path.join(self.gpa, &.{ dir, "session.yml" });
-        var out: std.Io.Writer.Allocating = .init(self.gpa);
-        defer out.deinit();
-        try self.renderSession(&out.writer);
-        try paths.writeFileMode(self.io, path, out.writer.buffered(), @enumFromInt(0o600));
-        return path;
+    fn createSessionSkeleton(self: Runtime) !void {
+        const tx = self.tmux();
+        const root = try self.cfg.projectRoot(self.gpa);
+        try tx.newDetachedSession("dashboard", root, try self.zaskCommand("dashboard"));
+        errdefer tx.killSession() catch {};
+        try tmux_setup.applySessionOptions(self.gpa, tx, try self.cfg.projectName(), self.zask_path, self.config_path);
+        try tx.splitWindow("dashboard", root, try self.zaskCommand("monitor"));
+        try tx.setWindowOptionForWindow("dashboard", "main-pane-width", "50%");
+        try tx.selectLayout("dashboard", "main-vertical");
+
+        for (try self.cfg.services()) |service| {
+            const name = try config.Config.serviceName(service);
+            try tx.newWindow(name, try self.cfg.serviceDir(self.gpa, service), try self.placeholderCommand(name));
+        }
+
+        if (self.cfg.dockerEnabled()) {
+            try tx.newWindow("docker", try self.cfg.dockerDir(self.gpa), "echo \"=== Docker Services ===\" && echo \"Waiting for start command...\"");
+        }
+    }
+
+    fn zaskCommand(self: Runtime, command: []const u8) ![]const u8 {
+        return std.fmt.allocPrint(self.gpa, "{s} --config {s} {s}", .{ try shell.quote(self.gpa, self.zask_path), try shell.quote(self.gpa, self.config_path), command });
+    }
+
+    fn placeholderCommand(self: Runtime, name: []const u8) ![]const u8 {
+        return std.fmt.allocPrint(self.gpa, "echo \"=== {s} ===\" && echo \"Waiting for start command...\"", .{name});
     }
 
     fn setupPipePane(self: Runtime, writer: *std.Io.Writer) !void {
@@ -513,7 +523,40 @@ test "attach from tmux switches client without mutating window sizes" {
     try std.testing.expectEqualStrings("switch-client", recorder.commands.items[0].argv[1]);
 }
 
-test "hello creates session with interactive tmuxp and no sizing commands" {
+test "session skeleton creates dashboard service and docker windows" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"enabled": true, "dir": "infra", "compose_file": "compose.yaml"},
+        \\  "services": [{"name":"api","dir":"backend","command":"serve","group":"backend"}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    var runtime = testRuntime(arena.allocator(), run, cfg);
+
+    try runtime.createSessionSkeleton();
+
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "tmuxp") == null);
+    try proc_runner.expectCommandContaining(&recorder, "new-session");
+    try proc_runner.expectCommandContaining(&recorder, "split-window");
+    try proc_runner.expectCommandContaining(&recorder, "main-pane-width");
+    try proc_runner.expectCommandContaining(&recorder, "main-vertical");
+    try proc_runner.expectCommandContaining(&recorder, "new-window");
+    try proc_runner.expectCommandContaining(&recorder, "demo:dashboard");
+    try proc_runner.expectCommandContaining(&recorder, "/tmp/demo/backend");
+    try proc_runner.expectCommandContaining(&recorder, "/tmp/demo/infra");
+    try proc_runner.expectCommandOrder(&recorder, "remain-on-exit", "api");
+    try proc_runner.expectCommandContaining(&recorder, "@zask_dash_mode");
+    try proc_runner.expectNoTmuxSizingCommands(&recorder);
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "hello creates session without tmuxp and keeps setup order" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -526,8 +569,6 @@ test "hello creates session with interactive tmuxp and no sizing commands" {
     const io = threaded.io();
     const home_dir = try std.fmt.allocPrint(arena.allocator(), "/private/tmp/zask-test-home-{d}", .{std.c.getpid()});
     defer std.Io.Dir.cwd().deleteTree(io, home_dir) catch {};
-    const session_dir = try std.fs.path.join(arena.allocator(), &.{ home_dir, ".config", "zask", "demo" });
-    _ = try std.Io.Dir.cwd().createDirPathStatus(io, session_dir, @enumFromInt(0o700));
     var environ = env.Map.init(arena.allocator());
     defer environ.deinit();
     try environ.put("HOME", home_dir);
@@ -539,20 +580,19 @@ test "hello creates session with interactive tmuxp and no sizing commands" {
     var runtime = testRuntime(arena.allocator(), run, cfg);
     runtime.io = io;
     runtime.environ = &environ;
-    runtime.runner_impl = run;
-    runtime.tmux_impl.runner = run;
-    runtime.docker_impl.runner = run;
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
     try runtime.helloUnlocked("all", &writer);
 
-    const load = proc_runner.findCommandContaining(&recorder, "tmuxp").?;
-    try std.testing.expect(load.interactive);
-    try std.testing.expectEqualStrings("load", load.argv[1]);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "tmuxp") == null);
+    try proc_runner.expectCommandContaining(&recorder, "new-session");
+    try proc_runner.expectCommandContaining(&recorder, "split-window");
     try proc_runner.expectCommandContaining(&recorder, "set-option");
     try proc_runner.expectCommandContaining(&recorder, "@zask_dash_mode");
     try proc_runner.expectCommandContaining(&recorder, "bind-key");
+    try proc_runner.expectCommandOrder(&recorder, "bind-key", "date");
+    try proc_runner.expectCommandOrder(&recorder, "@zask_log_session_id", "attach-session");
     try proc_runner.expectNoTmuxSizingCommands(&recorder);
     try proc_runner.expectNoRemainingResponses(&recorder);
 }

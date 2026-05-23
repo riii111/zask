@@ -21,7 +21,6 @@ const ParsedArgs = struct {
 const Command = enum {
     version,
     help,
-    render_session,
     list,
     status,
     attach,
@@ -65,7 +64,6 @@ const command_specs = [_]CommandSpec{
     .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window", .min_args = 1, .max_args = 1 },
     .{ .command = .follow, .names = &.{"follow"}, .usage = "follow <service>", .description = "Tail captured log in tmux popup", .min_args = 1, .max_args = 1 },
     .{ .command = .exec, .names = &.{"exec"}, .usage = "exec <container> [--shell]", .description = "Enter Docker container", .min_args = 1, .max_args = 2 },
-    .{ .command = .render_session, .names = &.{"render-session"}, .usage = "render-session", .description = "Print generated tmuxp YAML" },
     .{ .command = .version, .names = &.{"version"}, .usage = "version", .description = "Print zask version", .global = true },
     .{ .command = .help, .names = &.{ "help", "--help", "-h" }, .usage = "help", .description = "Print this help", .global = true },
     .{ .command = .dashboard, .names = &.{"dashboard"} },
@@ -134,7 +132,6 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
 fn dispatchRuntimeCommand(rt: Runtime, command: Command, args: []const []const u8, writer: *std.Io.Writer) !void {
     return switch (command) {
         .version, .help => unreachable,
-        .render_session => rt.renderSession(writer),
         .list => rt.list(writer),
         .status => rt.status(writer),
         .attach => rt.attach(),
@@ -331,7 +328,7 @@ test "help prints usage" {
 
     try runWithArgs(.{ .gpa = std.testing.allocator }, &.{"help"}, &writer);
     try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "render-session") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "render-session") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "exec <container>") != null);
 }
 
@@ -345,7 +342,7 @@ test "project alias without arguments prints usage" {
 
 test "command metadata parses aliases and global commands" {
     try std.testing.expectEqual(Command.help, parseCommand("-h").?);
-    try std.testing.expectEqual(Command.render_session, parseCommand("render-session").?);
+    try std.testing.expect(parseCommand("render-session") == null);
     try std.testing.expect(isGlobalCommand("--help"));
     try std.testing.expect(!isGlobalCommand("list"));
 }
