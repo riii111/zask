@@ -22,14 +22,19 @@ pub fn runPrechecks(ctx: anytype, writer: *std.Io.Writer) !void {
         const name = config_value.optionalObjectString(check, "name", "precheck");
         const command = try config_value.requiredObjectString(check, "command");
         const on_fail = config_value.optionalObjectString(check, "on_fail", "warn");
+        const hint = config_value.optionalObjectString(check, "hint", "");
         const dir = config_value.optionalObjectString(check, "dir", "");
         const cwd = try phaseCwd(ctx, dir);
-        const result = ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd, .check = true }) catch {
-            if (std.mem.eql(u8, on_fail, "abort")) return error.PrecheckFailed;
-            try writer.print("Warning: {s} check failed\n", .{name});
-            continue;
+        const result = ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd, .check = true }) catch |err| switch (err) {
+            error.CommandFailed => {
+                if (hint.len > 0) try writer.print("Hint: {s}\n", .{hint});
+                if (std.mem.eql(u8, on_fail, "abort")) return error.PrecheckFailed;
+                try writer.print("Warning: {s} check failed\n", .{name});
+                continue;
+            },
+            else => return err,
         };
-        const captured = @import("infra/runner.zig").captured(result);
+        const captured = result.captured;
         ctx.gpa.free(captured.stdout);
         ctx.gpa.free(captured.stderr);
     }
@@ -78,4 +83,35 @@ test "classifies lifecycle phase kinds" {
     try std.testing.expectEqual(PhaseKind.docker, phaseKind(parsed.array.items[0]));
     try std.testing.expectEqual(PhaseKind.command, phaseKind(parsed.array.items[1]));
     try std.testing.expectEqual(PhaseKind.services, phaseKind(parsed.array.items[2]));
+}
+
+test "precheck failure prints hint and preserves abort semantics" {
+    const lifecycle_mod = @import("lifecycle.zig");
+    const runner_mod = @import("infra/runner.zig");
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "prechecks": [{"name":"tool","command":"missing-tool","on_fail":"abort","hint":"install tool"}],
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = runner_mod.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "missing", .{ .exited = 1 });
+    const run = runner_mod.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const lifecycle = lifecycle_mod.Lifecycle{
+        .gpa = arena.allocator(),
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
+        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.PrecheckFailed, runPrechecks(lifecycle, &writer));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Hint: install tool") != null);
 }

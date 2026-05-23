@@ -10,7 +10,9 @@ pub const Lock = struct {
     pub fn acquire(gpa: std.mem.Allocator, proc: runner.Runner, name: []const u8, base: []const u8) !Lock {
         try ensurePrivateDir(proc.io, base);
         const dir = try std.fs.path.join(gpa, &.{ base, try std.fmt.allocPrint(gpa, "{s}.lock", .{name}) });
+        errdefer gpa.free(dir);
         const pid = try std.fmt.allocPrint(gpa, "{d}", .{std.c.getpid()});
+        defer gpa.free(pid);
         if (try acquireDir(proc.io, dir)) {
             try writePid(gpa, proc.io, dir, pid);
             return .{ .gpa = gpa, .io = proc.io, .dir = dir };
@@ -18,6 +20,7 @@ pub const Lock = struct {
         if (try lockAlive(gpa, proc.io, dir)) return error.LockBusy;
 
         const stale_dir = try std.fmt.allocPrint(gpa, "{s}.stale.{d}", .{ dir, std.c.getpid() });
+        defer gpa.free(stale_dir);
         std.Io.Dir.renameAbsolute(dir, stale_dir, proc.io) catch return error.LockBusy;
         defer std.Io.Dir.cwd().deleteTree(proc.io, stale_dir) catch {};
         if (!try acquireDir(proc.io, dir)) return error.LockBusy;
@@ -31,10 +34,10 @@ pub const Lock = struct {
 };
 
 fn ensurePrivateDir(io: std.Io, path: []const u8) !void {
-    _ = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
-    var dir = try std.Io.Dir.openDirAbsolute(io, path, .{});
+    const status = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
+    var dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .follow_symlinks = false });
     defer dir.close(io);
-    try dir.setPermissions(io, private_dir_permissions);
+    if (status == .created) try dir.setPermissions(io, private_dir_permissions);
 }
 
 fn acquireDir(io: std.Io, path: []const u8) !bool {
@@ -49,7 +52,7 @@ fn writePid(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, pid: []const u8
     const pid_path = try std.fs.path.join(gpa, &.{ dir, "pid" });
     const tmp_path = try std.fmt.allocPrint(gpa, "{s}.tmp.{d}", .{ pid_path, std.c.getpid() });
     errdefer std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
-    try paths.writeFile(io, tmp_path, pid);
+    try paths.writeFileMode(io, tmp_path, pid, private_file_permissions);
     try std.Io.Dir.renameAbsolute(tmp_path, pid_path, io);
 }
 
@@ -72,6 +75,7 @@ fn lockAlive(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !bool {
 }
 
 const private_dir_permissions: std.Io.Dir.Permissions = @enumFromInt(0o700);
+const private_file_permissions: std.Io.File.Permissions = @enumFromInt(0o600);
 
 test "lock blocks concurrent acquire and releases directory" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

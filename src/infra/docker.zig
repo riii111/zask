@@ -21,7 +21,7 @@ pub const Compose = struct {
         if (result.term != .exited or result.term.exited != 0) return .{ .state = .unavailable };
         const services = parseServices(self.gpa, result.stdout) catch return .{ .state = .unavailable };
         if (services.len == 0) return .{ .state = .empty, .services = services };
-        return .{ .state = .running, .services = services };
+        return .{ .state = .running, .services = services, .owned = true };
     }
 
     pub fn runningServices(self: Compose) !std.process.RunResult {
@@ -69,6 +69,11 @@ fn splitCommand(gpa: std.mem.Allocator, command: []const u8) ![][]const u8 {
         if (escaped) {
             try current.append(gpa, byte);
             escaped = false;
+            in_token = true;
+            continue;
+        }
+        if (byte == '\\' and quote != '\'' and index + 1 < command.len and command[index + 1] == '\n') {
+            index += 1;
             in_token = true;
             continue;
         }
@@ -223,6 +228,16 @@ test "splitCommand preserves non-special backslash inside double quotes" {
     try std.testing.expectEqualStrings("psql", args[0]);
     try std.testing.expectEqualStrings("-c", args[1]);
     try std.testing.expectEqualStrings("select '\\n'", args[2]);
+}
+
+test "splitCommand removes backslash newline continuations" {
+    const args = try splitCommand(std.testing.allocator, "psql \\\n-c 'select 1'");
+    defer freeArgs(std.testing.allocator, args);
+
+    try std.testing.expectEqual(@as(usize, 3), args.len);
+    try std.testing.expectEqualStrings("psql", args[0]);
+    try std.testing.expectEqualStrings("-c", args[1]);
+    try std.testing.expectEqualStrings("select 1", args[2]);
 }
 
 test "splitCommand rejects empty and incomplete input" {

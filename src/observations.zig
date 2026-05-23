@@ -48,8 +48,10 @@ pub const ComposeState = enum {
 pub const ComposeObservation = struct {
     state: ComposeState,
     services: []const []const u8 = &.{},
+    owned: bool = false,
 
     pub fn deinit(self: ComposeObservation, gpa: std.mem.Allocator) void {
+        if (!self.owned) return;
         for (self.services) |service| gpa.free(service);
         gpa.free(self.services);
     }
@@ -82,9 +84,14 @@ test "compose observation reports contained services" {
     const services = try std.testing.allocator.alloc([]const u8, 2);
     services[0] = try std.testing.allocator.dupe(u8, "api");
     services[1] = try std.testing.allocator.dupe(u8, "db");
-    const observation = ComposeObservation{ .state = .running, .services = services };
+    const observation = ComposeObservation{ .state = .running, .services = services, .owned = true };
     defer observation.deinit(std.testing.allocator);
 
     try std.testing.expect(observation.contains("api"));
     try std.testing.expect(!observation.contains("web"));
+}
+
+test "compose observation deinit accepts unowned empty services" {
+    const observation = ComposeObservation{ .state = .empty };
+    observation.deinit(std.testing.allocator);
 }

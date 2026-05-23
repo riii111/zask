@@ -82,7 +82,7 @@ pub const RunOutput = union(enum) {
 pub fn captured(output: RunOutput) std.process.RunResult {
     return switch (output) {
         .captured => |result| result,
-        else => unreachable,
+        else => @panic("captured() called on non-captured output"),
     };
 }
 

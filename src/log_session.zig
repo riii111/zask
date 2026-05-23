@@ -17,8 +17,7 @@ pub const Manager = struct {
     pub fn init(self: Manager) !void {
         const session_id = try self.sessionId();
         const session_dir = try self.dirForSession(session_id);
-        _ = try self.runner.run(&.{ "mkdir", "-p", session_dir }, .{ .check = true, .discard = true });
-        _ = try self.runner.run(&.{ "chmod", "700", session_dir }, .{ .check = true, .discard = true });
+        try makePrivateDir(self.io, session_dir);
         try self.tmux.setOption(tmux_options.log_session_id, session_id);
         try self.cleanupOld();
     }
@@ -32,11 +31,10 @@ pub const Manager = struct {
 
     pub fn prepareLogFile(self: Manager, service: []const u8) ![]const u8 {
         const log_dir = try self.dir();
-        _ = try self.runner.run(&.{ "mkdir", "-p", log_dir }, .{ .check = true, .discard = true });
-        _ = try self.runner.run(&.{ "chmod", "700", log_dir }, .{ .check = true, .discard = true });
+        try makePrivateDir(self.io, log_dir);
         const log_file = try std.fs.path.join(self.gpa, &.{ log_dir, try std.fmt.allocPrint(self.gpa, "{s}.log", .{service}) });
-        _ = try self.runner.run(&.{ "touch", log_file }, .{ .check = true, .discard = true });
-        _ = try self.runner.run(&.{ "chmod", "600", log_file }, .{ .check = true, .discard = true });
+        var file = try std.Io.Dir.createFileAbsolute(self.io, log_file, .{ .truncate = false, .permissions = private_file_permissions });
+        file.close(self.io);
         return log_file;
     }
 
@@ -85,10 +83,21 @@ pub const Manager = struct {
     }
 };
 
+fn makePrivateDir(io: std.Io, path: []const u8) !void {
+    const status = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
+    if (status != .created) return;
+    var dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .follow_symlinks = false });
+    defer dir.close(io);
+    try dir.setPermissions(io, private_dir_permissions);
+}
+
 const LogEntry = struct {
     name: []const u8,
     mtime: i96,
 };
+
+const private_dir_permissions: std.Io.Dir.Permissions = @enumFromInt(0o700);
+const private_file_permissions: std.Io.File.Permissions = @enumFromInt(0o600);
 
 fn logEntryNewer(_: void, lhs: LogEntry, rhs: LogEntry) bool {
     return lhs.mtime > rhs.mtime;
