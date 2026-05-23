@@ -24,6 +24,7 @@ pub fn renderTmuxp(cfg: config.Config, gpa: std.mem.Allocator, writer: *std.Io.W
         \\  status-right: ""
         \\  remain-on-exit: on
         \\  automatic-rename: off
+        \\  window-size: latest
         \\
         \\windows:
         \\  - window_name: 'dashboard'

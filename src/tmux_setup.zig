@@ -5,6 +5,7 @@ const tmux_options = @import("tmux_options.zig");
 
 pub fn applySessionOptions(tx: tmux_client.Client, zask_path: []const u8, config_path: []const u8) !void {
     try tx.setOption("prefix", "C-q");
+    try tx.setOption("window-size", "latest");
     try tx.setOption("status-format[0]", "#[align=left]#{T;=/#{status-left-length}:status-left}#[align=right]#{T;=/#{status-right-length}:status-right}");
     try tx.setOption(tmux_options.dash_mode, "all");
     try tx.setOption(tmux_options.zask_path, zask_path);
