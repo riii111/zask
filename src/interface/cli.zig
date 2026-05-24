@@ -1,22 +1,14 @@
 const std = @import("std");
 const build_options = @import("build_options");
+const cli_context = @import("cli/context.zig");
 const root = @import("../root.zig");
 const config = @import("../model/config.zig");
 const dashboard_ui = @import("ui/dashboard.zig");
-const docker_client = @import("../platform/docker.zig");
 const env = @import("../platform/env.zig");
-const paths = @import("../platform/paths.zig");
-const proc_runner = @import("../platform/runner.zig");
-const tmux_client = @import("../platform/tmux.zig");
-const validate = @import("../model/validate.zig");
 const Runtime = @import("../workflow/runtime.zig").Runtime;
 
-const ParsedArgs = struct {
-    config_path: ?[]const u8 = null,
-    project: ?[]const u8 = null,
-    command: []const u8,
-    args: []const []const u8,
-};
+const CommandContext = cli_context.CommandContext;
+const ParsedArgs = cli_context.ParsedArgs;
 
 const Command = enum {
     version,
@@ -73,13 +65,6 @@ const command_specs = [_]CommandSpec{
     .{ .command = .preview_list, .names = &.{"preview-list"}, .min_args = 3, .max_args = 3 },
 };
 
-pub const CommandContext = struct {
-    gpa: std.mem.Allocator,
-    io: ?std.Io = null,
-    environ: ?*const env.Map = null,
-    argv0: []const u8 = "zask",
-};
-
 pub fn run(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
@@ -106,7 +91,7 @@ pub fn run(init: std.process.Init) !void {
 
 pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *std.Io.Writer) !void {
     if (args.len == 0) {
-        if (isProjectAlias(context.argv0)) return printHelp(writer);
+        if (cli_context.isProjectAlias(context.argv0)) return printHelp(writer);
         return printGreeting(writer);
     }
 
@@ -125,7 +110,8 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
     if (command == .help) {
         return printHelp(writer);
     }
-    const rt = try loadRuntime(context, parsed);
+    var run_context: cli_context.Context = .{ .base = context, .parsed = parsed, .writer = writer };
+    const rt = try run_context.runtime();
     dispatchRuntimeCommand(rt, command, parsed.args, writer) catch |err| {
         if (err == error.InvalidArguments) try printHelp(writer);
         return err;
@@ -195,18 +181,13 @@ fn parseArgs(context: CommandContext, args: []const []const u8) !ParsedArgs {
         if (args.len < 3) return error.InvalidArguments;
         return .{ .config_path = args[1], .command = args[2], .args = args[3..] };
     }
-    if (isProjectAlias(context.argv0)) {
+    if (cli_context.isProjectAlias(context.argv0)) {
         const basename = std.fs.path.basename(context.argv0);
         return .{ .project = basename, .command = args[0], .args = args[1..] };
     }
     if (isGlobalCommand(args[0])) return .{ .command = args[0], .args = args[1..] };
     if (args.len < 2) return error.ProjectRequired;
     return .{ .project = args[0], .command = args[1], .args = args[2..] };
-}
-
-fn isProjectAlias(argv0: []const u8) bool {
-    const basename = std.fs.path.basename(argv0);
-    return !std.mem.eql(u8, basename, "zask") and !std.mem.eql(u8, basename, "zask-debug");
 }
 
 fn isGlobalCommand(command: []const u8) bool {
@@ -238,49 +219,6 @@ fn commandSpec(command: Command) CommandSpec {
 fn validateArity(command: Command, args: []const []const u8) !void {
     const spec = commandSpec(command);
     if (args.len < spec.min_args or args.len > spec.max_args) return error.InvalidArguments;
-}
-
-fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
-    const io = context.io orelse return error.MissingIo;
-    const path = try absoluteConfigPath(context.gpa, io, if (parsed.config_path) |p| p else try projectConfigPath(context.gpa, context.environ, parsed.project orelse return error.ProjectRequired));
-    const cfg = try config.loadPath(context.gpa, io, path, try paths.home(context.environ));
-    const runner: proc_runner.Runner = .{ .gpa = context.gpa, .io = io };
-    return .{
-        .gpa = context.gpa,
-        .io = io,
-        .environ = context.environ,
-        .cfg = cfg,
-        .config_path = path,
-        .zask_path = try zaskExecutablePath(context.gpa, io, context.argv0),
-        .runner_impl = runner,
-        .tmux_impl = tmux_client.Client{ .gpa = context.gpa, .runner = runner, .session = try cfg.sessionName() },
-        .docker_impl = docker_client.Compose{ .gpa = context.gpa, .runner = runner, .dir = try cfg.dockerDir(context.gpa), .file = cfg.dockerComposeFile() },
-    };
-}
-
-fn projectConfigPath(gpa: std.mem.Allocator, environ: ?*const env.Map, project: []const u8) ![]const u8 {
-    try validate.identifier(project);
-    return std.fs.path.join(gpa, &.{ try paths.configBase(gpa, environ), project, "config.json" });
-}
-
-fn absoluteConfigPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
-    if (std.fs.path.isAbsolute(path)) return path;
-    return std.Io.Dir.cwd().realPathFileAlloc(io, path, gpa);
-}
-
-fn absoluteExePath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
-    if (std.fs.path.isAbsolute(path)) return path;
-    if (std.mem.indexOfScalar(u8, path, '/') != null) {
-        return std.Io.Dir.cwd().realPathFileAlloc(io, path, gpa);
-    }
-    return path;
-}
-
-fn zaskExecutablePath(gpa: std.mem.Allocator, io: std.Io, argv0: []const u8) ![]const u8 {
-    if (!isProjectAlias(argv0)) return absoluteExePath(gpa, io, argv0);
-    if (std.mem.indexOfScalar(u8, argv0, '/') == null) return "zask";
-    const sibling = try std.fs.path.join(gpa, &.{ std.fs.path.dirname(argv0) orelse ".", "zask" });
-    return absoluteExePath(gpa, io, sibling);
 }
 
 fn oneArg(args: []const []const u8) ![]const u8 {
