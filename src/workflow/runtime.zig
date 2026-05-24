@@ -167,7 +167,13 @@ pub const Runtime = struct {
             try tx.detachClientExec(command);
             return;
         }
-        const guard = try self.acquireLock();
+        const guard = self.acquireLock() catch |err| switch (err) {
+            error.LockBusy => {
+                if (try self.sessionExists()) return self.detachSessionForRe();
+                return err;
+            },
+            else => return err,
+        };
         defer guard.release();
         try self.closeUnlocked(writer);
         try self.openUnlocked("all", writer);
@@ -264,6 +270,12 @@ pub const Runtime = struct {
         } else {
             try tx.attachSession();
         }
+    }
+
+    fn detachSessionForRe(self: Runtime) !void {
+        const command = try zask_command.invoke(self.gpa, self.zask_path, self.config_path, "re");
+        defer self.gpa.free(command);
+        try self.tmux().detachSessionExec(command);
     }
 
     fn sessionExists(self: Runtime) !bool {
@@ -769,6 +781,51 @@ test "runtime.open: preserves lock busy before session exists" {
     try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
     try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
     try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+}
+
+test "runtime.re: delegates to attached session when lock is busy" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    const base = try std.fmt.allocPrint(arena.allocator(), "/private/tmp/zask-test-runtime-re-{d}", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    const lock_dir = try std.fs.path.join(arena.allocator(), &.{ base, "zask", "demo.lock" });
+    _ = try std.Io.Dir.cwd().createDirPathStatus(io, lock_dir, @enumFromInt(0o700));
+    const pid_path = try std.fs.path.join(arena.allocator(), &.{ lock_dir, "pid" });
+    try paths.writeFileMode(io, pid_path, try std.fmt.allocPrint(arena.allocator(), "{d}", .{std.c.getpid()}), @enumFromInt(0o600));
+
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    try environ.put("XDG_RUNTIME_DIR", base);
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    var runtime = testRuntime(arena.allocator(), run, cfg);
+    runtime.io = io;
+    runtime.environ = &environ;
+    runtime.runner_impl = run;
+    runtime.tmux_impl.runner = run;
+    runtime.docker_impl.runner = run;
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.re(&writer);
+
+    try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
+    try proc_runner.expectCommandArg(recorder.commands.items[1], 1, "detach-client");
+    try proc_runner.expectCommandArg(recorder.commands.items[1], 2, "-s");
+    try proc_runner.expectCommandArg(recorder.commands.items[1], 3, "demo");
+    try proc_runner.expectCommandArg(recorder.commands.items[1], 4, "-E");
+    try proc_runner.expectCommandArgContains(recorder.commands.items[1], 5, " re");
 }
 
 fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.Config) Runtime {

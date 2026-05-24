@@ -41,6 +41,10 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ self.tmux_path, "detach-client", "-E", command }, .{ .check = true, .discard = true });
     }
 
+    pub fn detachSessionExec(self: Client, command: []const u8) !void {
+        _ = try self.runner.run(&.{ self.tmux_path, "detach-client", "-s", self.session, "-E", command }, .{ .check = true, .discard = true });
+    }
+
     pub fn windowExists(self: Client, window: []const u8) bool {
         return self.observeWindow(window) == .present;
     }
@@ -340,13 +344,15 @@ test "client lifecycle commands record tmux argv" {
     try client.switchClient();
     try client.attachSession();
     try client.detachClientExec("zask re");
+    try client.detachSessionExec("zask re");
     try client.killSession();
 
     try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "switch-client", "-t", "demo" });
     try runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "attach-session", "-t", "demo" });
     try std.testing.expect(recorder.commands.items[1].interactive);
     try runner.expectCommandArgv(recorder.commands.items[2], &.{ "tmux", "detach-client", "-E", "zask re" });
-    try runner.expectCommandArgv(recorder.commands.items[3], &.{ "tmux", "kill-session", "-t", "demo" });
+    try runner.expectCommandArgv(recorder.commands.items[3], &.{ "tmux", "detach-client", "-s", "demo", "-E", "zask re" });
+    try runner.expectCommandArgv(recorder.commands.items[4], &.{ "tmux", "kill-session", "-t", "demo" });
 }
 
 test "options and binding helpers record tmux argv" {
