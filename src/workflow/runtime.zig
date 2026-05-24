@@ -169,7 +169,9 @@ pub const Runtime = struct {
     pub fn re(self: Runtime, writer: *std.Io.Writer) !void {
         if (try self.inTmux()) {
             const tx = self.tmux();
-            try tx.detachClientExec(try zask_command.invoke(self.gpa, self.zask_path, self.config_path, "re"));
+            const command = try zask_command.invoke(self.gpa, self.zask_path, self.config_path, "re");
+            defer self.gpa.free(command);
+            try tx.detachClientExec(command);
             return;
         }
         const guard = try self.acquireLock();
