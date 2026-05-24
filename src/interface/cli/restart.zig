@@ -23,12 +23,12 @@ pub fn run(ctx: *Context, opts: Options) !void {
 // Tests
 // -----------------------------------------------------------------------------
 
-test "options parse required target" {
+test "restart.Options: accepts required target" {
     try std.testing.expectEqualStrings("api", (try Options.parse(&.{"api"})).target);
     try std.testing.expectEqualStrings("docker", (try Options.parse(&.{"docker"})).target);
 }
 
-test "options reject invalid arity" {
+test "restart.Options: rejects invalid target shape" {
     try std.testing.expectError(error.InvalidArguments, Options.parse(&.{}));
     try std.testing.expectError(error.InvalidArguments, Options.parse(&.{"--docker"}));
     try std.testing.expectError(error.InvalidArguments, Options.parse(&.{ "api", "extra" }));

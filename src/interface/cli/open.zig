@@ -30,16 +30,16 @@ fn resolveProfile(cfg: config.Config, opts: Options) ![]const u8 {
 // Tests
 // -----------------------------------------------------------------------------
 
-test "options accept optional profile" {
+test "open.Options: accepts optional profile" {
     try std.testing.expect((try Options.parse(&.{})).profile_arg == null);
     try std.testing.expectEqualStrings("--docker", (try Options.parse(&.{"--docker"})).profile_arg.?);
 }
 
-test "options reject extra arguments" {
+test "open.Options: rejects extra arguments" {
     try std.testing.expectError(error.InvalidArguments, Options.parse(&.{ "--docker", "extra" }));
 }
 
-test "resolves profile aliases" {
+test "open.Options: resolves profile aliases" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},

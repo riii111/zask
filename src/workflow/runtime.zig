@@ -276,13 +276,13 @@ fn composeStatusText(state: observations.ComposeState) []const u8 {
     };
 }
 
-test "maps observations to status text" {
+test "runtime.status: maps observations to text" {
     try std.testing.expectEqualStrings("running", paneStatusText(.busy));
     try std.testing.expectEqualStrings("stopped", paneStatusText(.idle));
     try std.testing.expectEqualStrings("unknown", composeStatusText(.unavailable));
 }
 
-test "close kills session after service stop wait failure" {
+test "runtime.close: kills session after service stop wait failure" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -311,7 +311,7 @@ test "close kills session after service stop wait failure" {
     try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "demo" });
 }
 
-test "close reaches kill-session after service and docker stop" {
+test "runtime.close: kills session after resource stop" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -352,7 +352,7 @@ test "close reaches kill-session after service and docker stop" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "attach from tmux switches client without mutating window sizes" {
+test "runtime.attach: switches tmux client" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -380,7 +380,7 @@ test "attach from tmux switches client without mutating window sizes" {
     try proc_runner.expectCommandArg(recorder.commands.items[1], 1, "switch-client");
 }
 
-test "attach reports missing session before attach-session" {
+test "runtime.attach: reports missing session" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -405,7 +405,7 @@ test "attach reports missing session before attach-session" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Run 'open' first") != null);
 }
 
-test "new session setup creates dashboard service and docker windows" {
+test "runtime.openSession: creates dashboard service and docker windows" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -444,7 +444,7 @@ test "new session setup creates dashboard service and docker windows" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "new session setup places docker after dashboard when services are empty" {
+test "runtime.openSession: places docker after dashboard" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -472,7 +472,7 @@ test "new session setup places docker after dashboard when services are empty" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "open kills partially created session when session options fail" {
+test "runtime.open: kills partial session on setup failure" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -499,7 +499,7 @@ test "open kills partially created session when session options fail" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "open creates session without tmuxp and keeps setup order" {
+test "runtime.open: creates session without tmuxp" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -540,7 +540,7 @@ test "open creates session without tmuxp and keeps setup order" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "open refreshes bindings for existing session" {
+test "runtime.open: refreshes bindings for existing session" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -571,7 +571,7 @@ test "open refreshes bindings for existing session" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "previewList resizes all windows before choose-tree" {
+test "runtime.previewList: resizes windows before choose-tree" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -609,7 +609,7 @@ test "previewList resizes all windows before choose-tree" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "previewList does not open choose-tree when resized windows mismatch" {
+test "runtime.previewList: rejects resized window mismatch" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -640,7 +640,7 @@ test "previewList does not open choose-tree when resized windows mismatch" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "open attaches existing session when another open holds the lock" {
+test "runtime.open: attaches when lock is busy" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},

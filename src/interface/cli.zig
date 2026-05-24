@@ -206,7 +206,7 @@ fn parseCommand(command: []const u8, allow_internal: bool) ?Command {
 // Tests
 // -----------------------------------------------------------------------------
 
-test "command metadata parses aliases and global commands" {
+test "cli.command: parses public and internal names" {
     const command_cases = [_]struct {
         input: []const u8,
         expected: ?Command,
@@ -244,7 +244,7 @@ test "command metadata parses aliases and global commands" {
     }
 }
 
-test "version prints package version" {
+test "cli.version: prints package version" {
     var buffer: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -252,7 +252,7 @@ test "version prints package version" {
     try std.testing.expectEqualStrings("zask 0.0.0\n", writer.buffered());
 }
 
-test "help prints usage" {
+test "cli.help: prints public commands" {
     var buffer: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -268,7 +268,7 @@ test "help prints usage" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "exec <container>") == null);
 }
 
-test "project alias without arguments prints usage" {
+test "cli.projectAlias: prints usage without command" {
     var buffer: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -276,20 +276,20 @@ test "project alias without arguments prints usage" {
     try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
 }
 
-test "parses project command form" {
+test "cli.parseArgs: accepts project command form" {
     const parsed = try parseArgs(.{ .gpa = std.testing.allocator }, &.{ "demo", "status" });
     try std.testing.expectEqualStrings("demo", parsed.project.?);
     try std.testing.expectEqualStrings("status", parsed.command);
 }
 
-test "parses explicit config command form" {
+test "cli.parseArgs: accepts explicit config command form" {
     const parsed = try parseArgs(.{ .gpa = std.testing.allocator }, &.{ "--config", "demo.json", "status" });
     try std.testing.expectEqualStrings("demo.json", parsed.config_path.?);
     try std.testing.expectEqualStrings("status", parsed.command);
     try std.testing.expectEqual(@as(usize, 0), parsed.args.len);
 }
 
-test "project alias accepts explicit config command form" {
+test "cli.parseArgs: project alias accepts explicit config form" {
     const parsed = try parseArgs(.{ .gpa = std.testing.allocator, .argv0 = "sample" }, &.{ "--config", "demo.json", "logs", "api" });
     try std.testing.expectEqualStrings("demo.json", parsed.config_path.?);
     try std.testing.expectEqualStrings("logs", parsed.command);
@@ -297,19 +297,19 @@ test "project alias accepts explicit config command form" {
     try std.testing.expect(parsed.project == null);
 }
 
-test "parses argv0 project alias form" {
+test "cli.parseArgs: accepts argv0 project alias form" {
     const parsed = try parseArgs(.{ .gpa = std.testing.allocator, .argv0 = "sample" }, &.{"open"});
     try std.testing.expectEqualStrings("sample", parsed.project.?);
     try std.testing.expectEqualStrings("open", parsed.command);
 }
 
-test "rejects incomplete config and project command forms" {
+test "cli.parseArgs: rejects incomplete forms" {
     try std.testing.expectError(error.InvalidArguments, parseArgs(.{ .gpa = std.testing.allocator }, &.{"--config"}));
     try std.testing.expectError(error.InvalidArguments, parseArgs(.{ .gpa = std.testing.allocator }, &.{ "--config", "demo.json" }));
     try std.testing.expectError(error.ProjectRequired, parseArgs(.{ .gpa = std.testing.allocator }, &.{"status"}));
 }
 
-test "invalid command arity prints usage before returning error" {
+test "cli.runWithArgs: prints usage for invalid arity" {
     var buffer: [4096]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -317,7 +317,7 @@ test "invalid command arity prints usage before returning error" {
     try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
 }
 
-test "incomplete config form prints usage before returning error" {
+test "cli.runWithArgs: prints usage for incomplete config" {
     var buffer: [4096]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -325,7 +325,7 @@ test "incomplete config form prints usage before returning error" {
     try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
 }
 
-test "invalid open profile prints usage" {
+test "cli.open: prints usage for invalid profile" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var buffer: [4096]u8 = undefined;
