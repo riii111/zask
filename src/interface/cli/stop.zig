@@ -1,12 +1,13 @@
 const std = @import("std");
 const Context = @import("context.zig").Context;
+const target = @import("target.zig");
 
 pub const Options = struct {
     target: ?[]const u8 = null,
 
     pub fn parse(args: []const []const u8) !Options {
         if (args.len > 1) return error.InvalidArguments;
-        return .{ .target = if (args.len == 0) null else normalizeTarget(args[0]) };
+        return .{ .target = if (args.len == 0) null else target.normalize(args[0]) };
     }
 
     pub fn deinit(self: Options) void {
@@ -17,11 +18,6 @@ pub const Options = struct {
 pub fn run(ctx: *Context, opts: Options) !void {
     const rt = try ctx.runtime();
     try rt.stop(opts.target, ctx.writer);
-}
-
-fn normalizeTarget(target: []const u8) []const u8 {
-    if (std.mem.eql(u8, target, "--docker")) return "docker";
-    return target;
 }
 
 // -----------------------------------------------------------------------------
