@@ -96,6 +96,10 @@ fn checkTerm(term: std.process.Child.Term) !void {
     return error.CommandFailed;
 }
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 pub const Recorder = struct {
     gpa: std.mem.Allocator,
     commands: std.ArrayList(RecordedCommand),
@@ -272,10 +276,6 @@ const RecordedResponse = struct {
     stderr: []const u8,
     term: std.process.Child.Term,
 };
-
-// -----------------------------------------------------------------------------
-// Tests
-// -----------------------------------------------------------------------------
 
 test "recorder captures commands without spawning processes" {
     var recorder = Recorder.init(std.testing.allocator);
