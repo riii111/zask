@@ -6,13 +6,14 @@ pub const Client = struct {
     gpa: std.mem.Allocator,
     runner: runner.Runner,
     session: []const u8,
+    tmux_path: []const u8 = "tmux",
 
     pub fn hasSession(self: Client) bool {
         return self.observeSession() == .active;
     }
 
     pub fn observeSession(self: Client) observations.SessionObservation {
-        const result = runner.captured(self.runner.run(&.{ "tmux", "has-session", "-t", self.session }, .{}) catch return .unavailable);
+        const result = runner.captured(self.runner.run(&.{ self.tmux_path, "has-session", "-t", self.session }, .{}) catch return .unavailable);
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
         if (result.term == .exited and result.term.exited == 0) return .active;
@@ -21,69 +22,69 @@ pub const Client = struct {
     }
 
     pub fn switchClient(self: Client) !void {
-        _ = try self.runner.run(&.{ "tmux", "switch-client", "-t", self.session }, .{ .check = true, .discard = true });
+        _ = try self.runner.run(&.{ self.tmux_path, "switch-client", "-t", self.session }, .{ .check = true, .discard = true });
     }
 
     pub fn attachSession(self: Client) !void {
-        _ = try self.runner.run(&.{ "tmux", "attach-session", "-t", self.session }, .{ .interactive = true, .check = true });
+        _ = try self.runner.run(&.{ self.tmux_path, "attach-session", "-t", self.session }, .{ .interactive = true, .check = true });
     }
 
     pub fn newSession(self: Client, window_name: []const u8, cwd: []const u8, command: []const u8) !void {
-        _ = try self.runner.run(&.{ "tmux", "new-session", "-d", "-s", self.session, "-n", window_name, "-c", cwd, command }, .{ .check = true, .discard = true });
+        _ = try self.runner.run(&.{ self.tmux_path, "new-session", "-d", "-s", self.session, "-n", window_name, "-c", cwd, command }, .{ .check = true, .discard = true });
     }
 
     pub fn newWindow(self: Client, window_name: []const u8, cwd: []const u8, command: []const u8) !void {
-        _ = try self.runner.run(&.{ "tmux", "new-window", "-d", "-t", self.session, "-n", window_name, "-c", cwd, command }, .{ .check = true, .discard = true });
+        _ = try self.runner.run(&.{ self.tmux_path, "new-window", "-d", "-t", self.session, "-n", window_name, "-c", cwd, command }, .{ .check = true, .discard = true });
     }
 
     pub fn newWindowAfter(self: Client, after_window: []const u8, window_name: []const u8, cwd: []const u8, command: []const u8) !void {
         const target_window = try self.target(after_window);
         defer self.gpa.free(target_window);
-        _ = try self.runner.run(&.{ "tmux", "new-window", "-d", "-a", "-t", target_window, "-n", window_name, "-c", cwd, command }, .{ .check = true, .discard = true });
+        _ = try self.runner.run(&.{ self.tmux_path, "new-window", "-d", "-a", "-t", target_window, "-n", window_name, "-c", cwd, command }, .{ .check = true, .discard = true });
     }
 
     pub fn splitWindow(self: Client, window: []const u8, cwd: []const u8, command: []const u8) !void {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
-        _ = try self.runner.run(&.{ "tmux", "split-window", "-t", pane_target, "-c", cwd, command }, .{ .check = true, .discard = true });
+        _ = try self.runner.run(&.{ self.tmux_path, "split-window", "-t", pane_target, "-c", cwd, command }, .{ .check = true, .discard = true });
     }
 
     pub fn selectLayout(self: Client, window: []const u8, layout: []const u8) !void {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
-        _ = try self.runner.run(&.{ "tmux", "select-layout", "-t", pane_target, layout }, .{ .check = true, .discard = true });
+        _ = try self.runner.run(&.{ self.tmux_path, "select-layout", "-t", pane_target, layout }, .{ .check = true, .discard = true });
     }
 
     pub fn detachClient(self: Client) !void {
-        _ = try self.runner.run(&.{ "tmux", "detach-client" }, .{ .check = true, .discard = true });
+        _ = try self.runner.run(&.{ self.tmux_path, "detach-client" }, .{ .check = true, .discard = true });
     }
 
     pub fn detachClientExec(self: Client, command: []const u8) !void {
-        _ = try self.runner.run(&.{ "tmux", "detach-client", "-E", command }, .{ .check = true, .discard = true });
+        _ = try self.runner.run(&.{ self.tmux_path, "detach-client", "-E", command }, .{ .check = true, .discard = true });
     }
 
     pub fn selectWindow(self: Client, window: []const u8) !void {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
-        _ = try self.runner.run(&.{ "tmux", "select-window", "-t", pane_target }, .{ .check = true, .discard = true });
+        _ = try self.runner.run(&.{ self.tmux_path, "select-window", "-t", pane_target }, .{ .check = true, .discard = true });
     }
 
     pub fn killSession(self: Client) !void {
-        _ = try self.runner.run(&.{ "tmux", "kill-session", "-t", self.session }, .{ .check = true, .discard = true });
+        _ = try self.runner.run(&.{ self.tmux_path, "kill-session", "-t", self.session }, .{ .check = true, .discard = true });
     }
 
     pub fn setOption(self: Client, name: []const u8, value: []const u8) !void {
-        _ = try self.runner.run(&.{ "tmux", "set-option", "-t", self.session, name, value }, .{ .check = true, .discard = true });
+        _ = try self.runner.run(&.{ self.tmux_path, "set-option", "-t", self.session, name, value }, .{ .check = true, .discard = true });
     }
 
     pub fn setWindowOption(self: Client, window: []const u8, name: []const u8, value: []const u8) !void {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
-        _ = try self.runner.run(&.{ "tmux", "set-window-option", "-t", pane_target, name, value }, .{ .check = true, .discard = true });
+        _ = try self.runner.run(&.{ self.tmux_path, "set-window-option", "-t", pane_target, name, value }, .{ .check = true, .discard = true });
     }
 
     pub fn showOption(self: Client, name: []const u8) !?[]const u8 {
-        const result = runner.captured(self.runner.run(&.{ "tmux", "show-option", "-t", self.session, "-qv", name }, .{}) catch return null);
+        const result = runner.captured(self.runner.run(&.{ self.tmux_path, "show-option", "-t", self.session, "-qv", name }, .{}) catch return null);
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
         const value = std.mem.trim(u8, result.stdout, " \t\r\n");
@@ -92,30 +93,30 @@ pub const Client = struct {
     }
 
     pub fn bindRunShell(self: Client, key: []const u8, command: []const u8) !void {
-        _ = try self.runner.run(&.{ "tmux", "bind-key", "-T", "prefix", key, "run-shell", command }, .{ .check = true, .discard = true });
+        _ = try self.runner.run(&.{ self.tmux_path, "bind-key", "-T", "prefix", key, "run-shell", command }, .{ .check = true, .discard = true });
     }
 
     pub fn bindCommand(self: Client, key: []const u8, command: []const u8) !void {
-        _ = try self.runner.run(&.{ "tmux", "bind-key", "-T", "prefix", key, command }, .{ .check = true, .discard = true });
+        _ = try self.runner.run(&.{ self.tmux_path, "bind-key", "-T", "prefix", key, command }, .{ .check = true, .discard = true });
     }
 
     pub fn popup(self: Client, width: []const u8, height: []const u8, command: []const u8) !void {
-        _ = try self.runner.run(&.{ "tmux", "popup", "-w", width, "-h", height, "-E", command }, .{ .check = true, .discard = true });
+        _ = try self.runner.run(&.{ self.tmux_path, "popup", "-w", width, "-h", height, "-E", command }, .{ .check = true, .discard = true });
     }
 
     pub fn sendKeys(self: Client, pane_target: []const u8, keys: []const []const u8) !void {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(self.gpa);
-        try argv.appendSlice(self.gpa, &.{ "tmux", "send-keys", "-t", pane_target });
+        try argv.appendSlice(self.gpa, &.{ self.tmux_path, "send-keys", "-t", pane_target });
         try argv.appendSlice(self.gpa, keys);
         _ = try self.runner.run(argv.items, .{ .check = true, .discard = true });
     }
 
     pub fn pipePane(self: Client, pane_target: []const u8, command: ?[]const u8) !void {
         if (command) |cmd| {
-            _ = try self.runner.run(&.{ "tmux", "pipe-pane", "-t", pane_target, cmd }, .{ .check = true, .discard = true });
+            _ = try self.runner.run(&.{ self.tmux_path, "pipe-pane", "-t", pane_target, cmd }, .{ .check = true, .discard = true });
         } else {
-            _ = try self.runner.run(&.{ "tmux", "pipe-pane", "-t", pane_target }, .{ .check = true, .discard = true });
+            _ = try self.runner.run(&.{ self.tmux_path, "pipe-pane", "-t", pane_target }, .{ .check = true, .discard = true });
         }
     }
 
@@ -126,7 +127,7 @@ pub const Client = struct {
     pub fn observeWindow(self: Client, window: []const u8) observations.WindowObservation {
         const pane_target = self.target(window) catch return .unavailable;
         defer self.gpa.free(pane_target);
-        const result = runner.captured(self.runner.run(&.{ "tmux", "list-panes", "-t", pane_target }, .{}) catch return .unavailable);
+        const result = runner.captured(self.runner.run(&.{ self.tmux_path, "list-panes", "-t", pane_target }, .{}) catch return .unavailable);
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
         if (result.term == .exited and result.term.exited == 0) return .present;
@@ -174,7 +175,7 @@ pub const Client = struct {
     pub fn paneInfo(self: Client, window: []const u8) !PaneInfo {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
-        const result = runner.captured(self.runner.run(&.{ "tmux", "list-panes", "-t", pane_target, "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}" }, .{}) catch return error.TmuxUnavailable);
+        const result = runner.captured(self.runner.run(&.{ self.tmux_path, "list-panes", "-t", pane_target, "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}" }, .{}) catch return error.TmuxUnavailable);
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
         if (result.term != .exited) return error.TmuxUnavailable;
@@ -199,7 +200,7 @@ pub const Client = struct {
     pub fn capturePane(self: Client, window: []const u8) ![]const u8 {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
-        const result = runner.captured(self.runner.run(&.{ "tmux", "capture-pane", "-t", pane_target, "-p" }, .{}) catch return "");
+        const result = runner.captured(self.runner.run(&.{ self.tmux_path, "capture-pane", "-t", pane_target, "-p" }, .{}) catch return "");
         defer self.gpa.free(result.stderr);
         return result.stdout;
     }

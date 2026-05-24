@@ -9,12 +9,14 @@ test "direct session construction keeps dashboard selected" {
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(arena.allocator(), "zask-test-{d}", .{std.c.getpid()});
+    const client = tmuxClient(arena.allocator(), io, session);
 
-    try runDiscard(std.testing.allocator, io, &.{ build_options.tmux_path, "new-session", "-d", "-s", session, "-n", "dashboard", "-c", "/tmp", "sleep 60" });
-    defer runDiscard(std.testing.allocator, io, &.{ build_options.tmux_path, "kill-session", "-t", session }) catch {};
-    try runDiscard(std.testing.allocator, io, &.{ build_options.tmux_path, "new-window", "-d", "-a", "-t", try std.fmt.allocPrint(arena.allocator(), "{s}:dashboard", .{session}), "-n", "api", "-c", "/tmp", "sleep 60" });
-    try runDiscard(std.testing.allocator, io, &.{ build_options.tmux_path, "new-window", "-d", "-a", "-t", try std.fmt.allocPrint(arena.allocator(), "{s}:api", .{session}), "-n", "worker", "-c", "/tmp", "sleep 60" });
-    try runDiscard(std.testing.allocator, io, &.{ build_options.tmux_path, "select-window", "-t", try std.fmt.allocPrint(arena.allocator(), "{s}:dashboard", .{session}) });
+    client.killSession() catch {};
+    try client.newSession("dashboard", "/tmp", "sleep 60");
+    defer client.killSession() catch {};
+    try client.newWindowAfter("dashboard", "api", "/tmp", "sleep 60");
+    try client.newWindowAfter("api", "worker", "/tmp", "sleep 60");
+    try client.selectWindow("dashboard");
 
     const result = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "list-windows", "-t", session, "-F", "#{window_name}:#{window_active}" });
     defer std.testing.allocator.free(result.stdout);
@@ -32,22 +34,12 @@ test "placeholder windows stay alive for later commands" {
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(arena.allocator(), "zask-test-{d}-placeholder", .{std.c.getpid()});
+    const client = tmuxClient(arena.allocator(), io, session);
 
-    try runDiscard(std.testing.allocator, io, &.{ build_options.tmux_path, "new-session", "-d", "-s", session, "-n", "dashboard", "-c", "/tmp", "sleep 60" });
-    defer runDiscard(std.testing.allocator, io, &.{ build_options.tmux_path, "kill-session", "-t", session }) catch {};
-    try runDiscard(std.testing.allocator, io, &.{
-        build_options.tmux_path,
-        "new-window",
-        "-d",
-        "-a",
-        "-t",
-        try std.fmt.allocPrint(arena.allocator(), "{s}:dashboard", .{session}),
-        "-n",
-        "api",
-        "-c",
-        "/tmp",
-        try zask.zask_command.waitingPlaceholder(arena.allocator(), "api"),
-    });
+    client.killSession() catch {};
+    try client.newSession("dashboard", "/tmp", "sleep 60");
+    defer client.killSession() catch {};
+    try client.newWindowAfter("dashboard", "api", "/tmp", try zask.zask_command.waitingPlaceholder(arena.allocator(), "api"));
     try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake);
 
     const result = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "list-panes", "-t", try std.fmt.allocPrint(arena.allocator(), "{s}:api", .{session}), "-F", "#{pane_dead}|#{pane_current_command}" });
@@ -55,6 +47,15 @@ test "placeholder windows stay alive for later commands" {
     defer std.testing.allocator.free(result.stderr);
 
     try std.testing.expect(std.mem.startsWith(u8, result.stdout, "0|"));
+}
+
+fn tmuxClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) zask.tmux.Client {
+    return .{
+        .gpa = gpa,
+        .runner = .{ .gpa = gpa, .io = io },
+        .session = session,
+        .tmux_path = build_options.tmux_path,
+    };
 }
 
 fn run(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8) !std.process.RunResult {
