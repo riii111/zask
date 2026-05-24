@@ -1,6 +1,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const cli_context = @import("cli/context.zig");
+const version = @import("cli/version.zig");
 const root = @import("../root.zig");
 const config = @import("../model/config.zig");
 const dashboard_ui = @import("ui/dashboard.zig");
@@ -104,13 +105,11 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
         if (err == error.InvalidArguments) try printHelp(writer);
         return err;
     };
-    if (command == .version) {
-        return printVersion(writer);
-    }
+    var run_context: cli_context.Context = .{ .base = context, .parsed = parsed, .writer = writer };
+    if (command == .version) return runCommand(version, &run_context);
     if (command == .help) {
         return printHelp(writer);
     }
-    var run_context: cli_context.Context = .{ .base = context, .parsed = parsed, .writer = writer };
     const rt = try run_context.runtime();
     dispatchRuntimeCommand(rt, command, parsed.args, writer) catch |err| {
         if (err == error.InvalidArguments) try printHelp(writer);
@@ -145,10 +144,6 @@ fn printGreeting(writer: *std.Io.Writer) !void {
     try writer.print("{s}\n", .{root.greeting()});
 }
 
-fn printVersion(writer: *std.Io.Writer) !void {
-    try writer.print("zask {s}\n", .{build_options.version});
-}
-
 fn printHelp(writer: *std.Io.Writer) !void {
     try writer.writeAll("Usage: zask <command>\n\nCommands:\n");
     const usage_width = maxHelpUsageWidth();
@@ -160,6 +155,12 @@ fn printHelp(writer: *std.Io.Writer) !void {
         }
     }
     try writer.writeByte('\n');
+}
+
+fn runCommand(comptime module: type, context: *cli_context.Context) !void {
+    const opts = try module.Options.parse(context.parsed.args);
+    defer opts.deinit();
+    try module.run(context, opts);
 }
 
 fn maxHelpUsageWidth() usize {
