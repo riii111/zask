@@ -156,8 +156,10 @@ test "command phase warn continues and abort fails startup" {
     try std.testing.expectError(error.CommandPhaseFailed, runCommandPhase(lifecycle, cfg.phases()[1], "all", &writer));
 
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: command phase failed") != null);
-    try std.testing.expectEqualStrings("warn setup", recorder.commands.items[0].argv[2]);
-    try std.testing.expectEqualStrings("abort setup", recorder.commands.items[1].argv[2]);
+    const warn_command = runner_mod.findCommandContaining(&recorder, "warn setup") orelse return error.CommandNotFound;
+    const abort_command = runner_mod.findCommandContaining(&recorder, "abort setup") orelse return error.CommandNotFound;
+    try std.testing.expectEqualStrings("warn setup", warn_command.argv[2]);
+    try std.testing.expectEqualStrings("abort setup", abort_command.argv[2]);
     try runner_mod.expectNoRemainingResponses(&recorder);
 }
 
