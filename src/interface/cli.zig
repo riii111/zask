@@ -5,6 +5,7 @@ const cli_context = @import("cli/context.zig");
 const detach = @import("cli/detach.zig");
 const follow = @import("cli/follow.zig");
 const help = @import("cli/help.zig");
+const hello = @import("cli/hello.zig");
 const list = @import("cli/list.zig");
 const logs = @import("cli/logs.zig");
 const status = @import("cli/status.zig");
@@ -121,6 +122,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
     if (command == .detach) return runCommand(detach, &run_context);
     if (command == .logs) return runCommand(logs, &run_context);
     if (command == .follow) return runCommand(follow, &run_context);
+    if (command == .hello) return runCommand(hello, &run_context);
     const rt = try run_context.runtime();
     dispatchRuntimeCommand(rt, command, parsed.args, writer) catch |err| {
         if (err == error.InvalidArguments) try printHelp(writer);
@@ -137,7 +139,7 @@ fn dispatchRuntimeCommand(rt: Runtime, command: Command, args: []const []const u
         .detach => unreachable,
         .logs => unreachable,
         .follow => unreachable,
-        .hello => rt.hello(try resolveHelloProfile(rt.cfg, args), writer),
+        .hello => unreachable,
         .bye => rt.bye(writer),
         .kill => rt.kill(writer),
         .re => rt.re(writer),
@@ -169,9 +171,15 @@ fn printHelp(writer: *std.Io.Writer) !void {
 }
 
 fn runCommand(comptime module: type, context: *cli_context.Context) !void {
-    const opts = try module.Options.parse(context.parsed.args);
+    const opts = module.Options.parse(context.parsed.args) catch |err| {
+        if (err == error.InvalidArguments) try context.help();
+        return err;
+    };
     defer opts.deinit();
-    try module.run(context, opts);
+    module.run(context, opts) catch |err| {
+        if (err == error.InvalidArguments) try context.help();
+        return err;
+    };
 }
 
 fn maxHelpUsageWidth() usize {
@@ -264,12 +272,6 @@ fn normalizeTarget(target: []const u8) []const u8 {
 
 fn parseSizeArg(arg: []const u8) !u16 {
     return std.fmt.parseUnsigned(u16, arg, 10) catch return error.InvalidArguments;
-}
-
-fn resolveHelloProfile(cfg: config.Config, args: []const []const u8) ![]const u8 {
-    if (args.len == 0) return "all";
-    if (std.mem.eql(u8, args[0], "--docker")) return "docker";
-    return cfg.resolveStartProfileOption(args[0]) orelse error.InvalidArguments;
 }
 
 // -----------------------------------------------------------------------------
@@ -397,46 +399,6 @@ test "rejects invalid command arity" {
     for (cases) |case| {
         try std.testing.expectError(error.InvalidArguments, validateArity(case.command, case.args));
     }
-}
-
-test "accepts hello profile aliases" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": [],
-        \\  "start_profiles": {"api": {"profile": "backend"}}
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-
-    const cases = [_]struct {
-        args: []const []const u8,
-        expected: []const u8,
-    }{
-        .{ .args = &.{}, .expected = "all" },
-        .{ .args = &.{"--docker"}, .expected = "docker" },
-        .{ .args = &.{"--api"}, .expected = "backend" },
-    };
-    for (cases) |case| {
-        try std.testing.expectEqualStrings(case.expected, try resolveHelloProfile(cfg, case.args));
-    }
-}
-
-test "rejects unknown hello profile" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": [],
-        \\  "start_profiles": {"api": {"profile": "backend"}}
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-
-    try std.testing.expectError(error.InvalidArguments, resolveHelloProfile(cfg, &.{"--missing"}));
 }
 
 test "normalizes docker target aliases" {
