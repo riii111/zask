@@ -71,9 +71,9 @@ const command_specs = [_]CommandSpec{
     .{ .command = .close, .names = &.{"close"}, .usage = "close", .description = "Stop resources and close workspace" },
     .{ .command = .re, .names = &.{"re"}, .usage = "re", .description = "Restart session" },
     .{ .command = .attach, .names = &.{"attach"}, .usage = "attach", .description = "Attach to existing workspace" },
-    .{ .command = .start, .names = &.{"start"}, .usage = "start <--all|docker|name>", .description = "Start resources in existing workspace" },
-    .{ .command = .stop, .names = &.{"stop"}, .usage = "stop <--all|docker|name>", .description = "Stop resources, keeping workspace open" },
-    .{ .command = .restart, .names = &.{"restart"}, .usage = "restart <docker|name>", .description = "Restart service, group, or docker" },
+    .{ .command = .start, .names = &.{"start"}, .usage = "start <--all|svc|group|docker>", .description = "Start resources in existing workspace" },
+    .{ .command = .stop, .names = &.{"stop"}, .usage = "stop <--all|svc|group|docker>", .description = "Stop resources, keeping workspace open" },
+    .{ .command = .restart, .names = &.{"restart"}, .usage = "restart <svc|group|docker>", .description = "Restart service, group, or docker" },
     .{ .command = .status, .names = &.{"status"}, .usage = "status", .description = "Show service state" },
     .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window" },
     .{ .command = .version, .names = &.{"version"}, .usage = "version", .description = "Print zask version", .global = true },
@@ -131,7 +131,15 @@ fn printGreeting(writer: *std.Io.Writer) !void {
 }
 
 fn printHelp(writer: *std.Io.Writer) !void {
-    try writer.writeAll("Usage: zask <command>\n\nCommands:\n");
+    try writer.writeAll(
+        \\Usage:
+        \\  zask <project> <command>
+        \\  zask --config <file> <command>
+        \\  <project-alias> <command>
+        \\
+        \\Commands:
+        \\
+    );
     const usage_width = maxHelpUsageWidth();
     for (command_specs) |spec| {
         if (!spec.show_in_help) continue;
@@ -257,7 +265,12 @@ test "cli.help: prints public commands" {
     var writer: std.Io.Writer = .fixed(&buffer);
 
     try runWithArgs(.{ .gpa = std.testing.allocator }, &.{"help"}, &writer);
-    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
+    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage:\n  zask <project> <command>"));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "zask --config <file> <command>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "<project-alias> <command>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "start <--all|svc|group|docker>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "stop <--all|svc|group|docker>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "restart <svc|group|docker>") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "attach | detach") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "open [--docker|--<profile>]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "hello") == null);
@@ -273,7 +286,7 @@ test "cli.projectAlias: prints usage without command" {
     var writer: std.Io.Writer = .fixed(&buffer);
 
     try runWithArgs(.{ .gpa = std.testing.allocator, .argv0 = "sample" }, &.{}, &writer);
-    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
+    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage:\n  zask <project> <command>"));
 }
 
 test "cli.parseArgs: accepts project command form" {
@@ -314,7 +327,7 @@ test "cli.runWithArgs: prints usage for invalid arity" {
     var writer: std.Io.Writer = .fixed(&buffer);
 
     try std.testing.expectError(error.InvalidArguments, runWithArgs(.{ .gpa = std.testing.allocator }, &.{ "version", "extra" }, &writer));
-    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
+    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage:\n  zask <project> <command>"));
 }
 
 test "cli.runWithArgs: prints usage for incomplete config" {
@@ -322,7 +335,7 @@ test "cli.runWithArgs: prints usage for incomplete config" {
     var writer: std.Io.Writer = .fixed(&buffer);
 
     try std.testing.expectError(error.InvalidArguments, runWithArgs(.{ .gpa = std.testing.allocator }, &.{"--config"}, &writer));
-    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
+    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage:\n  zask <project> <command>"));
 }
 
 test "cli.open: prints usage for invalid profile" {
@@ -340,5 +353,5 @@ test "cli.open: prints usage for invalid profile" {
         .io = threaded.io(),
         .environ = &environ,
     }, &.{ "--config", "testdata/synthetic.json", "open", "--missing" }, &writer));
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Usage: zask <command>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Usage:\n  zask <project> <command>") != null);
 }
