@@ -15,13 +15,13 @@ pub const Compose = struct {
     }
 
     pub fn observe(self: Compose) observations.ComposeObservation {
-        const result = self.runningServices() catch return .{ .state = .unavailable };
+        const result = self.runningServices() catch return observations.ComposeObservation.empty(.unavailable);
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
-        if (result.term != .exited or result.term.exited != 0) return .{ .state = .unavailable };
-        const services = parseServices(self.gpa, result.stdout) catch return .{ .state = .unavailable };
-        if (services.len == 0) return .{ .state = .empty, .services = services };
-        return .{ .state = .running, .services = services, .owned = true };
+        if (result.term != .exited or result.term.exited != 0) return observations.ComposeObservation.empty(.unavailable);
+        const services = parseServices(self.gpa, result.stdout) catch return observations.ComposeObservation.empty(.unavailable);
+        if (services.len == 0) return observations.ComposeObservation.fromOwnedServices(.empty, services);
+        return observations.ComposeObservation.fromOwnedServices(.running, services);
     }
 
     pub fn runningServices(self: Compose) !std.process.RunResult {

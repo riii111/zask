@@ -105,13 +105,13 @@ pub const Client = struct {
             error.WindowMissing => return observations.PaneObservation.empty(.window_missing),
             else => return observations.PaneObservation.empty(.tmux_unavailable),
         };
-        if (info.dead) return info.toObservation(.dead);
-        const run_result = self.runner.run(&.{ "pgrep", "-P", info.pid }, .{}) catch return info.toObservation(.tmux_unavailable);
+        if (info.dead) return info.consumeIntoObservation(.dead);
+        const run_result = self.runner.run(&.{ "pgrep", "-P", info.pid }, .{}) catch return info.consumeIntoObservation(.tmux_unavailable);
         const result = runner.captured(run_result);
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
         const state: observations.PaneState = if (std.mem.trim(u8, result.stdout, " \t\r\n").len > 0) .busy else .idle;
-        return info.toObservation(state);
+        return info.consumeIntoObservation(state);
     }
 
     pub fn paneInfo(self: Client, window: []const u8) !PaneInfo {
@@ -213,8 +213,8 @@ pub const PaneInfo = struct {
         gpa.free(self.command);
     }
 
-    fn toObservation(self: PaneInfo, state: observations.PaneState) observations.PaneObservation {
-        return observations.PaneObservation.fromOwned(state, self.exit_code, self.pid, self.command);
+    fn consumeIntoObservation(self: PaneInfo, state: observations.PaneState) observations.PaneObservation {
+        return observations.PaneObservation.fromOwnedFields(state, self.exit_code, self.pid, self.command);
     }
 };
 
@@ -371,6 +371,55 @@ test "paneRunning rejects dead panes and panes without children" {
     const idle_run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &idle_recorder };
     const idle_client = Client{ .gpa = std.testing.allocator, .runner = idle_run, .session = "demo" };
     try std.testing.expect(!idle_client.paneRunning("api"));
+}
+
+test "observePane returns window missing when pane info command fails" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("", "no such window", .{ .exited = 1 });
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+    const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
+
+    const observation = client.observePane("api");
+    defer observation.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(observations.PaneState.window_missing, observation.state);
+    try std.testing.expectEqualStrings("", observation.exit_code);
+    try std.testing.expectEqualStrings("", observation.pid);
+    try std.testing.expectEqualStrings("", observation.command);
+}
+
+test "observePane returns tmux unavailable when pane info cannot be captured" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    recorder.term = .{ .signal = std.c.SIG.TERM };
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+    const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
+
+    const observation = client.observePane("api");
+    defer observation.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(observations.PaneState.tmux_unavailable, observation.state);
+    try std.testing.expectEqualStrings("", observation.exit_code);
+    try std.testing.expectEqualStrings("", observation.pid);
+    try std.testing.expectEqualStrings("", observation.command);
+}
+
+test "observePane returns dead pane fields without checking children" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("1|130|12345|node\n", "", .{ .exited = 0 });
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+    const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
+
+    const observation = client.observePane("api");
+    defer observation.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(observations.PaneState.dead, observation.state);
+    try std.testing.expectEqualStrings("130", observation.exit_code);
+    try std.testing.expectEqualStrings("12345", observation.pid);
+    try std.testing.expectEqualStrings("node", observation.command);
+    try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
 }
 
 test "showOption trims empty output to null" {
