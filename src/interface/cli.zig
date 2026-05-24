@@ -3,13 +3,10 @@ const attach = @import("cli/attach.zig");
 const bye = @import("cli/bye.zig");
 const cli_context = @import("cli/context.zig");
 const dashboard = @import("cli/dashboard.zig");
-const detach = @import("cli/detach.zig");
 const exec = @import("cli/exec.zig");
-const follow = @import("cli/follow.zig");
 const help = @import("cli/help.zig");
 const hello = @import("cli/hello.zig");
 const kill = @import("cli/kill.zig");
-const list = @import("cli/list.zig");
 const logs = @import("cli/logs.zig");
 const monitor = @import("cli/monitor.zig");
 const preview_list = @import("cli/preview_list.zig");
@@ -28,12 +25,9 @@ const ParsedArgs = cli_context.ParsedArgs;
 const Command = enum {
     version,
     help,
-    list,
     status,
     attach,
-    detach,
     logs,
-    follow,
     hello,
     bye,
     kill,
@@ -50,12 +44,9 @@ const Command = enum {
         return switch (self) {
             .version => runCommand(version, context),
             .help => runCommand(help, context),
-            .list => runCommand(list, context),
             .status => runCommand(status, context),
             .attach => runCommand(attach, context),
-            .detach => runCommand(detach, context),
             .logs => runCommand(logs, context),
-            .follow => runCommand(follow, context),
             .hello => runCommand(hello, context),
             .bye => runCommand(bye, context),
             .kill => runCommand(kill, context),
@@ -77,6 +68,7 @@ const CommandSpec = struct {
     usage: []const u8 = "",
     description: []const u8 = "",
     global: bool = false,
+    internal: bool = false,
     show_in_help: bool = true,
 };
 
@@ -84,22 +76,19 @@ const command_specs = [_]CommandSpec{
     .{ .command = .hello, .names = &.{"hello"}, .usage = "hello [--docker|--<profile>]", .description = "Start session + services + attach" },
     .{ .command = .bye, .names = &.{"bye"}, .usage = "bye", .description = "Graceful shutdown" },
     .{ .command = .re, .names = &.{"re"}, .usage = "re", .description = "Restart session" },
-    .{ .command = .attach, .names = &.{"attach"}, .usage = "attach | detach | kill", .description = "Manage tmux session" },
-    .{ .command = .detach, .names = &.{"detach"}, .show_in_help = false },
+    .{ .command = .attach, .names = &.{"attach"}, .usage = "attach | kill", .description = "Manage tmux session" },
     .{ .command = .kill, .names = &.{"kill"}, .show_in_help = false },
     .{ .command = .up, .names = &.{"up"}, .usage = "up [--all|docker|name]", .description = "Start service, group, docker, or all" },
     .{ .command = .stop, .names = &.{"stop"}, .usage = "stop [--all|docker|name]", .description = "Stop service, group, docker, or all" },
     .{ .command = .restart, .names = &.{"restart"}, .usage = "restart <docker|name>", .description = "Restart service, group, or docker" },
-    .{ .command = .status, .names = &.{"status"}, .usage = "status | list", .description = "Show service state or config services" },
-    .{ .command = .list, .names = &.{"list"}, .show_in_help = false },
+    .{ .command = .status, .names = &.{"status"}, .usage = "status", .description = "Show service state" },
     .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window" },
-    .{ .command = .follow, .names = &.{"follow"}, .usage = "follow <service>", .description = "Tail captured log in tmux popup" },
     .{ .command = .exec, .names = &.{"exec"}, .usage = "exec <container> [--shell]", .description = "Enter Docker container" },
     .{ .command = .version, .names = &.{"version"}, .usage = "version", .description = "Print zask version", .global = true },
     .{ .command = .help, .names = &.{ "help", "--help", "-h" }, .usage = "help", .description = "Print this help", .global = true },
-    .{ .command = .dashboard, .names = &.{"dashboard"}, .show_in_help = false },
-    .{ .command = .monitor, .names = &.{"monitor"}, .show_in_help = false },
-    .{ .command = .preview_list, .names = &.{"preview-list"}, .show_in_help = false },
+    .{ .command = .dashboard, .names = &.{"dashboard"}, .internal = true, .show_in_help = false },
+    .{ .command = .monitor, .names = &.{"monitor"}, .internal = true, .show_in_help = false },
+    .{ .command = .preview_list, .names = &.{"preview-list"}, .internal = true, .show_in_help = false },
 };
 
 pub fn run(init: std.process.Init) !void {
@@ -136,7 +125,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
         if (err == error.InvalidArguments) try printHelp(writer);
         return err;
     };
-    const command = parseCommand(parsed.command) orelse return error.UnknownCommand;
+    const command = parseCommand(parsed.command, parsed.config_path != null) orelse return error.UnknownCommand;
     var run_context: cli_context.Context = .{ .base = context, .parsed = parsed, .writer = writer, .print_help = printHelp };
     try command.run(&run_context);
 }
@@ -207,8 +196,9 @@ fn isGlobalCommand(command: []const u8) bool {
     return false;
 }
 
-fn parseCommand(command: []const u8) ?Command {
+fn parseCommand(command: []const u8, allow_internal: bool) ?Command {
     for (command_specs) |spec| {
+        if (spec.internal and !allow_internal) continue;
         for (spec.names) |name| {
             if (std.mem.eql(u8, command, name)) return spec.command;
         }
@@ -228,11 +218,17 @@ test "command metadata parses aliases and global commands" {
         .{ .input = "-h", .expected = .help },
         .{ .input = "--help", .expected = .help },
         .{ .input = "hello", .expected = .hello },
+        .{ .input = "follow", .expected = null },
+        .{ .input = "list", .expected = null },
+        .{ .input = "dashboard", .expected = null },
+        .{ .input = "preview-list", .expected = null },
         .{ .input = "render-session", .expected = null },
     };
     for (command_cases) |case| {
-        try std.testing.expectEqual(case.expected, parseCommand(case.input));
+        try std.testing.expectEqual(case.expected, parseCommand(case.input, false));
     }
+    try std.testing.expectEqual(Command.dashboard, parseCommand("dashboard", true));
+    try std.testing.expectEqual(Command.preview_list, parseCommand("preview-list", true));
 
     const global_cases = [_]struct {
         input: []const u8,
@@ -240,7 +236,7 @@ test "command metadata parses aliases and global commands" {
     }{
         .{ .input = "--help", .expected = true },
         .{ .input = "version", .expected = true },
-        .{ .input = "list", .expected = false },
+        .{ .input = "status", .expected = false },
     };
     for (global_cases) |case| {
         try std.testing.expectEqual(case.expected, isGlobalCommand(case.input));
@@ -261,6 +257,7 @@ test "help prints usage" {
 
     try runWithArgs(.{ .gpa = std.testing.allocator }, &.{"help"}, &writer);
     try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "follow <service>") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "render-session") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "preview-list") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "exec <container>") != null);
@@ -275,22 +272,22 @@ test "project alias without arguments prints usage" {
 }
 
 test "parses project command form" {
-    const parsed = try parseArgs(.{ .gpa = std.testing.allocator }, &.{ "demo", "list" });
+    const parsed = try parseArgs(.{ .gpa = std.testing.allocator }, &.{ "demo", "status" });
     try std.testing.expectEqualStrings("demo", parsed.project.?);
-    try std.testing.expectEqualStrings("list", parsed.command);
+    try std.testing.expectEqualStrings("status", parsed.command);
 }
 
 test "parses explicit config command form" {
-    const parsed = try parseArgs(.{ .gpa = std.testing.allocator }, &.{ "--config", "demo.json", "list" });
+    const parsed = try parseArgs(.{ .gpa = std.testing.allocator }, &.{ "--config", "demo.json", "status" });
     try std.testing.expectEqualStrings("demo.json", parsed.config_path.?);
-    try std.testing.expectEqualStrings("list", parsed.command);
+    try std.testing.expectEqualStrings("status", parsed.command);
     try std.testing.expectEqual(@as(usize, 0), parsed.args.len);
 }
 
 test "project alias accepts explicit config command form" {
-    const parsed = try parseArgs(.{ .gpa = std.testing.allocator, .argv0 = "sample" }, &.{ "--config", "demo.json", "follow", "api" });
+    const parsed = try parseArgs(.{ .gpa = std.testing.allocator, .argv0 = "sample" }, &.{ "--config", "demo.json", "logs", "api" });
     try std.testing.expectEqualStrings("demo.json", parsed.config_path.?);
-    try std.testing.expectEqualStrings("follow", parsed.command);
+    try std.testing.expectEqualStrings("logs", parsed.command);
     try std.testing.expectEqualStrings("api", parsed.args[0]);
     try std.testing.expect(parsed.project == null);
 }
@@ -304,7 +301,7 @@ test "parses argv0 project alias form" {
 test "rejects incomplete config and project command forms" {
     try std.testing.expectError(error.InvalidArguments, parseArgs(.{ .gpa = std.testing.allocator }, &.{"--config"}));
     try std.testing.expectError(error.InvalidArguments, parseArgs(.{ .gpa = std.testing.allocator }, &.{ "--config", "demo.json" }));
-    try std.testing.expectError(error.ProjectRequired, parseArgs(.{ .gpa = std.testing.allocator }, &.{"list"}));
+    try std.testing.expectError(error.ProjectRequired, parseArgs(.{ .gpa = std.testing.allocator }, &.{"status"}));
 }
 
 test "invalid command arity prints usage before returning error" {

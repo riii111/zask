@@ -104,7 +104,6 @@ const launcher_commands = [_]LauncherCommand{
     .{ .usage = "stop <svc|group>", .description = "Stop a service or group" },
     .{ .usage = "restart <svc|group>", .description = "Restart a service or group" },
     .{ .usage = "logs <svc>", .description = "Jump to window" },
-    .{ .usage = "follow <svc>", .description = "Tail log in nvim" },
 };
 
 fn writeCommandHelp(writer: *std.Io.Writer, project: []const u8) !void {
