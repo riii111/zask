@@ -112,10 +112,27 @@ fn validateSessionId(value: []const u8) !void {
     }
 }
 
-test "validates log session ids" {
-    try validateSessionId("20260523_010203");
+test "log entry comparison prefers newer mtime" {
     try std.testing.expect(logEntryNewer({}, .{ .name = "new", .mtime = 2 }, .{ .name = "old", .mtime = 1 }));
-    try std.testing.expectError(error.InvalidLogSessionId, validateSessionId("../bad"));
-    try std.testing.expectError(error.InvalidLogSessionId, validateSessionId("bad name"));
-    try std.testing.expectError(error.InvalidLogSessionId, validateSessionId(""));
+}
+
+test "session id accepts timestamp shaped digits and underscore" {
+    const cases = [_][]const u8{
+        "20260523_010203",
+        "1_2",
+    };
+    for (cases) |case| {
+        try validateSessionId(case);
+    }
+}
+
+test "session id rejects empty pathlike and spaced input" {
+    const cases = [_][]const u8{
+        "",
+        "../bad",
+        "bad name",
+    };
+    for (cases) |case| {
+        try std.testing.expectError(error.InvalidLogSessionId, validateSessionId(case));
+    }
 }

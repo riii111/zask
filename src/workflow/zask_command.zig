@@ -37,16 +37,24 @@ test "invoke quotes zask and config paths" {
     try std.testing.expectEqualStrings("'/tmp/zask path' --config '/tmp/demo config.json' dashboard", command);
 }
 
-test "waiting placeholder includes display label" {
-    const command = try waitingPlaceholder(std.testing.allocator, "Docker Services");
-    defer std.testing.allocator.free(command);
+test "waiting placeholder formats and quotes display label" {
+    const cases = [_]struct {
+        label: []const u8,
+        expected: []const u8,
+    }{
+        .{
+            .label = "Docker Services",
+            .expected = "printf '=== %s ===\\nWaiting for start command...\\n' 'Docker Services'; exec \"${SHELL:-sh}\"",
+        },
+        .{
+            .label = "bad'$(touch nope)",
+            .expected = "printf '=== %s ===\\nWaiting for start command...\\n' 'bad'\\''$(touch nope)'; exec \"${SHELL:-sh}\"",
+        },
+    };
 
-    try std.testing.expectEqualStrings("printf '=== %s ===\\nWaiting for start command...\\n' 'Docker Services'; exec \"${SHELL:-sh}\"", command);
-}
-
-test "waiting placeholder quotes display label" {
-    const command = try waitingPlaceholder(std.testing.allocator, "bad'$(touch nope)");
-    defer std.testing.allocator.free(command);
-
-    try std.testing.expectEqualStrings("printf '=== %s ===\\nWaiting for start command...\\n' 'bad'\\''$(touch nope)'; exec \"${SHELL:-sh}\"", command);
+    for (cases) |case| {
+        const command = try waitingPlaceholder(std.testing.allocator, case.label);
+        defer std.testing.allocator.free(command);
+        try std.testing.expectEqualStrings(case.expected, command);
+    }
 }

@@ -93,17 +93,19 @@ fn testLifecycle(gpa: std.mem.Allocator, run: runner_mod.Runner, cfg: config.Con
 test "classifies lifecycle phase kinds" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(),
-        \\[
-        \\  {"type":"docker"},
-        \\  {"type":"command"},
-        \\  {"groups":["api"]}
-        \\]
-    , .{});
+    const cases = [_]struct {
+        json: []const u8,
+        expected: PhaseKind,
+    }{
+        .{ .json = "{\"type\":\"docker\"}", .expected = .docker },
+        .{ .json = "{\"type\":\"command\"}", .expected = .command },
+        .{ .json = "{\"groups\":[\"api\"]}", .expected = .services },
+    };
 
-    try std.testing.expectEqual(PhaseKind.docker, phaseKind(parsed.array.items[0]));
-    try std.testing.expectEqual(PhaseKind.command, phaseKind(parsed.array.items[1]));
-    try std.testing.expectEqual(PhaseKind.services, phaseKind(parsed.array.items[2]));
+    for (cases) |case| {
+        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), case.json, .{});
+        try std.testing.expectEqual(case.expected, phaseKind(parsed));
+    }
 }
 
 test "precheck failure prints hint and preserves abort semantics" {
