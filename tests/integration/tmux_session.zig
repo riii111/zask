@@ -2,6 +2,9 @@ const std = @import("std");
 const zask = @import("zask");
 const build_options = @import("tmux_integration_options");
 
+const pane_ready_attempts = 40;
+const pane_ready_interval = std.Io.Duration.fromMilliseconds(50);
+
 test "direct session construction keeps dashboard selected" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -12,7 +15,7 @@ test "direct session construction keeps dashboard selected" {
     const client = tmuxClient(arena.allocator(), io, session);
 
     client.killSession() catch {};
-    try client.newSession("dashboard", "/tmp", "sleep 60");
+    try client.newSession("dashboard", "/tmp", try zask.zask_command.waitingPlaceholder(arena.allocator(), "Dashboard"));
     defer client.killSession() catch {};
     try client.newWindowAfter("dashboard", "api", "/tmp", "sleep 60");
     try client.newWindowAfter("api", "worker", "/tmp", "sleep 60");
@@ -37,16 +40,11 @@ test "placeholder windows stay alive for later commands" {
     const client = tmuxClient(arena.allocator(), io, session);
 
     client.killSession() catch {};
-    try client.newSession("dashboard", "/tmp", "sleep 60");
+    try client.newSession("dashboard", "/tmp", try zask.zask_command.waitingPlaceholder(arena.allocator(), "Dashboard"));
     defer client.killSession() catch {};
     try client.newWindowAfter("dashboard", "api", "/tmp", try zask.zask_command.waitingPlaceholder(arena.allocator(), "api"));
-    try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake);
 
-    const result = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "list-panes", "-t", try std.fmt.allocPrint(arena.allocator(), "{s}:api", .{session}), "-F", "#{pane_dead}|#{pane_current_command}" });
-    defer std.testing.allocator.free(result.stdout);
-    defer std.testing.allocator.free(result.stderr);
-
-    try std.testing.expect(std.mem.startsWith(u8, result.stdout, "0|"));
+    try expectPaneAlive(std.testing.allocator, io, try std.fmt.allocPrint(arena.allocator(), "{s}:api", .{session}));
 }
 
 fn tmuxClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) zask.tmux.Client {
@@ -72,8 +70,14 @@ fn run(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8) !std.proces
     return result;
 }
 
-fn runDiscard(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8) !void {
-    const result = try run(gpa, io, argv);
-    gpa.free(result.stdout);
-    gpa.free(result.stderr);
+fn expectPaneAlive(gpa: std.mem.Allocator, io: std.Io, target: []const u8) !void {
+    for (0..pane_ready_attempts) |_| {
+        const result = try run(gpa, io, &.{ build_options.tmux_path, "list-panes", "-t", target, "-F", "#{pane_dead}|#{pane_current_command}" });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+
+        if (std.mem.startsWith(u8, result.stdout, "0|")) return;
+        try std.Io.sleep(io, pane_ready_interval, .awake);
+    }
+    return error.PaneNotAlive;
 }
