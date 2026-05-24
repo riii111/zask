@@ -13,6 +13,7 @@ const kill = @import("cli/kill.zig");
 const list = @import("cli/list.zig");
 const logs = @import("cli/logs.zig");
 const monitor = @import("cli/monitor.zig");
+const preview_list = @import("cli/preview_list.zig");
 const re = @import("cli/re.zig");
 const restart = @import("cli/restart.zig");
 const status = @import("cli/status.zig");
@@ -140,6 +141,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
     if (command == .exec) return runCommand(exec, &run_context);
     if (command == .dashboard) return runCommand(dashboard, &run_context);
     if (command == .monitor) return runCommand(monitor, &run_context);
+    if (command == .preview_list) return runCommand(preview_list, &run_context);
     const rt = try run_context.runtime();
     dispatchRuntimeCommand(rt, command, parsed.args, writer) catch |err| {
         if (err == error.InvalidArguments) try printHelp(writer);
@@ -148,6 +150,8 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
 }
 
 fn dispatchRuntimeCommand(rt: Runtime, command: Command, args: []const []const u8, writer: *std.Io.Writer) !void {
+    _ = rt;
+    _ = args;
     _ = writer;
     return switch (command) {
         .version, .help => unreachable,
@@ -167,7 +171,7 @@ fn dispatchRuntimeCommand(rt: Runtime, command: Command, args: []const []const u
         .exec => unreachable,
         .dashboard => unreachable,
         .monitor => unreachable,
-        .preview_list => rt.previewList(args[0], try parseSizeArg(args[1]), try parseSizeArg(args[2])),
+        .preview_list => unreachable,
     };
 }
 
@@ -276,10 +280,6 @@ fn requiredTarget(args: []const []const u8) ![]const u8 {
 fn normalizeTarget(target: []const u8) []const u8 {
     if (std.mem.eql(u8, target, "--docker")) return "docker";
     return target;
-}
-
-fn parseSizeArg(arg: []const u8) !u16 {
-    return std.fmt.parseUnsigned(u16, arg, 10) catch return error.InvalidArguments;
 }
 
 // -----------------------------------------------------------------------------
