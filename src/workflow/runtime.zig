@@ -10,6 +10,7 @@ const paths = @import("../platform/paths.zig");
 const proc_runner = @import("../platform/runner.zig");
 const shell = @import("../platform/shell.zig");
 const tmux_client = @import("../platform/tmux.zig");
+const tmux_options = @import("../model/tmux_options.zig");
 const tmux_setup = @import("tmux_setup.zig");
 const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
@@ -126,8 +127,13 @@ pub const Runtime = struct {
             return;
         }
         const tx = self.tmux();
-        try self.createSessionSkeleton();
+        try self.createBaseSession();
         errdefer tx.killSession() catch {};
+        try self.buildDashboardWindow();
+        const previous_window = try self.appendServiceWindows();
+        defer self.gpa.free(previous_window);
+        try self.appendDockerWindow(previous_window);
+        try self.focusDashboard();
         try tmux_setup.bindControlKeys(self.gpa, tx);
         try self.logSession().init();
         try self.setupPipePane(writer);
@@ -253,34 +259,56 @@ pub const Runtime = struct {
         return lock.Lock.acquire(self.gpa, self.runner(), try self.cfg.projectName(), try paths.runtimeBase(self.gpa, self.environ));
     }
 
-    fn createSessionSkeleton(self: Runtime) !void {
+    fn createBaseSession(self: Runtime) !void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const scratch = arena.allocator();
         const tx = self.tmux();
         const root = try self.cfg.projectRoot(scratch);
-        try tx.newSession("dashboard", root, try zask_command.invoke(scratch, self.zask_path, self.config_path, "dashboard"));
-        errdefer tx.killSession() catch {};
-        try tmux_setup.applySessionOptions(scratch, tx, .{
-            .project = try self.cfg.projectName(),
-            .zask_path = self.zask_path,
-            .config_path = self.config_path,
-        });
-        try tx.splitWindow("dashboard", root, try zask_command.invoke(scratch, self.zask_path, self.config_path, "monitor"));
-        try tx.setWindowOption("dashboard", "main-pane-width", "50%");
-        try tx.selectLayout("dashboard", "main-vertical");
+        try tx.newSession(tmux_options.dashboard_window, root, try zask_command.invoke(scratch, self.zask_path, self.config_path, "dashboard"));
+        try tmux_setup.applySessionOptions(scratch, tx, try self.cfg.projectName(), self.zask_path, self.config_path);
+    }
 
-        var previous_window: []const u8 = "dashboard";
+    fn buildDashboardWindow(self: Runtime) !void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        const tx = self.tmux();
+        const root = try self.cfg.projectRoot(scratch);
+        try tx.splitWindow(tmux_options.dashboard_window, root, try zask_command.invoke(scratch, self.zask_path, self.config_path, "monitor"));
+        try tx.setWindowOption(tmux_options.dashboard_window, tmux_options.dashboard_pane_width_option, tmux_options.dashboard_pane_width);
+        try tx.selectLayout(tmux_options.dashboard_window, tmux_options.dashboard_layout);
+    }
+
+    fn appendServiceWindows(self: Runtime) ![]const u8 {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        const tx = self.tmux();
+        var previous_window = try self.gpa.dupe(u8, tmux_options.dashboard_window);
+        errdefer self.gpa.free(previous_window);
         for (try self.cfg.services()) |service| {
-            const name = try config.Config.serviceName(service);
+            const name = try self.gpa.dupe(u8, try config.Config.serviceName(service));
+            errdefer self.gpa.free(name);
             try tx.newWindowAfter(previous_window, name, try self.cfg.serviceDir(scratch, service), try zask_command.waitingPlaceholder(scratch, name));
+            self.gpa.free(previous_window);
             previous_window = name;
         }
+        return previous_window;
+    }
 
+    fn appendDockerWindow(self: Runtime, previous_window: []const u8) !void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        const tx = self.tmux();
         if (self.cfg.dockerEnabled()) {
-            try tx.newWindowAfter(previous_window, "docker", try self.cfg.dockerDir(scratch), try zask_command.waitingPlaceholder(scratch, "Docker Services"));
+            try tx.newWindowAfter(previous_window, tmux_options.docker_window, try self.cfg.dockerDir(scratch), try zask_command.waitingPlaceholder(scratch, tmux_options.docker_label));
         }
-        try tx.selectWindow("dashboard");
+    }
+
+    fn focusDashboard(self: Runtime) !void {
+        try self.tmux().selectWindow(tmux_options.dashboard_window);
     }
 
     fn setupPipePane(self: Runtime, writer: *std.Io.Writer) !void {
@@ -524,7 +552,7 @@ test "attach from tmux switches client without mutating window sizes" {
     try std.testing.expectEqualStrings("switch-client", recorder.commands.items[0].argv[1]);
 }
 
-test "session skeleton creates dashboard service and docker windows" {
+test "new session setup creates dashboard service and docker windows" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -540,7 +568,12 @@ test "session skeleton creates dashboard service and docker windows" {
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     var runtime = testRuntime(arena.allocator(), run, cfg);
 
-    try runtime.createSessionSkeleton();
+    try runtime.createBaseSession();
+    try runtime.buildDashboardWindow();
+    const previous_window = try runtime.appendServiceWindows();
+    defer arena.allocator().free(previous_window);
+    try runtime.appendDockerWindow(previous_window);
+    try runtime.focusDashboard();
 
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "tmuxp") == null);
     try proc_runner.expectCommandContaining(&recorder, "new-session");

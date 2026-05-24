@@ -4,23 +4,17 @@ const proc_runner = @import("../platform/runner.zig");
 const tmux_client = @import("../platform/tmux.zig");
 const tmux_options = @import("../model/tmux_options.zig");
 
-pub const SessionOptions = struct {
-    project: []const u8,
-    zask_path: []const u8,
-    config_path: []const u8,
-};
-
-pub fn applySessionOptions(gpa: std.mem.Allocator, tx: tmux_client.Client, opts: SessionOptions) !void {
+pub fn applySessionOptions(gpa: std.mem.Allocator, tx: tmux_client.Client, project: []const u8, zask_path: []const u8, config_path: []const u8) !void {
     try tx.setOption("prefix", "C-q");
-    try tx.setOption("status-left", try std.fmt.allocPrint(gpa, "[{s}] Ctrl+q w:list | f:follow | ':number | z:zoom | [:scroll | d:detach ", .{opts.project}));
+    try tx.setOption("status-left", try std.fmt.allocPrint(gpa, "[{s}] Ctrl+q w:list | f:follow | ':number | z:zoom | [:scroll | d:detach ", .{project}));
     try tx.setOption("status-left-length", "80");
     try tx.setOption("status-right", "");
     try tx.setOption("remain-on-exit", "on");
     try tx.setOption("automatic-rename", "off");
     try tx.setOption("status-format[0]", "#[align=left]#{T;=/#{status-left-length}:status-left}#[align=right]#{T;=/#{status-right-length}:status-right}");
     try tx.setOption(tmux_options.dash_mode, "all");
-    try tx.setOption(tmux_options.zask_path, opts.zask_path);
-    try tx.setOption(tmux_options.config_path, opts.config_path);
+    try tx.setOption(tmux_options.zask_path, zask_path);
+    try tx.setOption(tmux_options.config_path, config_path);
 }
 
 pub fn bindControlKeys(gpa: std.mem.Allocator, tx: tmux_client.Client) !void {
