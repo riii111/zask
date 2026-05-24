@@ -164,7 +164,9 @@ pub const Client = struct {
         return result.stdout;
     }
 
-    pub fn sendKeys(self: Client, pane_target: []const u8, keys: []const []const u8) !void {
+    pub fn sendKeys(self: Client, window: []const u8, keys: []const []const u8) !void {
+        const pane_target = try self.target(window);
+        defer self.gpa.free(pane_target);
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(self.gpa);
         try argv.appendSlice(self.gpa, &.{ self.tmux_path, "send-keys", "-t", pane_target });
@@ -172,7 +174,9 @@ pub const Client = struct {
         _ = try self.runner.run(argv.items, .{ .check = true, .discard = true });
     }
 
-    pub fn pipePane(self: Client, pane_target: []const u8, command: ?[]const u8) !void {
+    pub fn pipePane(self: Client, window: []const u8, command: ?[]const u8) !void {
+        const pane_target = try self.target(window);
+        defer self.gpa.free(pane_target);
         if (command) |cmd| {
             _ = try self.runner.run(&.{ self.tmux_path, "pipe-pane", "-t", pane_target, cmd }, .{ .check = true, .discard = true });
         } else {
@@ -201,7 +205,7 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ self.tmux_path, "popup", "-w", width, "-h", height, "-E", command }, .{ .check = true, .discard = true });
     }
 
-    pub fn target(self: Client, window: []const u8) ![]const u8 {
+    fn target(self: Client, window: []const u8) ![]const u8 {
         return std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ self.session, window });
     }
 };
@@ -231,7 +235,7 @@ test "sendKeys records tmux command through runner" {
     const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
     const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
 
-    try client.sendKeys("demo:api", &.{ "echo ok", "Enter" });
+    try client.sendKeys("api", &.{ "echo ok", "Enter" });
 
     const command = recorder.commands.items[0];
     try std.testing.expectEqualStrings("tmux", command.argv[0]);
@@ -328,8 +332,8 @@ test "options popup and pipe helpers record tmux argv" {
     try client.setOption("@mode", "all");
     try client.bindRunShell("f", "zask follow api");
     try client.popup("80%", "60%", "tail -f log");
-    try client.pipePane("demo:api", "cat >> api.log");
-    try client.pipePane("demo:api", null);
+    try client.pipePane("api", "cat >> api.log");
+    try client.pipePane("api", null);
 
     try std.testing.expectEqualStrings("set-option", recorder.commands.items[0].argv[1]);
     try std.testing.expectEqualStrings("@mode", recorder.commands.items[0].argv[4]);

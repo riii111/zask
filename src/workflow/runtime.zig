@@ -288,8 +288,6 @@ pub const Runtime = struct {
         const tx = self.tmux();
         for (try self.cfg.services()) |service| {
             const name = try config.Config.serviceName(service);
-            const target = try tx.target(name);
-            defer self.gpa.free(target);
             const log_file = manager.prepareLogFile(name) catch |err| {
                 try writer.print("Warning: log setup failed for {s}: {}\n", .{ name, err });
                 continue;
@@ -302,7 +300,7 @@ pub const Runtime = struct {
                 try writer.print("Warning: log setup failed for {s}: {}\n", .{ name, err });
                 continue;
             };
-            _ = tx.pipePane(target, command) catch {};
+            _ = tx.pipePane(name, command) catch {};
         }
     }
 
@@ -311,9 +309,7 @@ pub const Runtime = struct {
         const tx = self.tmux();
         for (try self.cfg.services()) |service| {
             const name = try config.Config.serviceName(service);
-            const target = try tx.target(name);
-            defer self.gpa.free(target);
-            _ = tx.pipePane(target, null) catch {};
+            _ = tx.pipePane(name, null) catch {};
         }
     }
 

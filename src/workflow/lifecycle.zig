@@ -133,13 +133,11 @@ pub const Lifecycle = struct {
             .window_not_ready => return error.WindowNotReady,
             .tmux_unavailable => return error.TmuxUnavailable,
         }
-        const target = try self.tmux.target(service);
-        defer self.gpa.free(target);
         const service_dir = try shell.quote(self.gpa, try self.cfg.serviceDir(self.gpa, value));
         const start_command = try config.Config.serviceStartCommand(self.gpa, value);
         const cmd = try std.fmt.allocPrint(self.gpa, "cd {s} && {s}", .{ service_dir, start_command });
         try writeProgress(writer, "Starting {s}...\n", .{service});
-        try self.tmux.sendKeys(target, &.{ cmd, "Enter" });
+        try self.tmux.sendKeys(service, &.{ cmd, "Enter" });
     }
 
     fn ensureServiceStopped(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
@@ -154,9 +152,7 @@ pub const Lifecycle = struct {
             },
             .tmux_unavailable => return error.TmuxUnavailable,
         }
-        const target = try self.tmux.target(service);
-        defer self.gpa.free(target);
-        try self.tmux.sendKeys(target, &.{"C-c"});
+        try self.tmux.sendKeys(service, &.{"C-c"});
         try waits.waitForStopped(self, service, writer);
     }
 
@@ -165,12 +161,10 @@ pub const Lifecycle = struct {
         try waits.ensureWindowReady(self, "docker");
         if (try self.dockerStartAlreadyHandled(writer)) return;
         try writeProgress(writer, "Starting Docker...\n", .{});
-        const target = try self.tmux.target("docker");
-        defer self.gpa.free(target);
         const docker_dir = try shell.quote(self.gpa, try self.cfg.dockerDir(self.gpa));
         const compose_file = try shell.quote(self.gpa, self.cfg.dockerComposeFile());
         const cmd = try std.fmt.allocPrint(self.gpa, "cd {s} && COMPOSE_MENU=false docker compose -f {s} up", .{ docker_dir, compose_file });
-        try self.tmux.sendKeys(target, &.{ cmd, "Enter" });
+        try self.tmux.sendKeys("docker", &.{ cmd, "Enter" });
     }
 
     fn dockerStartAlreadyHandled(self: Lifecycle, writer: *std.Io.Writer) !bool {
@@ -215,10 +209,8 @@ pub const Lifecycle = struct {
         if (!self.cfg.dockerEnabled()) return;
         try writeProgress(writer, "Stopping Docker...\n", .{});
         if (self.tmux.observeSession() == .active) {
-            const target = try self.tmux.target("docker");
-            defer self.gpa.free(target);
             var sent = true;
-            self.tmux.sendKeys(target, &.{"C-c"}) catch {
+            self.tmux.sendKeys("docker", &.{"C-c"}) catch {
                 sent = false;
             };
             if (sent) self.runner.sleep(waits.docker_ready_settle);
