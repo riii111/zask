@@ -74,9 +74,10 @@ const Command = enum {
 const CommandSpec = struct {
     command: Command,
     names: []const []const u8,
-    usage: ?[]const u8 = null,
+    usage: []const u8 = "",
     description: []const u8 = "",
     global: bool = false,
+    show_in_help: bool = true,
 };
 
 const command_specs = [_]CommandSpec{
@@ -84,21 +85,21 @@ const command_specs = [_]CommandSpec{
     .{ .command = .bye, .names = &.{"bye"}, .usage = "bye", .description = "Graceful shutdown" },
     .{ .command = .re, .names = &.{"re"}, .usage = "re", .description = "Restart session" },
     .{ .command = .attach, .names = &.{"attach"}, .usage = "attach | detach | kill", .description = "Manage tmux session" },
-    .{ .command = .detach, .names = &.{"detach"} },
-    .{ .command = .kill, .names = &.{"kill"} },
+    .{ .command = .detach, .names = &.{"detach"}, .show_in_help = false },
+    .{ .command = .kill, .names = &.{"kill"}, .show_in_help = false },
     .{ .command = .up, .names = &.{"up"}, .usage = "up [--all|docker|name]", .description = "Start service, group, docker, or all" },
     .{ .command = .stop, .names = &.{"stop"}, .usage = "stop [--all|docker|name]", .description = "Stop service, group, docker, or all" },
     .{ .command = .restart, .names = &.{"restart"}, .usage = "restart <docker|name>", .description = "Restart service, group, or docker" },
     .{ .command = .status, .names = &.{"status"}, .usage = "status | list", .description = "Show service state or config services" },
-    .{ .command = .list, .names = &.{"list"} },
+    .{ .command = .list, .names = &.{"list"}, .show_in_help = false },
     .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window" },
     .{ .command = .follow, .names = &.{"follow"}, .usage = "follow <service>", .description = "Tail captured log in tmux popup" },
     .{ .command = .exec, .names = &.{"exec"}, .usage = "exec <container> [--shell]", .description = "Enter Docker container" },
     .{ .command = .version, .names = &.{"version"}, .usage = "version", .description = "Print zask version", .global = true },
     .{ .command = .help, .names = &.{ "help", "--help", "-h" }, .usage = "help", .description = "Print this help", .global = true },
-    .{ .command = .dashboard, .names = &.{"dashboard"} },
-    .{ .command = .monitor, .names = &.{"monitor"} },
-    .{ .command = .preview_list, .names = &.{"preview-list"} },
+    .{ .command = .dashboard, .names = &.{"dashboard"}, .show_in_help = false },
+    .{ .command = .monitor, .names = &.{"monitor"}, .show_in_help = false },
+    .{ .command = .preview_list, .names = &.{"preview-list"}, .show_in_help = false },
 };
 
 pub fn run(init: std.process.Init) !void {
@@ -148,11 +149,10 @@ fn printHelp(writer: *std.Io.Writer) !void {
     try writer.writeAll("Usage: zask <command>\n\nCommands:\n");
     const usage_width = maxHelpUsageWidth();
     for (command_specs) |spec| {
-        if (spec.usage) |usage| {
-            try writer.print("  {s}", .{usage});
-            try writeSpaces(writer, usage_width - usage.len + 2);
-            try writer.print("{s}\n", .{spec.description});
-        }
+        if (!spec.show_in_help) continue;
+        try writer.print("  {s}", .{spec.usage});
+        try writeSpaces(writer, usage_width - spec.usage.len + 2);
+        try writer.print("{s}\n", .{spec.description});
     }
     try writer.writeByte('\n');
 }
@@ -172,7 +172,7 @@ fn runCommand(comptime module: type, context: *cli_context.Context) !void {
 fn maxHelpUsageWidth() usize {
     var width: usize = 0;
     for (command_specs) |spec| {
-        if (spec.usage) |usage| width = @max(width, usage.len);
+        if (spec.show_in_help) width = @max(width, spec.usage.len);
     }
     return width;
 }
