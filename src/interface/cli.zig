@@ -2,6 +2,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const cli_context = @import("cli/context.zig");
 const help = @import("cli/help.zig");
+const list = @import("cli/list.zig");
 const version = @import("cli/version.zig");
 const root = @import("../root.zig");
 const config = @import("../model/config.zig");
@@ -109,6 +110,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
     var run_context: cli_context.Context = .{ .base = context, .parsed = parsed, .writer = writer, .print_help = printHelp };
     if (command == .version) return runCommand(version, &run_context);
     if (command == .help) return runCommand(help, &run_context);
+    if (command == .list) return runCommand(list, &run_context);
     const rt = try run_context.runtime();
     dispatchRuntimeCommand(rt, command, parsed.args, writer) catch |err| {
         if (err == error.InvalidArguments) try printHelp(writer);
@@ -119,7 +121,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
 fn dispatchRuntimeCommand(rt: Runtime, command: Command, args: []const []const u8, writer: *std.Io.Writer) !void {
     return switch (command) {
         .version, .help => unreachable,
-        .list => rt.list(writer),
+        .list => unreachable,
         .status => rt.status(writer),
         .attach => rt.attach(),
         .detach => rt.detach(writer),
