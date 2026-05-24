@@ -24,9 +24,12 @@ pub fn applySessionOptions(gpa: std.mem.Allocator, tx: tmux_client.Client, opts:
 }
 
 pub fn bindControlKeys(gpa: std.mem.Allocator, tx: tmux_client.Client) !void {
-    try tx.bindRunShell("w",
-        \\width="#{client_width}"; height="#{client_height}"; height=$((height - 1)); session="#{session_name}"; tmux list-windows -t "$session" -F "#{window_id}" | while IFS= read -r window; do tmux resize-window -x "$width" -y "$height" -t "$window"; done; tmux choose-tree -Zw -t "#{pane_id}"
-    );
+    try tx.bindRunShell("w", try std.fmt.allocPrint(gpa,
+        \\session="#{{session_name}}";
+        \\zask=$(tmux show-option -t "$session" -qv {s});
+        \\config=$(tmux show-option -t "$session" -qv {s});
+        \\"$zask" --config "$config" preview-list "#{{pane_id}}" "#{{client_width}}" "#{{client_height}}"
+    , .{ tmux_options.zask_path, tmux_options.config_path }));
     try tx.bindRunShell("m", try std.fmt.allocPrint(gpa,
         \\session="#{{session_name}}";
         \\mode=$(tmux show-option -t "$session" -qv {s});
@@ -44,7 +47,7 @@ pub fn bindControlKeys(gpa: std.mem.Allocator, tx: tmux_client.Client) !void {
     , .{ tmux_options.zask_path, tmux_options.config_path }));
 }
 
-test "list binding resizes preview windows before choose-tree" {
+test "list binding delegates preview sizing to zask command" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());
@@ -58,6 +61,10 @@ test "list binding resizes preview windows before choose-tree" {
     try std.testing.expectEqualStrings("bind-key", command.argv[1]);
     try std.testing.expectEqualStrings("w", command.argv[4]);
     try std.testing.expectEqualStrings("run-shell", command.argv[5]);
-    try std.testing.expect(std.mem.indexOf(u8, command.argv[6], "resize-window -x \"$width\" -y \"$height\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, command.argv[6], "tmux choose-tree -Zw -t") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command.argv[6], "preview-list") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command.argv[6], "#{pane_id}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command.argv[6], "#{client_width}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command.argv[6], "#{client_height}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command.argv[6], "resize-window") == null);
+    try std.testing.expect(std.mem.indexOf(u8, command.argv[6], "choose-tree") == null);
 }

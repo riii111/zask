@@ -37,6 +37,7 @@ const Command = enum {
     exec,
     dashboard,
     monitor,
+    preview_list,
 };
 
 const CommandSpec = struct {
@@ -68,6 +69,8 @@ const command_specs = [_]CommandSpec{
     .{ .command = .help, .names = &.{ "help", "--help", "-h" }, .usage = "help", .description = "Print this help", .global = true },
     .{ .command = .dashboard, .names = &.{"dashboard"} },
     .{ .command = .monitor, .names = &.{"monitor"} },
+    // Internal command invoked by tmux bindings; omitted from public help.
+    .{ .command = .preview_list, .names = &.{"preview-list"}, .min_args = 3, .max_args = 3 },
 };
 
 pub const CommandContext = struct {
@@ -148,6 +151,7 @@ fn dispatchRuntimeCommand(rt: Runtime, command: Command, args: []const []const u
         .exec => rt.exec(try oneArg(args), try execUseShell(args), writer),
         .dashboard => dashboard_ui.runLauncher(rt.gpa, rt.io, rt.environ, rt.cfg, writer),
         .monitor => dashboard_ui.runMonitor(rt.gpa, rt.io, rt.cfg, writer),
+        .preview_list => rt.previewList(args[0], try parseSizeArg(args[1]), try parseSizeArg(args[2])),
     };
 }
 
@@ -308,6 +312,10 @@ fn normalizeTarget(target: []const u8) []const u8 {
     return target;
 }
 
+fn parseSizeArg(arg: []const u8) !u16 {
+    return std.fmt.parseUnsigned(u16, arg, 10) catch return error.InvalidArguments;
+}
+
 fn resolveHelloProfile(cfg: config.Config, args: []const []const u8) ![]const u8 {
     if (args.len == 0) return "all";
     if (std.mem.eql(u8, args[0], "--docker")) return "docker";
@@ -329,6 +337,7 @@ test "help prints usage" {
     try runWithArgs(.{ .gpa = std.testing.allocator }, &.{"help"}, &writer);
     try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "render-session") == null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "preview-list") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "exec <container>") != null);
 }
 
@@ -360,6 +369,8 @@ test "validates command arity strictly" {
     try validateArity(.exec, &.{"api"});
     try validateArity(.exec, &.{ "api", "--shell" });
     try std.testing.expectError(error.InvalidArguments, validateArity(.exec, &.{ "api", "--shell", "extra" }));
+    try validateArity(.preview_list, &.{ "%1", "120", "40" });
+    try std.testing.expectError(error.InvalidArguments, validateArity(.preview_list, &.{ "%1", "120" }));
 }
 
 test "invalid command arity prints usage before returning error" {
