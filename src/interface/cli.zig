@@ -12,6 +12,7 @@ const hello = @import("cli/hello.zig");
 const kill = @import("cli/kill.zig");
 const list = @import("cli/list.zig");
 const logs = @import("cli/logs.zig");
+const monitor = @import("cli/monitor.zig");
 const re = @import("cli/re.zig");
 const restart = @import("cli/restart.zig");
 const status = @import("cli/status.zig");
@@ -20,7 +21,6 @@ const up = @import("cli/up.zig");
 const version = @import("cli/version.zig");
 const root = @import("../root.zig");
 const config = @import("../model/config.zig");
-const dashboard_ui = @import("ui/dashboard.zig");
 const env = @import("../platform/env.zig");
 const Runtime = @import("../workflow/runtime.zig").Runtime;
 
@@ -139,6 +139,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
     if (command == .restart) return runCommand(restart, &run_context);
     if (command == .exec) return runCommand(exec, &run_context);
     if (command == .dashboard) return runCommand(dashboard, &run_context);
+    if (command == .monitor) return runCommand(monitor, &run_context);
     const rt = try run_context.runtime();
     dispatchRuntimeCommand(rt, command, parsed.args, writer) catch |err| {
         if (err == error.InvalidArguments) try printHelp(writer);
@@ -147,6 +148,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
 }
 
 fn dispatchRuntimeCommand(rt: Runtime, command: Command, args: []const []const u8, writer: *std.Io.Writer) !void {
+    _ = writer;
     return switch (command) {
         .version, .help => unreachable,
         .list => unreachable,
@@ -164,7 +166,7 @@ fn dispatchRuntimeCommand(rt: Runtime, command: Command, args: []const []const u
         .restart => unreachable,
         .exec => unreachable,
         .dashboard => unreachable,
-        .monitor => dashboard_ui.runMonitor(rt.gpa, rt.io, rt.cfg, writer),
+        .monitor => unreachable,
         .preview_list => rt.previewList(args[0], try parseSizeArg(args[1]), try parseSizeArg(args[2])),
     };
 }
