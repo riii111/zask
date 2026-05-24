@@ -322,6 +322,33 @@ fn resolveHelloProfile(cfg: config.Config, args: []const []const u8) ![]const u8
     return cfg.resolveStartProfileOption(args[0]) orelse error.InvalidArguments;
 }
 
+test "command metadata parses aliases and global commands" {
+    const command_cases = [_]struct {
+        input: []const u8,
+        expected: ?Command,
+    }{
+        .{ .input = "-h", .expected = .help },
+        .{ .input = "--help", .expected = .help },
+        .{ .input = "hello", .expected = .hello },
+        .{ .input = "render-session", .expected = null },
+    };
+    for (command_cases) |case| {
+        try std.testing.expectEqual(case.expected, parseCommand(case.input));
+    }
+
+    const global_cases = [_]struct {
+        input: []const u8,
+        expected: bool,
+    }{
+        .{ .input = "--help", .expected = true },
+        .{ .input = "version", .expected = true },
+        .{ .input = "list", .expected = false },
+    };
+    for (global_cases) |case| {
+        try std.testing.expectEqual(case.expected, isGlobalCommand(case.input));
+    }
+}
+
 test "version prints package version" {
     var buffer: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
@@ -349,31 +376,37 @@ test "project alias without arguments prints usage" {
     try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
 }
 
-test "command metadata parses aliases and global commands" {
-    const command_cases = [_]struct {
-        input: []const u8,
-        expected: ?Command,
-    }{
-        .{ .input = "-h", .expected = .help },
-        .{ .input = "--help", .expected = .help },
-        .{ .input = "hello", .expected = .hello },
-        .{ .input = "render-session", .expected = null },
-    };
-    for (command_cases) |case| {
-        try std.testing.expectEqual(case.expected, parseCommand(case.input));
-    }
+test "parses project command form" {
+    const parsed = try parseArgs(.{ .gpa = std.testing.allocator }, &.{ "demo", "list" });
+    try std.testing.expectEqualStrings("demo", parsed.project.?);
+    try std.testing.expectEqualStrings("list", parsed.command);
+}
 
-    const global_cases = [_]struct {
-        input: []const u8,
-        expected: bool,
-    }{
-        .{ .input = "--help", .expected = true },
-        .{ .input = "version", .expected = true },
-        .{ .input = "list", .expected = false },
-    };
-    for (global_cases) |case| {
-        try std.testing.expectEqual(case.expected, isGlobalCommand(case.input));
-    }
+test "parses explicit config command form" {
+    const parsed = try parseArgs(.{ .gpa = std.testing.allocator }, &.{ "--config", "demo.json", "list" });
+    try std.testing.expectEqualStrings("demo.json", parsed.config_path.?);
+    try std.testing.expectEqualStrings("list", parsed.command);
+    try std.testing.expectEqual(@as(usize, 0), parsed.args.len);
+}
+
+test "project alias accepts explicit config command form" {
+    const parsed = try parseArgs(.{ .gpa = std.testing.allocator, .argv0 = "sample" }, &.{ "--config", "demo.json", "follow", "api" });
+    try std.testing.expectEqualStrings("demo.json", parsed.config_path.?);
+    try std.testing.expectEqualStrings("follow", parsed.command);
+    try std.testing.expectEqualStrings("api", parsed.args[0]);
+    try std.testing.expect(parsed.project == null);
+}
+
+test "parses argv0 project alias form" {
+    const parsed = try parseArgs(.{ .gpa = std.testing.allocator, .argv0 = "sample" }, &.{"hello"});
+    try std.testing.expectEqualStrings("sample", parsed.project.?);
+    try std.testing.expectEqualStrings("hello", parsed.command);
+}
+
+test "rejects incomplete config and project command forms" {
+    try std.testing.expectError(error.InvalidArguments, parseArgs(.{ .gpa = std.testing.allocator }, &.{"--config"}));
+    try std.testing.expectError(error.InvalidArguments, parseArgs(.{ .gpa = std.testing.allocator }, &.{ "--config", "demo.json" }));
+    try std.testing.expectError(error.ProjectRequired, parseArgs(.{ .gpa = std.testing.allocator }, &.{"list"}));
 }
 
 test "accepts valid command arity" {
@@ -412,20 +445,44 @@ test "rejects invalid command arity" {
     }
 }
 
-test "invalid command arity prints usage before returning error" {
-    var buffer: [4096]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buffer);
+test "accepts hello profile aliases" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": [],
+        \\  "start_profiles": {"api": {"profile": "backend"}}
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
 
-    try std.testing.expectError(error.InvalidArguments, runWithArgs(.{ .gpa = std.testing.allocator }, &.{ "version", "extra" }, &writer));
-    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
+    const cases = [_]struct {
+        args: []const []const u8,
+        expected: []const u8,
+    }{
+        .{ .args = &.{}, .expected = "all" },
+        .{ .args = &.{"--docker"}, .expected = "docker" },
+        .{ .args = &.{"--api"}, .expected = "backend" },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqualStrings(case.expected, try resolveHelloProfile(cfg, case.args));
+    }
 }
 
-test "incomplete config form prints usage before returning error" {
-    var buffer: [4096]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buffer);
+test "rejects unknown hello profile" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": [],
+        \\  "start_profiles": {"api": {"profile": "backend"}}
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
 
-    try std.testing.expectError(error.InvalidArguments, runWithArgs(.{ .gpa = std.testing.allocator }, &.{"--config"}, &writer));
-    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
+    try std.testing.expectError(error.InvalidArguments, resolveHelloProfile(cfg, &.{"--missing"}));
 }
 
 test "normalizes docker target aliases" {
@@ -467,55 +524,20 @@ test "rejects invalid exec shell flag position" {
     }
 }
 
-test "parses project command form" {
-    const parsed = try parseArgs(.{ .gpa = std.testing.allocator }, &.{ "demo", "list" });
-    try std.testing.expectEqualStrings("demo", parsed.project.?);
-    try std.testing.expectEqualStrings("list", parsed.command);
+test "invalid command arity prints usage before returning error" {
+    var buffer: [4096]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.InvalidArguments, runWithArgs(.{ .gpa = std.testing.allocator }, &.{ "version", "extra" }, &writer));
+    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
 }
 
-test "parses explicit config command form" {
-    const parsed = try parseArgs(.{ .gpa = std.testing.allocator }, &.{ "--config", "demo.json", "list" });
-    try std.testing.expectEqualStrings("demo.json", parsed.config_path.?);
-    try std.testing.expectEqualStrings("list", parsed.command);
-    try std.testing.expectEqual(@as(usize, 0), parsed.args.len);
-}
+test "incomplete config form prints usage before returning error" {
+    var buffer: [4096]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
 
-test "project alias accepts explicit config command form" {
-    const parsed = try parseArgs(.{ .gpa = std.testing.allocator, .argv0 = "sample" }, &.{ "--config", "demo.json", "follow", "api" });
-    try std.testing.expectEqualStrings("demo.json", parsed.config_path.?);
-    try std.testing.expectEqualStrings("follow", parsed.command);
-    try std.testing.expectEqualStrings("api", parsed.args[0]);
-    try std.testing.expect(parsed.project == null);
-}
-
-test "rejects incomplete config and project command forms" {
-    try std.testing.expectError(error.InvalidArguments, parseArgs(.{ .gpa = std.testing.allocator }, &.{"--config"}));
-    try std.testing.expectError(error.InvalidArguments, parseArgs(.{ .gpa = std.testing.allocator }, &.{ "--config", "demo.json" }));
-    try std.testing.expectError(error.ProjectRequired, parseArgs(.{ .gpa = std.testing.allocator }, &.{"list"}));
-}
-
-test "parses argv0 project alias form" {
-    const parsed = try parseArgs(.{ .gpa = std.testing.allocator, .argv0 = "sample" }, &.{"hello"});
-    try std.testing.expectEqualStrings("sample", parsed.project.?);
-    try std.testing.expectEqualStrings("hello", parsed.command);
-}
-
-test "resolves hello profiles" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": [],
-        \\  "start_profiles": {"api": {"profile": "backend"}}
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-
-    try std.testing.expectEqualStrings("all", try resolveHelloProfile(cfg, &.{}));
-    try std.testing.expectEqualStrings("docker", try resolveHelloProfile(cfg, &.{"--docker"}));
-    try std.testing.expectEqualStrings("backend", try resolveHelloProfile(cfg, &.{"--api"}));
-    try std.testing.expectError(error.InvalidArguments, resolveHelloProfile(cfg, &.{"--missing"}));
+    try std.testing.expectError(error.InvalidArguments, runWithArgs(.{ .gpa = std.testing.allocator }, &.{"--config"}, &writer));
+    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
 }
 
 test "invalid hello profile prints usage" {
