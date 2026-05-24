@@ -77,10 +77,5 @@
       "port": 15173,
       "group": "frontend"
     }
-  ],
-  "options": {
-    "log_keep_sessions": 2,
-    "popup_width": "80%",
-    "popup_height": "80%"
-  }
+  ]
 }

@@ -52,18 +52,6 @@ pub const Config = struct {
         return self.optionalInt(&.{ "docker", "wait_timeout" }, 60);
     }
 
-    pub fn logKeepSessions(self: Config) i64 {
-        return self.optionalInt(&.{ "options", "log_keep_sessions" }, 3);
-    }
-
-    pub fn popupWidth(self: Config) []const u8 {
-        return self.optionalString(&.{ "options", "popup_width" }, "80%");
-    }
-
-    pub fn popupHeight(self: Config) []const u8 {
-        return self.optionalString(&.{ "options", "popup_height" }, "80%");
-    }
-
     pub fn services(self: Config) ![]const Value {
         const node = try self.required(&.{"services"});
         if (node != .array) return error.InvalidConfig;
