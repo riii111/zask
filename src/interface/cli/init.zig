@@ -23,6 +23,7 @@ pub const Options = struct {
     pub fn parse(args: []const []const u8) !Options {
         if (args.len == 0) return error.InvalidArguments;
         var opts: Options = .{ .project = args[0] };
+        var flags: OptionFlags = .{};
         var i: usize = 1;
         while (i < args.len) {
             const arg = args[i];
@@ -33,16 +34,21 @@ pub const Options = struct {
             } else if (std.mem.eql(u8, arg, "--command")) {
                 opts.command = try takeValue(args, &i);
             } else if (std.mem.eql(u8, arg, "--dir")) {
+                flags.dir = true;
                 opts.dir = try takeValue(args, &i);
             } else if (std.mem.eql(u8, arg, "--port")) {
-                opts.port = try std.fmt.parseInt(i64, try takeValue(args, &i), 10);
+                flags.port = true;
+                opts.port = std.fmt.parseInt(i64, try takeValue(args, &i), 10) catch return error.InvalidArguments;
             } else if (std.mem.eql(u8, arg, "--group")) {
+                flags.group = true;
                 opts.group = try takeValue(args, &i);
             } else if (std.mem.eql(u8, arg, "--docker")) {
                 opts.docker = true;
             } else if (std.mem.eql(u8, arg, "--docker-dir")) {
+                flags.docker_dir = true;
                 opts.docker_dir = try takeValue(args, &i);
             } else if (std.mem.eql(u8, arg, "--compose-file")) {
+                flags.compose_file = true;
                 opts.compose_file = try takeValue(args, &i);
             } else if (std.mem.eql(u8, arg, "--force")) {
                 opts.force = true;
@@ -51,13 +57,21 @@ pub const Options = struct {
             }
             i += 1;
         }
-        try validateOptions(opts);
+        try validateOptions(opts, flags);
         return opts;
     }
 
     pub fn deinit(self: Options) void {
         _ = self;
     }
+};
+
+const OptionFlags = struct {
+    dir: bool = false,
+    port: bool = false,
+    group: bool = false,
+    docker_dir: bool = false,
+    compose_file: bool = false,
 };
 
 pub fn run(ctx: *Context, opts: Options) !void {
@@ -82,16 +96,18 @@ pub fn run(ctx: *Context, opts: Options) !void {
     try ctx.writer.print("Next: zask {s} open\n", .{opts.project});
 }
 
-fn validateOptions(opts: Options) !void {
-    try validate.identifier(opts.project);
-    if (opts.service) |name| try validate.identifier(name);
+fn validateOptions(opts: Options, flags: OptionFlags) !void {
+    validate.identifier(opts.project) catch return error.InvalidArguments;
+    if (opts.service) |name| validate.identifier(name) catch return error.InvalidArguments;
     if (opts.service != null and opts.command == null) return error.InvalidArguments;
     if (opts.service == null and opts.command != null) return error.InvalidArguments;
+    if (opts.service == null and (flags.dir or flags.port or flags.group)) return error.InvalidArguments;
+    if (!opts.docker and (flags.docker_dir or flags.compose_file)) return error.InvalidArguments;
     if (opts.port) |port| {
         if (port <= 0 or port > 65535) return error.InvalidArguments;
     }
-    try validate.relativeSubPath(opts.dir);
-    try validate.relativeSubPath(opts.docker_dir);
+    validate.relativeSubPath(opts.dir) catch return error.InvalidArguments;
+    validate.relativeSubPath(opts.docker_dir) catch return error.InvalidArguments;
 }
 
 fn takeValue(args: []const []const u8, index: *usize) ![]const u8 {
@@ -182,6 +198,32 @@ test "init.options: parses service and docker flags" {
     try std.testing.expect(opts.docker);
     try std.testing.expectEqualStrings("infra", opts.docker_dir);
     try std.testing.expectEqualStrings("compose.yaml", opts.compose_file);
+}
+
+test "init.options: normalizes invalid input to invalid arguments" {
+    const cases = [_][]const []const u8{
+        &.{"bad/name"},
+        &.{ "demo", "--service", "bad/name", "--command", "npm run dev" },
+        &.{ "demo", "--service", "web", "--command", "npm run dev", "--dir", "../x" },
+        &.{ "demo", "--service", "web", "--command", "npm run dev", "--port", "abc" },
+        &.{ "demo", "--service", "web", "--command", "npm run dev", "--port", "70000" },
+    };
+    for (cases) |case| {
+        try std.testing.expectError(error.InvalidArguments, Options.parse(case));
+    }
+}
+
+test "init.options: rejects options without their parent section" {
+    const cases = [_][]const []const u8{
+        &.{ "demo", "--dir", "backend" },
+        &.{ "demo", "--port", "3000" },
+        &.{ "demo", "--group", "app" },
+        &.{ "demo", "--docker-dir", "infra" },
+        &.{ "demo", "--compose-file", "compose.yaml" },
+    };
+    for (cases) |case| {
+        try std.testing.expectError(error.InvalidArguments, Options.parse(case));
+    }
 }
 
 test "init.config: renders parseable minimal config" {
