@@ -11,6 +11,7 @@ const kill = @import("cli/kill.zig");
 const list = @import("cli/list.zig");
 const logs = @import("cli/logs.zig");
 const re = @import("cli/re.zig");
+const restart = @import("cli/restart.zig");
 const status = @import("cli/status.zig");
 const stop = @import("cli/stop.zig");
 const up = @import("cli/up.zig");
@@ -133,6 +134,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
     if (command == .re) return runCommand(re, &run_context);
     if (command == .up) return runCommand(up, &run_context);
     if (command == .stop) return runCommand(stop, &run_context);
+    if (command == .restart) return runCommand(restart, &run_context);
     const rt = try run_context.runtime();
     dispatchRuntimeCommand(rt, command, parsed.args, writer) catch |err| {
         if (err == error.InvalidArguments) try printHelp(writer);
@@ -155,7 +157,7 @@ fn dispatchRuntimeCommand(rt: Runtime, command: Command, args: []const []const u
         .re => unreachable,
         .up => unreachable,
         .stop => unreachable,
-        .restart => rt.restart(try requiredTarget(args), writer),
+        .restart => unreachable,
         .exec => rt.exec(try oneArg(args), try execUseShell(args), writer),
         .dashboard => dashboard_ui.runLauncher(rt.gpa, rt.io, rt.environ, rt.cfg, writer),
         .monitor => dashboard_ui.runMonitor(rt.gpa, rt.io, rt.cfg, writer),
