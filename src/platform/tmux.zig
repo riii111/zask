@@ -110,14 +110,14 @@ pub const Client = struct {
             .exit_code = info.exit_code,
             .pid = info.pid,
             .command = info.command,
-            .owned = info.owned,
+            .owned = true,
         };
         const run_result = self.runner.run(&.{ "pgrep", "-P", info.pid }, .{}) catch return .{
             .state = .tmux_unavailable,
             .exit_code = info.exit_code,
             .pid = info.pid,
             .command = info.command,
-            .owned = info.owned,
+            .owned = true,
         };
         const result = runner.captured(run_result);
         defer self.gpa.free(result.stdout);
@@ -127,7 +127,7 @@ pub const Client = struct {
             .exit_code = info.exit_code,
             .pid = info.pid,
             .command = info.command,
-            .owned = info.owned,
+            .owned = true,
         };
     }
 
@@ -141,19 +141,13 @@ pub const Client = struct {
         if (result.term.exited != 0) return error.WindowMissing;
 
         var lines = std.mem.splitScalar(u8, result.stdout, '\n');
-        const line = lines.next() orelse return .{};
+        const line = lines.next() orelse "";
         var fields = std.mem.splitScalar(u8, line, '|');
         const dead = fields.next() orelse "0";
         const exit_code = fields.next() orelse "0";
         const pid = fields.next() orelse "0";
         const command = fields.next() orelse "";
-        return .{
-            .dead = std.mem.eql(u8, dead, "1"),
-            .exit_code = try self.gpa.dupe(u8, exit_code),
-            .pid = try self.gpa.dupe(u8, pid),
-            .command = try self.gpa.dupe(u8, command),
-            .owned = true,
-        };
+        return PaneInfo.init(self.gpa, std.mem.eql(u8, dead, "1"), exit_code, pid, command);
     }
 
     pub fn capturePane(self: Client, window: []const u8) ![]const u8 {
@@ -211,14 +205,26 @@ pub const Client = struct {
 };
 
 pub const PaneInfo = struct {
-    dead: bool = false,
-    exit_code: []const u8 = "0",
-    pid: []const u8 = "0",
-    command: []const u8 = "",
-    owned: bool = false,
+    dead: bool,
+    exit_code: []const u8,
+    pid: []const u8,
+    command: []const u8,
+
+    fn init(gpa: std.mem.Allocator, dead: bool, exit_code: []const u8, pid: []const u8, command: []const u8) !PaneInfo {
+        const owned_exit_code = try gpa.dupe(u8, exit_code);
+        errdefer gpa.free(owned_exit_code);
+        const owned_pid = try gpa.dupe(u8, pid);
+        errdefer gpa.free(owned_pid);
+        const owned_command = try gpa.dupe(u8, command);
+        return .{
+            .dead = dead,
+            .exit_code = owned_exit_code,
+            .pid = owned_pid,
+            .command = owned_command,
+        };
+    }
 
     pub fn deinit(self: PaneInfo, gpa: std.mem.Allocator) void {
-        if (!self.owned) return;
         gpa.free(self.exit_code);
         gpa.free(self.pid);
         gpa.free(self.command);
