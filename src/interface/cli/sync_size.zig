@@ -31,13 +31,13 @@ fn parseSize(arg: []const u8) !u16 {
 // Tests
 // -----------------------------------------------------------------------------
 
-test "options parse client dimensions" {
+test "sync-size.Options: parses client dimensions" {
     const opts = try Options.parse(&.{ "120", "40" });
     try std.testing.expectEqual(@as(u16, 120), opts.client_width);
     try std.testing.expectEqual(@as(u16, 40), opts.client_height);
 }
 
-test "options reject invalid client dimensions" {
+test "sync-size.Options: rejects invalid client dimensions" {
     try std.testing.expectError(error.InvalidArguments, Options.parse(&.{"120"}));
     try std.testing.expectError(error.InvalidArguments, Options.parse(&.{ "wide", "40" }));
 }
