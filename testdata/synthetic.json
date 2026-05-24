@@ -8,10 +8,7 @@
     "enabled": true,
     "dir": "infra",
     "compose_file": "compose.yaml",
-    "wait_timeout": 5,
-    "exec_defaults": {
-      "db": "psql"
-    }
+    "wait_timeout": 5
   },
   "start_profiles": {
     "core": {

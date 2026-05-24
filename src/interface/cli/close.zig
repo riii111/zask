@@ -15,13 +15,13 @@ pub const Options = struct {
 pub fn run(ctx: *Context, opts: Options) !void {
     _ = opts;
     const rt = try ctx.runtime();
-    try rt.kill(ctx.writer);
+    try rt.close(ctx.writer);
 }
 
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
-test "options reject arguments" {
+test "close.Options: rejects arguments" {
     try std.testing.expectError(error.InvalidArguments, Options.parse(&.{"extra"}));
 }

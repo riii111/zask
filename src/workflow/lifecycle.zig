@@ -51,30 +51,28 @@ pub const Lifecycle = struct {
         try self.stopDocker(writer);
     }
 
-    pub fn startTarget(self: Lifecycle, target: ?[]const u8, writer: *std.Io.Writer) !void {
-        const t = target orelse "--all";
+    pub fn startTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
         try self.ensureSessionActive(writer);
-        if (std.mem.eql(u8, t, "--all")) return self.startAll("all", writer);
-        if (std.mem.eql(u8, t, "docker")) {
+        if (std.mem.eql(u8, target, "--all")) return self.startAll("all", writer);
+        if (std.mem.eql(u8, target, "docker")) {
             try self.ensureDockerStarted(writer);
             return waits.ensureDockerReady(self, writer);
         }
-        if (self.cfg.resolveGroup(self.gpa, t)) |services| {
+        if (self.cfg.resolveGroup(self.gpa, target)) |services| {
             for (services) |svc| try self.startService(svc, writer);
-        } else |_| try self.startService(t, writer);
+        } else |_| try self.startService(target, writer);
     }
 
-    pub fn stopTarget(self: Lifecycle, target: ?[]const u8, writer: *std.Io.Writer) !void {
-        const t = target orelse "--all";
-        if (std.mem.eql(u8, t, "docker")) return self.stopDocker(writer);
+    pub fn stopTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
+        if (std.mem.eql(u8, target, "docker")) return self.stopDocker(writer);
         if (self.tmux.observeSession() != .active) {
-            if (std.mem.eql(u8, t, "--all")) return self.stopDocker(writer);
+            if (std.mem.eql(u8, target, "--all")) return self.stopDocker(writer);
             return sessionNotRunning(writer);
         }
-        if (std.mem.eql(u8, t, "--all")) return self.stopAll(writer);
-        if (self.cfg.resolveGroup(self.gpa, t)) |services| {
+        if (std.mem.eql(u8, target, "--all")) return self.stopAll(writer);
+        if (self.cfg.resolveGroup(self.gpa, target)) |services| {
             for (services) |svc| try self.stopService(svc, writer);
-        } else |_| try self.stopService(t, writer);
+        } else |_| try self.stopService(target, writer);
     }
 
     pub fn restartTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
@@ -118,7 +116,7 @@ pub const Lifecycle = struct {
 
     fn ensureSessionActive(self: Lifecycle, writer: *std.Io.Writer) !void {
         if (self.tmux.observeSession() == .active) return;
-        try writer.writeAll("Session not running. Run 'hello' first.\n");
+        try writer.writeAll("Session not running. Run 'open' first.\n");
         try writer.flush();
         return error.SessionNotRunning;
     }
@@ -220,7 +218,7 @@ pub const Lifecycle = struct {
 };
 
 fn sessionNotRunning(writer: *std.Io.Writer) !void {
-    try writer.writeAll("Session not running. Run 'hello' first.\n");
+    try writer.writeAll("Session not running. Run 'open' first.\n");
     try writer.flush();
     return error.SessionNotRunning;
 }
@@ -512,7 +510,7 @@ test "stop and restart targets require an active session" {
     try std.testing.expectError(error.SessionNotRunning, lifecycle.restartTarget("api", &writer));
 
     const output = writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, output, "Session not running. Run 'hello' first.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "Session not running. Run 'open' first.") != null);
     try std.testing.expectEqual(@as(usize, 2), recorder.commands.items.len);
 }
 

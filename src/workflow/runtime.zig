@@ -10,11 +10,10 @@ const proc_runner = @import("../platform/runner.zig");
 const session_layout = @import("session_layout.zig");
 const tmux_client = @import("../platform/tmux.zig");
 const tmux_setup = @import("tmux_setup.zig");
-const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
 const zask_command = @import("zask_command.zig");
 
-const bye_kill_settle = std.Io.Duration.fromSeconds(1);
+const close_kill_settle = std.Io.Duration.fromSeconds(1);
 const tmux_status_bar_height = 1;
 
 pub const Runtime = struct {
@@ -47,7 +46,16 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn attach(self: Runtime) !void {
+    pub fn attach(self: Runtime, writer: *std.Io.Writer) !void {
+        if (!try self.sessionExists()) {
+            try writer.writeAll("Session not running. Run 'open' first.\n");
+            try writer.flush();
+            return error.SessionNotRunning;
+        }
+        try self.attachExisting();
+    }
+
+    fn attachExisting(self: Runtime) !void {
         const tx = self.tmux();
         if (try self.inTmux()) {
             try tx.switchClient();
@@ -68,7 +76,7 @@ pub const Runtime = struct {
             try tx.switchClient();
         }
         try tx.selectWindow(service);
-        if (!try self.inTmux()) try self.attach();
+        if (!try self.inTmux()) try self.attach(writer);
     }
 
     pub fn previewList(self: Runtime, pane_id: []const u8, client_width: u16, client_height: u16) !void {
@@ -97,29 +105,35 @@ pub const Runtime = struct {
         try tx.chooseTree(pane_id);
     }
 
-    pub fn hello(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
+    pub fn open(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
         const guard = self.acquireLock() catch |err| switch (err) {
             error.LockBusy => {
-                if (try self.sessionExists()) return self.attach();
+                if (try self.sessionExists()) return self.attachExisting();
                 return err;
             },
             else => return err,
         };
         defer guard.release();
-        try self.helloUnlocked(profile, writer);
+        try self.openUnlocked(profile, writer);
     }
 
-    pub fn helloUnlocked(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
+    pub fn openUnlocked(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const scratch = arena.allocator();
         if (try self.sessionExists()) {
+            try writer.writeAll("Workspace already open. Starting resources...\n");
+            try writer.flush();
             try self.installSessionOptions(scratch);
             try tmux_setup.bindControlKeys(scratch, self.tmux());
             try self.lifecycle().startAll(profile, writer);
-            try self.attach();
+            try writer.writeAll("Attaching to workspace...\n");
+            try writer.flush();
+            try self.attach(writer);
             return;
         }
+        try writer.writeAll("Opening workspace...\n");
+        try writer.flush();
         const tx = self.tmux();
         try self.openSessionWithDashboardWindow(scratch);
         errdefer tx.killSession() catch {};
@@ -129,36 +143,26 @@ pub const Runtime = struct {
         try self.focusDashboard();
         try tmux_setup.bindControlKeys(scratch, tx);
         try self.lifecycle().startAll(profile, writer);
-        try self.attach();
+        try writer.writeAll("Attaching to workspace...\n");
+        try writer.flush();
+        try self.attach(writer);
     }
 
-    pub fn bye(self: Runtime, writer: *std.Io.Writer) !void {
+    pub fn close(self: Runtime, writer: *std.Io.Writer) !void {
         const guard = try self.acquireLock();
         defer guard.release();
-        try self.byeUnlocked(writer);
+        try self.closeUnlocked(writer);
     }
 
-    fn byeUnlocked(self: Runtime, writer: *std.Io.Writer) !void {
+    fn closeUnlocked(self: Runtime, writer: *std.Io.Writer) !void {
         if (!try self.sessionExists()) {
             try writer.writeAll("Session not running\n");
             return;
         }
         try self.lifecycle().stopAll(writer);
-        self.runner().sleep(bye_kill_settle);
+        self.runner().sleep(close_kill_settle);
         const tx = self.tmux();
         try tx.killSession();
-    }
-
-    pub fn kill(self: Runtime, writer: *std.Io.Writer) !void {
-        const guard = try self.acquireLock();
-        defer guard.release();
-        try self.lifecycle().stopDocker(writer);
-        if (try self.sessionExists()) {
-            const tx = self.tmux();
-            try tx.killSession();
-        } else {
-            try writer.writeAll("Session not running\n");
-        }
     }
 
     pub fn re(self: Runtime, writer: *std.Io.Writer) !void {
@@ -171,44 +175,20 @@ pub const Runtime = struct {
         }
         const guard = try self.acquireLock();
         defer guard.release();
-        try self.byeUnlocked(writer);
-        try self.helloUnlocked("all", writer);
+        try self.closeUnlocked(writer);
+        try self.openUnlocked("all", writer);
     }
 
-    pub fn up(self: Runtime, target: ?[]const u8, writer: *std.Io.Writer) !void {
+    pub fn start(self: Runtime, target: []const u8, writer: *std.Io.Writer) !void {
         try self.lifecycle().startTarget(target, writer);
     }
 
-    pub fn stop(self: Runtime, target: ?[]const u8, writer: *std.Io.Writer) !void {
+    pub fn stop(self: Runtime, target: []const u8, writer: *std.Io.Writer) !void {
         try self.lifecycle().stopTarget(target, writer);
     }
 
     pub fn restart(self: Runtime, target: []const u8, writer: *std.Io.Writer) !void {
         try self.lifecycle().restartTarget(target, writer);
-    }
-
-    pub fn exec(self: Runtime, container: []const u8, use_shell: bool, writer: *std.Io.Writer) !void {
-        if (!self.cfg.dockerEnabled()) return error.DockerDisabled;
-        try validate.identifier(container);
-        const dc = self.docker();
-        const compose = dc.observe();
-        defer compose.deinit(self.gpa);
-        if (compose.state == .unavailable) {
-            try writer.writeAll("Docker compose services unavailable\n");
-            return error.DockerUnavailable;
-        }
-        if (compose.state == .empty) {
-            try writer.writeAll("No running containers. Run 'up docker' first.\n");
-            return error.ContainerNotRunning;
-        }
-        if (!compose.contains(container)) {
-            try writer.print("Container '{s}' is not running\n", .{container});
-            try writer.writeAll("Running containers:\n");
-            for (compose.services) |service| try writer.print("  {s}\n", .{service});
-            return error.ContainerNotRunning;
-        }
-        const exec_cmd = if (use_shell) "bash" else self.cfg.dockerExecDefault(container);
-        try dc.execInteractive(container, exec_cmd);
     }
 
     fn runner(self: Runtime) proc_runner.Runner {
@@ -301,91 +281,13 @@ fn composeStatusText(state: observations.ComposeState) []const u8 {
     };
 }
 
-test "maps observations to status text" {
+test "runtime.status: maps observations to text" {
     try std.testing.expectEqualStrings("running", paneStatusText(.busy));
     try std.testing.expectEqualStrings("stopped", paneStatusText(.idle));
     try std.testing.expectEqualStrings("unknown", composeStatusText(.unavailable));
 }
 
-test "exec rejects disabled or unavailable containers" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": false},
-        \\  "services": []
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var recorder = proc_runner.Recorder.init(arena.allocator());
-    defer recorder.deinit();
-    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const runtime = testRuntime(arena.allocator(), run, cfg);
-    var buffer: [128]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buffer);
-
-    try std.testing.expectError(error.DockerDisabled, runtime.exec("api", false, &writer));
-}
-
-test "exec reports missing containers and uses shell override" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true, "exec_defaults": {"db": "psql"}},
-        \\  "services": []
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var recorder = proc_runner.Recorder.init(arena.allocator());
-    defer recorder.deinit();
-    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const runtime = testRuntime(arena.allocator(), run, cfg);
-    var buffer: [256]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buffer);
-
-    try recorder.enqueue("\n", "", .{ .exited = 0 });
-    try std.testing.expectError(error.ContainerNotRunning, runtime.exec("db", false, &writer));
-    try recorder.enqueue("api\n", "", .{ .exited = 0 });
-    try std.testing.expectError(error.ContainerNotRunning, runtime.exec("db", false, &writer));
-    try recorder.enqueue("db\n", "", .{ .exited = 0 });
-    try runtime.exec("db", true, &writer);
-
-    const command = recorder.commands.items[3];
-    try std.testing.expect(command.interactive);
-    try proc_runner.expectCommandArg(command, 6, "bash");
-}
-
-test "exec passes default command without shell wrapping" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true, "exec_defaults": {"db": "psql -c 'select 1'"}},
-        \\  "services": []
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var recorder = proc_runner.Recorder.init(arena.allocator());
-    defer recorder.deinit();
-    try recorder.enqueue("db\n", "", .{ .exited = 0 });
-    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const runtime = testRuntime(arena.allocator(), run, cfg);
-    var buffer: [128]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buffer);
-
-    try runtime.exec("db", false, &writer);
-
-    const command = recorder.commands.items[1];
-    try std.testing.expect(command.interactive);
-    try proc_runner.expectCommandArgv(command, &.{ "docker", "compose", "-f", "compose.yaml", "exec", "db", "psql", "-c", "select 1" });
-    try std.testing.expect(!proc_runner.commandContains(command, "bash -lc"));
-}
-
-test "bye kills session after service stop wait failure" {
+test "runtime.close: kills session after service stop wait failure" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -408,13 +310,13 @@ test "bye kills session after service stop wait failure" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.byeUnlocked(&writer);
+    try runtime.closeUnlocked(&writer);
 
     const kill = recorder.commands.items[recorder.commands.items.len - 1];
     try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "demo" });
 }
 
-test "bye reaches kill-session after service and docker stop" {
+test "runtime.close: kills session after resource stop" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -442,7 +344,7 @@ test "bye reaches kill-session after service and docker stop" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.byeUnlocked(&writer);
+    try runtime.closeUnlocked(&writer);
 
     const kill_index = recorder.commands.items.len - 1;
     try proc_runner.expectCommandOrder(&recorder, "C-c", "down");
@@ -450,12 +352,12 @@ test "bye reaches kill-session after service and docker stop" {
     try proc_runner.expectCommandArg(recorder.commands.items[kill_index], 1, "kill-session");
     try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items.len);
     try std.testing.expectEqual(waits.docker_ready_settle, recorder.sleeps.items[0].duration);
-    try std.testing.expectEqual(bye_kill_settle, recorder.sleeps.items[1].duration);
+    try std.testing.expectEqual(close_kill_settle, recorder.sleeps.items[1].duration);
     try std.testing.expectEqual(kill_index, recorder.sleeps.items[1].commands_before);
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "attach from tmux switches client without mutating window sizes" {
+test "runtime.attach: switches tmux client" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -473,14 +375,42 @@ test "attach from tmux switches client without mutating window sizes" {
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     var runtime = testRuntime(arena.allocator(), run, cfg);
     runtime.environ = &environ;
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.attach();
+    try runtime.attach(&writer);
 
-    try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
-    try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "switch-client");
+    try std.testing.expectEqual(@as(usize, 2), recorder.commands.items.len);
+    try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
+    try proc_runner.expectCommandArg(recorder.commands.items[1], 1, "switch-client");
 }
 
-test "new session setup creates dashboard service and docker windows" {
+test "runtime.attach: reports missing session" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    recorder.term = .{ .exited = 1 };
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.SessionNotRunning, runtime.attach(&writer));
+
+    try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
+    try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Run 'open' first") != null);
+}
+
+test "runtime.openSession: creates dashboard service and docker windows" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -519,7 +449,7 @@ test "new session setup creates dashboard service and docker windows" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "new session setup places docker after dashboard when services are empty" {
+test "runtime.openSession: places docker after dashboard" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -547,7 +477,7 @@ test "new session setup places docker after dashboard when services are empty" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "hello kills partially created session when session options fail" {
+test "runtime.open: kills partial session on setup failure" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -567,14 +497,14 @@ test "hello kills partially created session when session options fail" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectError(error.CommandFailed, runtime.helloUnlocked("all", &writer));
+    try std.testing.expectError(error.CommandFailed, runtime.openUnlocked("all", &writer));
 
     try proc_runner.expectCommandOrder(&recorder, "new-session", "kill-session");
     try proc_runner.expectCommandContaining(&recorder, "set-option");
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "hello creates session without tmuxp and keeps setup order" {
+test "runtime.open: creates session without tmuxp" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -601,7 +531,7 @@ test "hello creates session without tmuxp and keeps setup order" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.helloUnlocked("all", &writer);
+    try runtime.openUnlocked("all", &writer);
 
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "tmuxp") == null);
     try proc_runner.expectCommandContaining(&recorder, "new-session");
@@ -615,7 +545,7 @@ test "hello creates session without tmuxp and keeps setup order" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "hello refreshes bindings for existing session" {
+test "runtime.open: refreshes bindings for existing session" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -637,7 +567,7 @@ test "hello refreshes bindings for existing session" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.helloUnlocked("all", &writer);
+    try runtime.openUnlocked("all", &writer);
 
     try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
     try proc_runner.expectCommandContaining(&recorder, "set-option");
@@ -646,7 +576,7 @@ test "hello refreshes bindings for existing session" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "previewList resizes all windows before choose-tree" {
+test "runtime.previewList: resizes windows before choose-tree" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -684,7 +614,7 @@ test "previewList resizes all windows before choose-tree" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "previewList does not open choose-tree when resized windows mismatch" {
+test "runtime.previewList: rejects resized window mismatch" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -715,7 +645,7 @@ test "previewList does not open choose-tree when resized windows mismatch" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "hello attaches existing session when another hello holds the lock" {
+test "runtime.open: attaches when lock is busy" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -751,10 +681,52 @@ test "hello attaches existing session when another hello holds the lock" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.hello("all", &writer);
+    try runtime.open("all", &writer);
 
     try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
     try proc_runner.expectCommandArg(recorder.commands.items[1], 1, "switch-client");
+}
+
+test "runtime.open: preserves lock busy before session exists" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    const base = try std.fmt.allocPrint(arena.allocator(), "/private/tmp/zask-test-runtime-missing-{d}", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    const lock_dir = try std.fs.path.join(arena.allocator(), &.{ base, "zask", "demo.lock" });
+    _ = try std.Io.Dir.cwd().createDirPathStatus(io, lock_dir, @enumFromInt(0o700));
+    const pid_path = try std.fs.path.join(arena.allocator(), &.{ lock_dir, "pid" });
+    try paths.writeFileMode(io, pid_path, try std.fmt.allocPrint(arena.allocator(), "{d}", .{std.c.getpid()}), @enumFromInt(0o600));
+
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    try environ.put("XDG_RUNTIME_DIR", base);
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    recorder.term = .{ .exited = 1 };
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    var runtime = testRuntime(arena.allocator(), run, cfg);
+    runtime.io = io;
+    runtime.environ = &environ;
+    runtime.runner_impl = run;
+    runtime.tmux_impl.runner = run;
+    runtime.docker_impl.runner = run;
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.LockBusy, runtime.open("all", &writer));
+
+    try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
+    try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
+    try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
 }
 
 fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.Config) Runtime {

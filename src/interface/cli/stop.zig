@@ -1,13 +1,13 @@
 const std = @import("std");
 const Context = @import("context.zig").Context;
-const target = @import("target.zig");
 
 pub const Options = struct {
-    target: ?[]const u8 = null,
+    target: []const u8,
 
     pub fn parse(args: []const []const u8) !Options {
-        if (args.len > 1) return error.InvalidArguments;
-        return .{ .target = if (args.len == 0) null else target.normalize(args[0]) };
+        if (args.len != 1) return error.InvalidArguments;
+        if (std.mem.startsWith(u8, args[0], "--") and !std.mem.eql(u8, args[0], "--all")) return error.InvalidArguments;
+        return .{ .target = args[0] };
     }
 
     pub fn deinit(self: Options) void {
@@ -24,12 +24,14 @@ pub fn run(ctx: *Context, opts: Options) !void {
 // Tests
 // -----------------------------------------------------------------------------
 
-test "options parse optional target" {
-    try std.testing.expect((try Options.parse(&.{})).target == null);
-    try std.testing.expectEqualStrings("api", (try Options.parse(&.{"api"})).target.?);
-    try std.testing.expectEqualStrings("docker", (try Options.parse(&.{"--docker"})).target.?);
+test "stop.Options: accepts required target" {
+    try std.testing.expectEqualStrings("api", (try Options.parse(&.{"api"})).target);
+    try std.testing.expectEqualStrings("docker", (try Options.parse(&.{"docker"})).target);
+    try std.testing.expectEqualStrings("--all", (try Options.parse(&.{"--all"})).target);
 }
 
-test "options reject extra arguments" {
+test "stop.Options: rejects invalid target shape" {
+    try std.testing.expectError(error.InvalidArguments, Options.parse(&.{}));
+    try std.testing.expectError(error.InvalidArguments, Options.parse(&.{"--docker"}));
     try std.testing.expectError(error.InvalidArguments, Options.parse(&.{ "api", "extra" }));
 }
