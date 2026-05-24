@@ -304,19 +304,22 @@ test "recorder returns queued responses before queued errors" {
 }
 
 test "checked runner rejects non-zero exits" {
-    var recorder = Recorder.init(std.testing.allocator);
-    defer recorder.deinit();
-    try recorder.enqueue("", "failed", .{ .exited = 2 });
-    const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+    const cases = [_]struct {
+        argv: []const []const u8,
+        options: RunOptions,
+        term: std.process.Child.Term,
+        stderr: []const u8 = "",
+    }{
+        .{ .argv = &.{"false"}, .options = .{ .check = true, .discard = true }, .term = .{ .exited = 2 }, .stderr = "failed" },
+        .{ .argv = &.{"tmux"}, .options = .{ .interactive = true, .check = true }, .term = .{ .exited = 1 } },
+    };
 
-    try std.testing.expectError(error.CommandFailed, run.run(&.{"false"}, .{ .check = true, .discard = true }));
-}
+    for (cases) |case| {
+        var recorder = Recorder.init(std.testing.allocator);
+        defer recorder.deinit();
+        try recorder.enqueue("", case.stderr, case.term);
+        const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
 
-test "checked interactive runner rejects non-zero exits" {
-    var recorder = Recorder.init(std.testing.allocator);
-    defer recorder.deinit();
-    try recorder.enqueue("", "", .{ .exited = 1 });
-    const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
-
-    try std.testing.expectError(error.CommandFailed, run.run(&.{"tmux"}, .{ .interactive = true, .check = true }));
+        try std.testing.expectError(error.CommandFailed, run.run(case.argv, case.options));
+    }
 }

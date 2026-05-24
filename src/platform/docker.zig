@@ -226,47 +226,36 @@ test "execInteractive passes configured command directly" {
     try std.testing.expectEqualStrings("select 1", command.argv[8]);
 }
 
-test "splitCommand handles shell-like quotes and whitespace" {
-    const args = try splitCommand(std.testing.allocator, "sh\t-c \"echo hi\" 'literal value'");
-    defer freeArgs(std.testing.allocator, args);
+test "splitCommand parses shell-like command strings into argv" {
+    const cases = [_]struct {
+        input: []const u8,
+        expected: []const []const u8,
+    }{
+        .{ .input = "sh\t-c \"echo hi\" 'literal value'", .expected = &.{ "sh", "-c", "echo hi", "literal value" } },
+        .{ .input = "psql -c \"select '\\n'\"", .expected = &.{ "psql", "-c", "select '\\n'" } },
+        .{ .input = "psql \\\n-c 'select 1'", .expected = &.{ "psql", "-c", "select 1" } },
+        .{ .input = "foo \\\n", .expected = &.{"foo"} },
+    };
 
-    try std.testing.expectEqual(@as(usize, 4), args.len);
-    try std.testing.expectEqualStrings("sh", args[0]);
-    try std.testing.expectEqualStrings("-c", args[1]);
-    try std.testing.expectEqualStrings("echo hi", args[2]);
-    try std.testing.expectEqualStrings("literal value", args[3]);
+    for (cases) |case| {
+        const args = try splitCommand(std.testing.allocator, case.input);
+        defer freeArgs(std.testing.allocator, args);
+
+        try std.testing.expectEqual(case.expected.len, args.len);
+        for (case.expected, args) |expected, actual| {
+            try std.testing.expectEqualStrings(expected, actual);
+        }
+    }
 }
 
-test "splitCommand preserves non-special backslash inside double quotes" {
-    const args = try splitCommand(std.testing.allocator, "psql -c \"select '\\n'\"");
-    defer freeArgs(std.testing.allocator, args);
+test "splitCommand rejects empty and incomplete command strings" {
+    const cases = [_][]const u8{
+        "",
+        "echo \\",
+        "echo 'unterminated",
+    };
 
-    try std.testing.expectEqual(@as(usize, 3), args.len);
-    try std.testing.expectEqualStrings("psql", args[0]);
-    try std.testing.expectEqualStrings("-c", args[1]);
-    try std.testing.expectEqualStrings("select '\\n'", args[2]);
-}
-
-test "splitCommand removes backslash newline continuations" {
-    const args = try splitCommand(std.testing.allocator, "psql \\\n-c 'select 1'");
-    defer freeArgs(std.testing.allocator, args);
-
-    try std.testing.expectEqual(@as(usize, 3), args.len);
-    try std.testing.expectEqualStrings("psql", args[0]);
-    try std.testing.expectEqualStrings("-c", args[1]);
-    try std.testing.expectEqualStrings("select 1", args[2]);
-}
-
-test "splitCommand drops trailing backslash newline without empty token" {
-    const args = try splitCommand(std.testing.allocator, "foo \\\n");
-    defer freeArgs(std.testing.allocator, args);
-
-    try std.testing.expectEqual(@as(usize, 1), args.len);
-    try std.testing.expectEqualStrings("foo", args[0]);
-}
-
-test "splitCommand rejects empty and incomplete input" {
-    try std.testing.expectError(error.InvalidCommand, splitCommand(std.testing.allocator, ""));
-    try std.testing.expectError(error.InvalidCommand, splitCommand(std.testing.allocator, "echo \\"));
-    try std.testing.expectError(error.InvalidCommand, splitCommand(std.testing.allocator, "echo 'unterminated"));
+    for (cases) |input| {
+        try std.testing.expectError(error.InvalidCommand, splitCommand(std.testing.allocator, input));
+    }
 }
