@@ -1,12 +1,12 @@
 # zask
 
-A tmux-native process manager for local development.
+A tmux-native process manager for local development, written in Zig.
 
-zask opens a project-local tmux workspace, starts your local services inside named windows, and lets you attach, stop, restart, inspect, and focus them without rebuilding the workspace by hand.
+zask opens a project-local tmux workspace for your API, workers, frontend, and Docker Compose. Start, stop, restart, inspect, and jump to services from one project-local config.
 
 ## Concept
 
-> tmux-native / Project-local / Process-aware / Built for daily dev loops
+> tmux-native / Project-local / Process-aware / Zig native / Built for daily dev loops
 
 API servers, frontend dev servers, workers, and Docker Compose run while you code. zask treats those processes as the development environment.
 
@@ -14,7 +14,7 @@ It creates a persistent tmux workspace from local project configuration. Each se
 
 zask focuses on the running local environment: open it once, observe what is alive, restart one service, jump to logs, and close everything cleanly when you are done.
 
-Unlike plain tmux session managers, zask knows about service groups, startup phases, Docker Compose, ports, and running pane state. It's closer to a local dev process manager that uses tmux as the runtime UI.
+Unlike plain tmux session managers, zask knows about service groups, startup phases, Docker Compose, ports, and running pane state. It is a local dev process manager that uses tmux as the runtime UI.
 
 ## Features
 
