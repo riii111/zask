@@ -239,6 +239,10 @@ const RecordedResponse = struct {
     term: std.process.Child.Term,
 };
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 test "recorder captures commands without spawning processes" {
     var recorder = Recorder.init(std.testing.allocator);
     defer recorder.deinit();

@@ -38,6 +38,10 @@ pub fn writeFileMode(io: std.Io, path: []const u8, contents: []const u8, permiss
     try file.writeStreamingAll(io, contents);
 }
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 test "home requires HOME in environment map" {
     try std.testing.expectError(error.HomeNotSet, home(null));
 }

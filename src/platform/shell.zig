@@ -15,6 +15,10 @@ pub fn quote(gpa: std.mem.Allocator, value: []const u8) ![]const u8 {
     return out.toOwnedSlice();
 }
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 test "quotes shell strings" {
     const simple = try quote(std.testing.allocator, "abc");
     defer std.testing.allocator.free(simple);

@@ -288,6 +288,10 @@ pub fn isShellCommand(command: []const u8) bool {
     return std.mem.eql(u8, command, "zsh") or std.mem.eql(u8, command, "bash") or std.mem.eql(u8, command, "sh") or command.len == 0;
 }
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 test "sendKeys records tmux command through runner" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();

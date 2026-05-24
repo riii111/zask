@@ -144,6 +144,10 @@ fn parseServices(gpa: std.mem.Allocator, output: []const u8) ![]const []const u8
     return services.toOwnedSlice(gpa);
 }
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 test "runningServices uses compose working directory" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();

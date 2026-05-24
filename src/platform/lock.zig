@@ -77,6 +77,10 @@ fn lockAlive(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !bool {
 const private_dir_permissions: std.Io.Dir.Permissions = @enumFromInt(0o700);
 const private_file_permissions: std.Io.File.Permissions = @enumFromInt(0o600);
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 test "lock blocks concurrent acquire and releases directory" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
