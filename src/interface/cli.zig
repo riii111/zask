@@ -102,6 +102,10 @@ pub fn run(init: std.process.Init) !void {
             try stdout.flush();
             std.process.exit(2);
         },
+        error.SessionNotRunning => {
+            try stdout.flush();
+            std.process.exit(1);
+        },
         else => return err,
     };
     try stdout.flush();

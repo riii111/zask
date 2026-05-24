@@ -46,7 +46,12 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn attach(self: Runtime) !void {
+    pub fn attach(self: Runtime, writer: *std.Io.Writer) !void {
+        if (!try self.sessionExists()) {
+            try writer.writeAll("Session not running. Run 'open' first.\n");
+            try writer.flush();
+            return error.SessionNotRunning;
+        }
         const tx = self.tmux();
         if (try self.inTmux()) {
             try tx.switchClient();
@@ -67,7 +72,7 @@ pub const Runtime = struct {
             try tx.switchClient();
         }
         try tx.selectWindow(service);
-        if (!try self.inTmux()) try self.attach();
+        if (!try self.inTmux()) try self.attach(writer);
     }
 
     pub fn previewList(self: Runtime, pane_id: []const u8, client_width: u16, client_height: u16) !void {
@@ -99,8 +104,7 @@ pub const Runtime = struct {
     pub fn open(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
         const guard = self.acquireLock() catch |err| switch (err) {
             error.LockBusy => {
-                if (try self.sessionExists()) return self.attach();
-                return err;
+                return self.attach(writer);
             },
             else => return err,
         };
@@ -113,12 +117,18 @@ pub const Runtime = struct {
         defer arena.deinit();
         const scratch = arena.allocator();
         if (try self.sessionExists()) {
+            try writer.writeAll("Workspace already open. Starting resources...\n");
+            try writer.flush();
             try self.installSessionOptions(scratch);
             try tmux_setup.bindControlKeys(scratch, self.tmux());
             try self.lifecycle().startAll(profile, writer);
-            try self.attach();
+            try writer.writeAll("Attaching to workspace...\n");
+            try writer.flush();
+            try self.attach(writer);
             return;
         }
+        try writer.writeAll("Opening workspace...\n");
+        try writer.flush();
         const tx = self.tmux();
         try self.openSessionWithDashboardWindow(scratch);
         errdefer tx.killSession() catch {};
@@ -128,7 +138,9 @@ pub const Runtime = struct {
         try self.focusDashboard();
         try tmux_setup.bindControlKeys(scratch, tx);
         try self.lifecycle().startAll(profile, writer);
-        try self.attach();
+        try writer.writeAll("Attaching to workspace...\n");
+        try writer.flush();
+        try self.attach(writer);
     }
 
     pub fn close(self: Runtime, writer: *std.Io.Writer) !void {
@@ -358,11 +370,39 @@ test "attach from tmux switches client without mutating window sizes" {
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     var runtime = testRuntime(arena.allocator(), run, cfg);
     runtime.environ = &environ;
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.attach();
+    try runtime.attach(&writer);
+
+    try std.testing.expectEqual(@as(usize, 2), recorder.commands.items.len);
+    try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
+    try proc_runner.expectCommandArg(recorder.commands.items[1], 1, "switch-client");
+}
+
+test "attach reports missing session before attach-session" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    recorder.term = .{ .exited = 1 };
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.SessionNotRunning, runtime.attach(&writer));
 
     try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
-    try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "switch-client");
+    try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Run 'open' first") != null);
 }
 
 test "new session setup creates dashboard service and docker windows" {
