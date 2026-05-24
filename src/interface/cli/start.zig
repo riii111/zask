@@ -17,7 +17,7 @@ pub const Options = struct {
 
 pub fn run(ctx: *Context, opts: Options) !void {
     const rt = try ctx.runtime();
-    try rt.stop(opts.target, ctx.writer);
+    try rt.start(opts.target, ctx.writer);
 }
 
 // -----------------------------------------------------------------------------

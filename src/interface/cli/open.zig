@@ -17,7 +17,7 @@ pub const Options = struct {
 
 pub fn run(ctx: *Context, opts: Options) !void {
     const rt = try ctx.runtime();
-    try rt.hello(try resolveProfile(rt.cfg, opts), ctx.writer);
+    try rt.open(try resolveProfile(rt.cfg, opts), ctx.writer);
 }
 
 fn resolveProfile(cfg: config.Config, opts: Options) ![]const u8 {

@@ -94,14 +94,17 @@ const LauncherCommand = struct {
 };
 
 const launcher_commands = [_]LauncherCommand{
-    .{ .usage = "hello", .description = "Start all + attach" },
-    .{ .usage = "hello --<profile>", .description = "Start configured profile" },
-    .{ .usage = "hello --docker", .description = "Start docker only" },
-    .{ .usage = "bye", .description = "Graceful shutdown" },
+    .{ .usage = "open", .description = "Open workspace and attach" },
+    .{ .usage = "open --<profile>", .description = "Open configured profile" },
+    .{ .usage = "open --docker", .description = "Open docker only" },
+    .{ .usage = "close", .description = "Stop resources and close workspace" },
+    .{ .usage = "attach", .description = "Attach to existing workspace" },
     .{ .usage = "re", .description = "Restart session" },
     .{ .usage = "status", .description = "Show all status" },
-    .{ .usage = "up <svc|group>", .description = "Start a service or group" },
+    .{ .usage = "start <svc|group>", .description = "Start a service or group" },
+    .{ .usage = "start --all", .description = "Start all resources" },
     .{ .usage = "stop <svc|group>", .description = "Stop a service or group" },
+    .{ .usage = "stop --all", .description = "Stop all resources" },
     .{ .usage = "restart <svc|group>", .description = "Restart a service or group" },
     .{ .usage = "logs <svc>", .description = "Jump to window" },
 };

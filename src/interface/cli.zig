@@ -1,20 +1,20 @@
 const std = @import("std");
 const attach = @import("cli/attach.zig");
-const bye = @import("cli/bye.zig");
+const close = @import("cli/close.zig");
 const cli_context = @import("cli/context.zig");
 const dashboard = @import("cli/dashboard.zig");
 const exec = @import("cli/exec.zig");
 const help = @import("cli/help.zig");
-const hello = @import("cli/hello.zig");
 const kill = @import("cli/kill.zig");
 const logs = @import("cli/logs.zig");
 const monitor = @import("cli/monitor.zig");
+const open = @import("cli/open.zig");
 const preview_list = @import("cli/preview_list.zig");
 const re = @import("cli/re.zig");
 const restart = @import("cli/restart.zig");
+const start = @import("cli/start.zig");
 const status = @import("cli/status.zig");
 const stop = @import("cli/stop.zig");
-const up = @import("cli/up.zig");
 const version = @import("cli/version.zig");
 const root = @import("../root.zig");
 const env = @import("../platform/env.zig");
@@ -28,11 +28,11 @@ const Command = enum {
     status,
     attach,
     logs,
-    hello,
-    bye,
+    open,
+    close,
     kill,
     re,
-    up,
+    start,
     stop,
     restart,
     exec,
@@ -47,11 +47,11 @@ const Command = enum {
             .status => runCommand(status, context),
             .attach => runCommand(attach, context),
             .logs => runCommand(logs, context),
-            .hello => runCommand(hello, context),
-            .bye => runCommand(bye, context),
+            .open => runCommand(open, context),
+            .close => runCommand(close, context),
             .kill => runCommand(kill, context),
             .re => runCommand(re, context),
-            .up => runCommand(up, context),
+            .start => runCommand(start, context),
             .stop => runCommand(stop, context),
             .restart => runCommand(restart, context),
             .exec => runCommand(exec, context),
@@ -73,13 +73,13 @@ const CommandSpec = struct {
 };
 
 const command_specs = [_]CommandSpec{
-    .{ .command = .hello, .names = &.{"hello"}, .usage = "hello [--docker|--<profile>]", .description = "Start session + services + attach" },
-    .{ .command = .bye, .names = &.{"bye"}, .usage = "bye", .description = "Graceful shutdown" },
+    .{ .command = .open, .names = &.{"open"}, .usage = "open [--docker|--<profile>]", .description = "Open workspace and attach" },
+    .{ .command = .close, .names = &.{"close"}, .usage = "close", .description = "Stop resources and close workspace" },
     .{ .command = .re, .names = &.{"re"}, .usage = "re", .description = "Restart session" },
-    .{ .command = .attach, .names = &.{"attach"}, .usage = "attach | kill", .description = "Manage tmux session" },
+    .{ .command = .attach, .names = &.{"attach"}, .usage = "attach", .description = "Attach to existing workspace" },
     .{ .command = .kill, .names = &.{"kill"}, .show_in_help = false },
-    .{ .command = .up, .names = &.{"up"}, .usage = "up [--all|docker|name]", .description = "Start service, group, docker, or all" },
-    .{ .command = .stop, .names = &.{"stop"}, .usage = "stop [--all|docker|name]", .description = "Stop service, group, docker, or all" },
+    .{ .command = .start, .names = &.{"start"}, .usage = "start <--all|docker|name>", .description = "Start resources in existing workspace" },
+    .{ .command = .stop, .names = &.{"stop"}, .usage = "stop <--all|docker|name>", .description = "Stop resources, keeping workspace open" },
     .{ .command = .restart, .names = &.{"restart"}, .usage = "restart <docker|name>", .description = "Restart service, group, or docker" },
     .{ .command = .status, .names = &.{"status"}, .usage = "status", .description = "Show service state" },
     .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window" },
@@ -217,7 +217,10 @@ test "command metadata parses aliases and global commands" {
     }{
         .{ .input = "-h", .expected = .help },
         .{ .input = "--help", .expected = .help },
-        .{ .input = "hello", .expected = .hello },
+        .{ .input = "open", .expected = .open },
+        .{ .input = "hello", .expected = null },
+        .{ .input = "bye", .expected = null },
+        .{ .input = "up", .expected = null },
         .{ .input = "list", .expected = null },
         .{ .input = "detach", .expected = null },
         .{ .input = "dashboard", .expected = null },
@@ -258,6 +261,10 @@ test "help prints usage" {
     try runWithArgs(.{ .gpa = std.testing.allocator }, &.{"help"}, &writer);
     try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "attach | detach") == null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "open [--docker|--<profile>]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "hello") == null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "bye") == null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "up [") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "render-session") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "preview-list") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "exec <container>") != null);
@@ -293,9 +300,9 @@ test "project alias accepts explicit config command form" {
 }
 
 test "parses argv0 project alias form" {
-    const parsed = try parseArgs(.{ .gpa = std.testing.allocator, .argv0 = "sample" }, &.{"hello"});
+    const parsed = try parseArgs(.{ .gpa = std.testing.allocator, .argv0 = "sample" }, &.{"open"});
     try std.testing.expectEqualStrings("sample", parsed.project.?);
-    try std.testing.expectEqualStrings("hello", parsed.command);
+    try std.testing.expectEqualStrings("open", parsed.command);
 }
 
 test "rejects incomplete config and project command forms" {
@@ -320,7 +327,7 @@ test "incomplete config form prints usage before returning error" {
     try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
 }
 
-test "invalid hello profile prints usage" {
+test "invalid open profile prints usage" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var buffer: [4096]u8 = undefined;
@@ -334,6 +341,6 @@ test "invalid hello profile prints usage" {
         .gpa = arena.allocator(),
         .io = threaded.io(),
         .environ = &environ,
-    }, &.{ "--config", "testdata/synthetic.json", "hello", "--missing" }, &writer));
+    }, &.{ "--config", "testdata/synthetic.json", "open", "--missing" }, &writer));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Usage: zask <command>") != null);
 }

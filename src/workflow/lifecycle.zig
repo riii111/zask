@@ -51,8 +51,8 @@ pub const Lifecycle = struct {
         try self.stopDocker(writer);
     }
 
-    pub fn startTarget(self: Lifecycle, target: ?[]const u8, writer: *std.Io.Writer) !void {
-        const t = target orelse "--all";
+    pub fn startTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
+        const t = target;
         try self.ensureSessionActive(writer);
         if (std.mem.eql(u8, t, "--all")) return self.startAll("all", writer);
         if (std.mem.eql(u8, t, "docker")) {
@@ -64,8 +64,8 @@ pub const Lifecycle = struct {
         } else |_| try self.startService(t, writer);
     }
 
-    pub fn stopTarget(self: Lifecycle, target: ?[]const u8, writer: *std.Io.Writer) !void {
-        const t = target orelse "--all";
+    pub fn stopTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
+        const t = target;
         if (std.mem.eql(u8, t, "docker")) return self.stopDocker(writer);
         if (self.tmux.observeSession() != .active) {
             if (std.mem.eql(u8, t, "--all")) return self.stopDocker(writer);
@@ -118,7 +118,7 @@ pub const Lifecycle = struct {
 
     fn ensureSessionActive(self: Lifecycle, writer: *std.Io.Writer) !void {
         if (self.tmux.observeSession() == .active) return;
-        try writer.writeAll("Session not running. Run 'hello' first.\n");
+        try writer.writeAll("Session not running. Run 'open' first.\n");
         try writer.flush();
         return error.SessionNotRunning;
     }
@@ -220,7 +220,7 @@ pub const Lifecycle = struct {
 };
 
 fn sessionNotRunning(writer: *std.Io.Writer) !void {
-    try writer.writeAll("Session not running. Run 'hello' first.\n");
+    try writer.writeAll("Session not running. Run 'open' first.\n");
     try writer.flush();
     return error.SessionNotRunning;
 }
@@ -512,7 +512,7 @@ test "stop and restart targets require an active session" {
     try std.testing.expectError(error.SessionNotRunning, lifecycle.restartTarget("api", &writer));
 
     const output = writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, output, "Session not running. Run 'hello' first.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "Session not running. Run 'open' first.") != null);
     try std.testing.expectEqual(@as(usize, 2), recorder.commands.items.len);
 }
 

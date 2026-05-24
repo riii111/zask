@@ -1,13 +1,12 @@
 const std = @import("std");
 const Context = @import("context.zig").Context;
-const target = @import("target.zig");
-
 pub const Options = struct {
     target: []const u8,
 
     pub fn parse(args: []const []const u8) !Options {
         if (args.len != 1) return error.InvalidArguments;
-        return .{ .target = target.normalize(args[0]) };
+        if (std.mem.startsWith(u8, args[0], "--")) return error.InvalidArguments;
+        return .{ .target = args[0] };
     }
 
     pub fn deinit(self: Options) void {
@@ -26,10 +25,11 @@ pub fn run(ctx: *Context, opts: Options) !void {
 
 test "options parse required target" {
     try std.testing.expectEqualStrings("api", (try Options.parse(&.{"api"})).target);
-    try std.testing.expectEqualStrings("docker", (try Options.parse(&.{"--docker"})).target);
+    try std.testing.expectEqualStrings("docker", (try Options.parse(&.{"docker"})).target);
 }
 
 test "options reject invalid arity" {
     try std.testing.expectError(error.InvalidArguments, Options.parse(&.{}));
+    try std.testing.expectError(error.InvalidArguments, Options.parse(&.{"--docker"}));
     try std.testing.expectError(error.InvalidArguments, Options.parse(&.{ "api", "extra" }));
 }
