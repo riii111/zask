@@ -4,11 +4,9 @@ const docker_client = @import("../platform/docker.zig");
 const env = @import("../platform/env.zig");
 const lifecycle_mod = @import("lifecycle.zig");
 const lock = @import("../platform/lock.zig");
-const log_session = @import("log_session.zig");
 const observations = @import("../model/observations.zig");
 const paths = @import("../platform/paths.zig");
 const proc_runner = @import("../platform/runner.zig");
-const shell = @import("../platform/shell.zig");
 const session_layout = @import("session_layout.zig");
 const tmux_client = @import("../platform/tmux.zig");
 const tmux_setup = @import("tmux_setup.zig");
@@ -29,13 +27,6 @@ pub const Runtime = struct {
     runner_impl: proc_runner.Runner,
     tmux_impl: tmux_client.Client,
     docker_impl: docker_client.Compose,
-
-    pub fn list(self: Runtime, writer: *std.Io.Writer) !void {
-        if (self.cfg.dockerEnabled()) try writer.writeAll("docker\n");
-        for (try self.cfg.services()) |service| {
-            try writer.print("{s}\n", .{try config.Config.serviceName(service)});
-        }
-    }
 
     pub fn status(self: Runtime, writer: *std.Io.Writer) !void {
         if (!try self.sessionExists()) {
@@ -65,15 +56,6 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn detach(self: Runtime, writer: *std.Io.Writer) !void {
-        if (try self.inTmux()) {
-            const tx = self.tmux();
-            try tx.detachClient();
-        } else {
-            try writer.writeAll("Not in tmux session\n");
-        }
-    }
-
     pub fn logs(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
         _ = try self.cfg.findService(service);
         if (!try self.sessionExists()) {
@@ -87,26 +69,6 @@ pub const Runtime = struct {
         }
         try tx.selectWindow(service);
         if (!try self.inTmux()) try self.attach();
-    }
-
-    pub fn follow(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
-        _ = try self.cfg.findService(service);
-        if (!try self.sessionExists()) {
-            try writer.writeAll("Session not running\n");
-            try writer.flush();
-            return error.SessionNotRunning;
-        }
-        const manager = self.logSession();
-        const log_file = manager.prepareLogFile(service) catch |err| switch (err) {
-            error.LogSessionNotInitialized => {
-                try writer.writeAll("Log session not initialized. Run 'hello' first.\n");
-                try writer.flush();
-                return error.LogSessionNotInitialized;
-            },
-            else => return err,
-        };
-        const tx = self.tmux();
-        try tx.popup(self.cfg.popupWidth(), self.cfg.popupHeight(), try std.fmt.allocPrint(self.gpa, "nvim -c 'terminal tail -F {s}'", .{try shell.quote(self.gpa, log_file)}));
     }
 
     pub fn previewList(self: Runtime, pane_id: []const u8, client_width: u16, client_height: u16) !void {
@@ -166,8 +128,6 @@ pub const Runtime = struct {
         try self.appendServiceAndDockerWindows(scratch);
         try self.focusDashboard();
         try tmux_setup.bindControlKeys(scratch, tx);
-        try self.logSession().init();
-        try self.setupPipePane(scratch, writer);
         try self.lifecycle().startAll(profile, writer);
         try self.attach();
     }
@@ -184,7 +144,6 @@ pub const Runtime = struct {
             return;
         }
         try self.lifecycle().stopAll(writer);
-        self.cleanupPipePane() catch {};
         self.runner().sleep(bye_kill_settle);
         const tx = self.tmux();
         try tx.killSession();
@@ -194,7 +153,6 @@ pub const Runtime = struct {
         const guard = try self.acquireLock();
         defer guard.release();
         try self.lifecycle().stopDocker(writer);
-        try self.cleanupPipePane();
         if (try self.sessionExists()) {
             const tx = self.tmux();
             try tx.killSession();
@@ -275,17 +233,6 @@ pub const Runtime = struct {
         };
     }
 
-    fn logSession(self: Runtime) log_session.Manager {
-        return .{
-            .gpa = self.gpa,
-            .io = self.io,
-            .environ = self.environ,
-            .cfg = self.cfg,
-            .runner = self.runner(),
-            .tmux = self.tmux(),
-        };
-    }
-
     fn acquireLock(self: Runtime) !lock.Lock {
         return lock.Lock.acquire(self.gpa, self.runner(), try self.cfg.projectName(), try paths.runtimeBase(self.gpa, self.environ));
     }
@@ -327,36 +274,6 @@ pub const Runtime = struct {
 
     fn focusDashboard(self: Runtime) !void {
         try self.tmux().selectWindow(session_layout.dashboard_window);
-    }
-
-    fn setupPipePane(self: Runtime, scratch: std.mem.Allocator, writer: *std.Io.Writer) !void {
-        const manager = self.logSession();
-        const tx = self.tmux();
-        for (try self.cfg.services()) |service| {
-            const name = try config.Config.serviceName(service);
-            const log_file = manager.prepareLogFile(name) catch |err| {
-                try writer.print("Warning: log setup failed for {s}: {}\n", .{ name, err });
-                continue;
-            };
-            const quoted = shell.quote(scratch, log_file) catch |err| {
-                try writer.print("Warning: log setup failed for {s}: {}\n", .{ name, err });
-                continue;
-            };
-            const command = std.fmt.allocPrint(scratch, "cat >> {s}", .{quoted}) catch |err| {
-                try writer.print("Warning: log setup failed for {s}: {}\n", .{ name, err });
-                continue;
-            };
-            _ = tx.pipePane(name, command) catch {};
-        }
-    }
-
-    fn cleanupPipePane(self: Runtime) !void {
-        if (!try self.sessionExists()) return;
-        const tx = self.tmux();
-        for (try self.cfg.services()) |service| {
-            const name = try config.Config.serviceName(service);
-            _ = tx.pipePane(name, null) catch {};
-        }
     }
 
     fn sessionExists(self: Runtime) !bool {
@@ -468,7 +385,7 @@ test "exec passes default command without shell wrapping" {
     try std.testing.expect(!proc_runner.commandContains(command, "bash -lc"));
 }
 
-test "bye kills session even when pipe cleanup fails" {
+test "bye kills session after service stop wait failure" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -497,7 +414,7 @@ test "bye kills session even when pipe cleanup fails" {
     try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "demo" });
 }
 
-test "bye reaches kill-session after cleanup failure" {
+test "bye reaches kill-session after service and docker stop" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -519,7 +436,6 @@ test "bye reaches kill-session after cleanup failure" {
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
-    try recorder.enqueue("", "", .{ .exited = 1 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     const runtime = testRuntime(arena.allocator(), run, cfg);
@@ -530,7 +446,7 @@ test "bye reaches kill-session after cleanup failure" {
 
     const kill_index = recorder.commands.items.len - 1;
     try proc_runner.expectCommandOrder(&recorder, "C-c", "down");
-    try proc_runner.expectCommandOrder(&recorder, "down", "pipe-pane");
+    try proc_runner.expectCommandOrder(&recorder, "down", "kill-session");
     try proc_runner.expectCommandArg(recorder.commands.items[kill_index], 1, "kill-session");
     try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items.len);
     try std.testing.expectEqual(waits.docker_ready_settle, recorder.sleeps.items[0].duration);
@@ -694,8 +610,7 @@ test "hello creates session without tmuxp and keeps setup order" {
     try proc_runner.expectCommandContaining(&recorder, "@zask_dash_mode");
     try proc_runner.expectCommandContaining(&recorder, "bind-key");
     try proc_runner.expectCommandContaining(&recorder, "preview-list");
-    try proc_runner.expectCommandOrder(&recorder, "bind-key", "date");
-    try proc_runner.expectCommandOrder(&recorder, "@zask_log_session_id", "attach-session");
+    try proc_runner.expectCommandOrder(&recorder, "bind-key", "attach-session");
     try proc_runner.expectNoTmuxSizingCommands(&recorder);
     try proc_runner.expectNoRemainingResponses(&recorder);
 }

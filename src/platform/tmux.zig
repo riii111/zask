@@ -37,10 +37,6 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ self.tmux_path, "attach-session", "-t", self.session }, .{ .interactive = true, .check = true });
     }
 
-    pub fn detachClient(self: Client) !void {
-        _ = try self.runner.run(&.{ self.tmux_path, "detach-client" }, .{ .check = true, .discard = true });
-    }
-
     pub fn detachClientExec(self: Client, command: []const u8) !void {
         _ = try self.runner.run(&.{ self.tmux_path, "detach-client", "-E", command }, .{ .check = true, .discard = true });
     }
@@ -196,16 +192,6 @@ pub const Client = struct {
         _ = try self.runner.run(argv.items, .{ .check = true, .discard = true });
     }
 
-    pub fn pipePane(self: Client, window: []const u8, command: ?[]const u8) !void {
-        const pane_target = try self.target(window);
-        defer self.gpa.free(pane_target);
-        if (command) |cmd| {
-            _ = try self.runner.run(&.{ self.tmux_path, "pipe-pane", "-t", pane_target, cmd }, .{ .check = true, .discard = true });
-        } else {
-            _ = try self.runner.run(&.{ self.tmux_path, "pipe-pane", "-t", pane_target }, .{ .check = true, .discard = true });
-        }
-    }
-
     pub fn setOption(self: Client, name: []const u8, value: []const u8) !void {
         _ = try self.runner.run(&.{ self.tmux_path, "set-option", "-t", self.session, name, value }, .{ .check = true, .discard = true });
     }
@@ -225,10 +211,6 @@ pub const Client = struct {
 
     pub fn chooseTree(self: Client, pane_id: []const u8) !void {
         _ = try self.runner.run(&.{ self.tmux_path, "choose-tree", "-Zw", "-t", pane_id }, .{ .check = true, .discard = true });
-    }
-
-    pub fn popup(self: Client, width: []const u8, height: []const u8, command: []const u8) !void {
-        _ = try self.runner.run(&.{ self.tmux_path, "popup", "-w", width, "-h", height, "-E", command }, .{ .check = true, .discard = true });
     }
 
     fn target(self: Client, window: []const u8) ![]const u8 {
@@ -353,34 +335,26 @@ test "client lifecycle commands record tmux argv" {
 
     try client.switchClient();
     try client.attachSession();
-    try client.detachClient();
     try client.detachClientExec("zask re");
     try client.killSession();
 
     try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "switch-client", "-t", "demo" });
     try runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "attach-session", "-t", "demo" });
     try std.testing.expect(recorder.commands.items[1].interactive);
-    try runner.expectCommandArgv(recorder.commands.items[2], &.{ "tmux", "detach-client" });
-    try runner.expectCommandArgv(recorder.commands.items[3], &.{ "tmux", "detach-client", "-E", "zask re" });
-    try runner.expectCommandArgv(recorder.commands.items[4], &.{ "tmux", "kill-session", "-t", "demo" });
+    try runner.expectCommandArgv(recorder.commands.items[2], &.{ "tmux", "detach-client", "-E", "zask re" });
+    try runner.expectCommandArgv(recorder.commands.items[3], &.{ "tmux", "kill-session", "-t", "demo" });
 }
 
-test "options popup and pipe helpers record tmux argv" {
+test "options and binding helpers record tmux argv" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     const client = testClient(&recorder);
 
     try client.setOption("@mode", "all");
-    try client.bindRunShell("f", "zask follow api");
-    try client.popup("80%", "60%", "tail -f log");
-    try client.pipePane("api", "cat >> api.log");
-    try client.pipePane("api", null);
+    try client.bindRunShell("w", "zask preview-list");
 
     try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "set-option", "-t", "demo", "@mode", "all" });
-    try runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "bind-key", "-T", "prefix", "f", "run-shell", "zask follow api" });
-    try runner.expectCommandArgv(recorder.commands.items[2], &.{ "tmux", "popup", "-w", "80%", "-h", "60%", "-E", "tail -f log" });
-    try runner.expectCommandArgv(recorder.commands.items[3], &.{ "tmux", "pipe-pane", "-t", "demo:api", "cat >> api.log" });
-    try std.testing.expectEqual(@as(usize, 4), recorder.commands.items[4].argv.len);
+    try runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "bind-key", "-T", "prefix", "w", "run-shell", "zask preview-list" });
 }
 
 test "sendKeys records tmux command through runner" {

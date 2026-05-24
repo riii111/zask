@@ -7,7 +7,6 @@ pub const dashboard = @import("interface/ui/dashboard.zig");
 pub const docker = @import("platform/docker.zig");
 pub const lifecycle = @import("workflow/lifecycle.zig");
 pub const lock = @import("platform/lock.zig");
-pub const log_session = @import("workflow/log_session.zig");
 pub const observations = @import("model/observations.zig");
 pub const phases = @import("workflow/phases.zig");
 pub const paths = @import("platform/paths.zig");

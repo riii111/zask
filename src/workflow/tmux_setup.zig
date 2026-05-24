@@ -12,7 +12,7 @@ pub const SessionOptions = struct {
 
 pub fn applySessionOptions(gpa: std.mem.Allocator, tx: tmux_client.Client, opts: SessionOptions) !void {
     try tx.setOption("prefix", "C-q");
-    try tx.setOption("status-left", try std.fmt.allocPrint(gpa, "[{s}] Ctrl+q w:list | f:follow | ':number | z:zoom | [:scroll | d:detach ", .{opts.project}));
+    try tx.setOption("status-left", try std.fmt.allocPrint(gpa, "[{s}] Ctrl+q w:list | ':number | z:zoom | [:scroll | d:detach ", .{opts.project}));
     try tx.setOption("status-left-length", "80");
     try tx.setOption("status-right", "");
     try tx.setOption("remain-on-exit", "on");
@@ -39,12 +39,6 @@ pub fn bindControlKeys(gpa: std.mem.Allocator, tx: tmux_client.Client) !void {
         \\  tmux set-option -t "$session" {s} all;
         \\fi
     , .{ tmux_options.dash_mode, tmux_options.dash_mode, tmux_options.dash_mode }));
-    try tx.bindRunShell("f", try std.fmt.allocPrint(gpa,
-        \\session="#{{session_name}}";
-        \\zask=$(tmux show-option -t "$session" -qv {s});
-        \\config=$(tmux show-option -t "$session" -qv {s});
-        \\"$zask" --config "$config" follow "#{{window_name}}"
-    , .{ tmux_options.zask_path, tmux_options.config_path }));
 }
 
 test "list binding delegates preview sizing to zask command" {
