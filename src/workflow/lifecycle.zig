@@ -52,29 +52,27 @@ pub const Lifecycle = struct {
     }
 
     pub fn startTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
-        const t = target;
         try self.ensureSessionActive(writer);
-        if (std.mem.eql(u8, t, "--all")) return self.startAll("all", writer);
-        if (std.mem.eql(u8, t, "docker")) {
+        if (std.mem.eql(u8, target, "--all")) return self.startAll("all", writer);
+        if (std.mem.eql(u8, target, "docker")) {
             try self.ensureDockerStarted(writer);
             return waits.ensureDockerReady(self, writer);
         }
-        if (self.cfg.resolveGroup(self.gpa, t)) |services| {
+        if (self.cfg.resolveGroup(self.gpa, target)) |services| {
             for (services) |svc| try self.startService(svc, writer);
-        } else |_| try self.startService(t, writer);
+        } else |_| try self.startService(target, writer);
     }
 
     pub fn stopTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
-        const t = target;
-        if (std.mem.eql(u8, t, "docker")) return self.stopDocker(writer);
+        if (std.mem.eql(u8, target, "docker")) return self.stopDocker(writer);
         if (self.tmux.observeSession() != .active) {
-            if (std.mem.eql(u8, t, "--all")) return self.stopDocker(writer);
+            if (std.mem.eql(u8, target, "--all")) return self.stopDocker(writer);
             return sessionNotRunning(writer);
         }
-        if (std.mem.eql(u8, t, "--all")) return self.stopAll(writer);
-        if (self.cfg.resolveGroup(self.gpa, t)) |services| {
+        if (std.mem.eql(u8, target, "--all")) return self.stopAll(writer);
+        if (self.cfg.resolveGroup(self.gpa, target)) |services| {
             for (services) |svc| try self.stopService(svc, writer);
-        } else |_| try self.stopService(t, writer);
+        } else |_| try self.stopService(target, writer);
     }
 
     pub fn restartTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {

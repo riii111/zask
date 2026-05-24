@@ -101,11 +101,11 @@ const launcher_commands = [_]LauncherCommand{
     .{ .usage = "attach", .description = "Attach to existing workspace" },
     .{ .usage = "re", .description = "Restart session" },
     .{ .usage = "status", .description = "Show all status" },
-    .{ .usage = "start <svc|group>", .description = "Start a service or group" },
+    .{ .usage = "start <svc|group|docker>", .description = "Start a resource" },
     .{ .usage = "start --all", .description = "Start all resources" },
-    .{ .usage = "stop <svc|group>", .description = "Stop a service or group" },
+    .{ .usage = "stop <svc|group|docker>", .description = "Stop a resource" },
     .{ .usage = "stop --all", .description = "Stop all resources" },
-    .{ .usage = "restart <svc|group>", .description = "Restart a service or group" },
+    .{ .usage = "restart <svc|group|docker>", .description = "Restart a resource" },
     .{ .usage = "logs <svc>", .description = "Jump to window" },
 };
 
