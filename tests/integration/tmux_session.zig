@@ -117,6 +117,40 @@ test "session setup refreshes stale list binding in existing session" {
     try std.testing.expect(std.mem.indexOf(u8, binding.stdout, "#{client_height}") != null);
 }
 
+test "session setup keeps global attach hook while refreshing size hook" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(arena.allocator(), "zask-test-{d}-hooks", .{std.c.getpid()});
+    const client = tmuxClient(arena.allocator(), io, session);
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", "/tmp", "sleep 60");
+    defer client.killSession() catch {};
+    try runDiscard(arena.allocator(), io, &.{ build_options.tmux_path, "set-hook", "-g", "client-attached", "display-message global" });
+
+    try zask.tmux_setup.applySessionOptions(arena.allocator(), client, .{
+        .project = "demo",
+        .zask_path = "/bin/zask",
+        .config_path = "/tmp/config.json",
+    });
+
+    const global_hooks = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "show-hooks", "-g" });
+    defer std.testing.allocator.free(global_hooks.stdout);
+    defer std.testing.allocator.free(global_hooks.stderr);
+    try std.testing.expect(std.mem.indexOf(u8, global_hooks.stdout, "client-attached[0] display-message global") != null);
+
+    const hooks = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "show-hooks", "-t", session });
+    defer std.testing.allocator.free(hooks.stdout);
+    defer std.testing.allocator.free(hooks.stderr);
+    try std.testing.expect(std.mem.indexOf(u8, hooks.stdout, "client-active") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hooks.stdout, "sync-size") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hooks.stdout, "#{client_width}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hooks.stdout, "#{client_height}") != null);
+}
+
 fn tmuxClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) zask.tmux.Client {
     return .{
         .gpa = gpa,
