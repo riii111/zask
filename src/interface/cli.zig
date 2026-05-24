@@ -68,6 +68,7 @@ const CommandSpec = struct {
     usage: []const u8 = "",
     description: []const u8 = "",
     global: bool = false,
+    internal: bool = false,
     show_in_help: bool = true,
 };
 
@@ -85,9 +86,9 @@ const command_specs = [_]CommandSpec{
     .{ .command = .exec, .names = &.{"exec"}, .usage = "exec <container> [--shell]", .description = "Enter Docker container" },
     .{ .command = .version, .names = &.{"version"}, .usage = "version", .description = "Print zask version", .global = true },
     .{ .command = .help, .names = &.{ "help", "--help", "-h" }, .usage = "help", .description = "Print this help", .global = true },
-    .{ .command = .dashboard, .names = &.{"dashboard"}, .show_in_help = false },
-    .{ .command = .monitor, .names = &.{"monitor"}, .show_in_help = false },
-    .{ .command = .preview_list, .names = &.{"preview-list"}, .show_in_help = false },
+    .{ .command = .dashboard, .names = &.{"dashboard"}, .internal = true, .show_in_help = false },
+    .{ .command = .monitor, .names = &.{"monitor"}, .internal = true, .show_in_help = false },
+    .{ .command = .preview_list, .names = &.{"preview-list"}, .internal = true, .show_in_help = false },
 };
 
 pub fn run(init: std.process.Init) !void {
@@ -124,7 +125,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
         if (err == error.InvalidArguments) try printHelp(writer);
         return err;
     };
-    const command = parseCommand(parsed.command) orelse return error.UnknownCommand;
+    const command = parseCommand(parsed.command, parsed.config_path != null) orelse return error.UnknownCommand;
     var run_context: cli_context.Context = .{ .base = context, .parsed = parsed, .writer = writer, .print_help = printHelp };
     try command.run(&run_context);
 }
@@ -195,8 +196,9 @@ fn isGlobalCommand(command: []const u8) bool {
     return false;
 }
 
-fn parseCommand(command: []const u8) ?Command {
+fn parseCommand(command: []const u8, allow_internal: bool) ?Command {
     for (command_specs) |spec| {
+        if (spec.internal and !allow_internal) continue;
         for (spec.names) |name| {
             if (std.mem.eql(u8, command, name)) return spec.command;
         }
@@ -218,11 +220,15 @@ test "command metadata parses aliases and global commands" {
         .{ .input = "hello", .expected = .hello },
         .{ .input = "follow", .expected = null },
         .{ .input = "list", .expected = null },
+        .{ .input = "dashboard", .expected = null },
+        .{ .input = "preview-list", .expected = null },
         .{ .input = "render-session", .expected = null },
     };
     for (command_cases) |case| {
-        try std.testing.expectEqual(case.expected, parseCommand(case.input));
+        try std.testing.expectEqual(case.expected, parseCommand(case.input, false));
     }
+    try std.testing.expectEqual(Command.dashboard, parseCommand("dashboard", true));
+    try std.testing.expectEqual(Command.preview_list, parseCommand("preview-list", true));
 
     const global_cases = [_]struct {
         input: []const u8,
