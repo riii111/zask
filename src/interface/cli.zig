@@ -3,9 +3,7 @@ const attach = @import("cli/attach.zig");
 const close = @import("cli/close.zig");
 const cli_context = @import("cli/context.zig");
 const dashboard = @import("cli/dashboard.zig");
-const exec = @import("cli/exec.zig");
 const help = @import("cli/help.zig");
-const kill = @import("cli/kill.zig");
 const logs = @import("cli/logs.zig");
 const monitor = @import("cli/monitor.zig");
 const open = @import("cli/open.zig");
@@ -30,12 +28,10 @@ const Command = enum {
     logs,
     open,
     close,
-    kill,
     re,
     start,
     stop,
     restart,
-    exec,
     dashboard,
     monitor,
     preview_list,
@@ -49,12 +45,10 @@ const Command = enum {
             .logs => runCommand(logs, context),
             .open => runCommand(open, context),
             .close => runCommand(close, context),
-            .kill => runCommand(kill, context),
             .re => runCommand(re, context),
             .start => runCommand(start, context),
             .stop => runCommand(stop, context),
             .restart => runCommand(restart, context),
-            .exec => runCommand(exec, context),
             .dashboard => runCommand(dashboard, context),
             .monitor => runCommand(monitor, context),
             .preview_list => runCommand(preview_list, context),
@@ -77,13 +71,11 @@ const command_specs = [_]CommandSpec{
     .{ .command = .close, .names = &.{"close"}, .usage = "close", .description = "Stop resources and close workspace" },
     .{ .command = .re, .names = &.{"re"}, .usage = "re", .description = "Restart session" },
     .{ .command = .attach, .names = &.{"attach"}, .usage = "attach", .description = "Attach to existing workspace" },
-    .{ .command = .kill, .names = &.{"kill"}, .show_in_help = false },
     .{ .command = .start, .names = &.{"start"}, .usage = "start <--all|docker|name>", .description = "Start resources in existing workspace" },
     .{ .command = .stop, .names = &.{"stop"}, .usage = "stop <--all|docker|name>", .description = "Stop resources, keeping workspace open" },
     .{ .command = .restart, .names = &.{"restart"}, .usage = "restart <docker|name>", .description = "Restart service, group, or docker" },
     .{ .command = .status, .names = &.{"status"}, .usage = "status", .description = "Show service state" },
     .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window" },
-    .{ .command = .exec, .names = &.{"exec"}, .usage = "exec <container> [--shell]", .description = "Enter Docker container" },
     .{ .command = .version, .names = &.{"version"}, .usage = "version", .description = "Print zask version", .global = true },
     .{ .command = .help, .names = &.{ "help", "--help", "-h" }, .usage = "help", .description = "Print this help", .global = true },
     .{ .command = .dashboard, .names = &.{"dashboard"}, .internal = true, .show_in_help = false },
@@ -221,6 +213,8 @@ test "command metadata parses aliases and global commands" {
         .{ .input = "hello", .expected = null },
         .{ .input = "bye", .expected = null },
         .{ .input = "up", .expected = null },
+        .{ .input = "kill", .expected = null },
+        .{ .input = "exec", .expected = null },
         .{ .input = "list", .expected = null },
         .{ .input = "detach", .expected = null },
         .{ .input = "dashboard", .expected = null },
@@ -267,7 +261,7 @@ test "help prints usage" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "up [") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "render-session") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "preview-list") == null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "exec <container>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "exec <container>") == null);
 }
 
 test "project alias without arguments prints usage" {

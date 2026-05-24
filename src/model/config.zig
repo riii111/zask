@@ -188,11 +188,6 @@ pub const Config = struct {
         return config_value.requiredObjectString(phase, "command");
     }
 
-    pub fn dockerExecDefault(self: Config, container: []const u8) []const u8 {
-        const node = self.get(&.{ "docker", "exec_defaults", container }) orelse return "bash";
-        return if (node == .string) node.string else "bash";
-    }
-
     pub fn requiredString(self: Config, path: []const []const u8) ![]const u8 {
         return self.view().requiredString(path);
     }
@@ -307,8 +302,7 @@ test "resolves profiles and phase group overrides" {
         \\      "label": "core services",
         \\      "group_overrides": {"backend":"core-backend"}
         \\    }
-        \\  },
-        \\  "docker": {"exec_defaults": {"db": "psql"}}
+        \\  }
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -318,7 +312,6 @@ test "resolves profiles and phase group overrides" {
     try std.testing.expectEqualStrings("core", cfg.resolveStartProfileOption("--core").?);
     try std.testing.expectEqualStrings("core services", cfg.startProfileLabel("core"));
     try std.testing.expectEqualStrings("core-backend", cfg.resolvePhaseGroup("core", "backend"));
-    try std.testing.expectEqualStrings("psql", cfg.dockerExecDefault("db"));
 
     const group = try cfg.resolveGroup(arena.allocator(), "backend");
     try std.testing.expectEqual(@as(usize, 2), group.len);
@@ -459,6 +452,5 @@ test "parses synthetic fixture" {
     try std.testing.expectEqual(@as(usize, 3), (try cfg.services()).len);
     try std.testing.expectEqual(@as(usize, 3), cfg.phases().len);
     try std.testing.expectEqualStrings("core-backend", cfg.resolvePhaseGroup("core", "backend"));
-    try std.testing.expectEqualStrings("psql", cfg.dockerExecDefault("db"));
     try std.testing.expectEqual(@as(?i64, 18080), Config.servicePort(try cfg.findService("api")));
 }

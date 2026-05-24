@@ -10,7 +10,6 @@ const proc_runner = @import("../platform/runner.zig");
 const session_layout = @import("session_layout.zig");
 const tmux_client = @import("../platform/tmux.zig");
 const tmux_setup = @import("tmux_setup.zig");
-const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
 const zask_command = @import("zask_command.zig");
 
@@ -149,18 +148,6 @@ pub const Runtime = struct {
         try tx.killSession();
     }
 
-    pub fn kill(self: Runtime, writer: *std.Io.Writer) !void {
-        const guard = try self.acquireLock();
-        defer guard.release();
-        try self.lifecycle().stopDocker(writer);
-        if (try self.sessionExists()) {
-            const tx = self.tmux();
-            try tx.killSession();
-        } else {
-            try writer.writeAll("Session not running\n");
-        }
-    }
-
     pub fn re(self: Runtime, writer: *std.Io.Writer) !void {
         if (try self.inTmux()) {
             const tx = self.tmux();
@@ -185,30 +172,6 @@ pub const Runtime = struct {
 
     pub fn restart(self: Runtime, target: []const u8, writer: *std.Io.Writer) !void {
         try self.lifecycle().restartTarget(target, writer);
-    }
-
-    pub fn exec(self: Runtime, container: []const u8, use_shell: bool, writer: *std.Io.Writer) !void {
-        if (!self.cfg.dockerEnabled()) return error.DockerDisabled;
-        try validate.identifier(container);
-        const dc = self.docker();
-        const compose = dc.observe();
-        defer compose.deinit(self.gpa);
-        if (compose.state == .unavailable) {
-            try writer.writeAll("Docker compose services unavailable\n");
-            return error.DockerUnavailable;
-        }
-        if (compose.state == .empty) {
-            try writer.writeAll("No running containers. Run 'start docker' first.\n");
-            return error.ContainerNotRunning;
-        }
-        if (!compose.contains(container)) {
-            try writer.print("Container '{s}' is not running\n", .{container});
-            try writer.writeAll("Running containers:\n");
-            for (compose.services) |service| try writer.print("  {s}\n", .{service});
-            return error.ContainerNotRunning;
-        }
-        const exec_cmd = if (use_shell) "bash" else self.cfg.dockerExecDefault(container);
-        try dc.execInteractive(container, exec_cmd);
     }
 
     fn runner(self: Runtime) proc_runner.Runner {
@@ -305,84 +268,6 @@ test "maps observations to status text" {
     try std.testing.expectEqualStrings("running", paneStatusText(.busy));
     try std.testing.expectEqualStrings("stopped", paneStatusText(.idle));
     try std.testing.expectEqualStrings("unknown", composeStatusText(.unavailable));
-}
-
-test "exec rejects disabled or unavailable containers" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": false},
-        \\  "services": []
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var recorder = proc_runner.Recorder.init(arena.allocator());
-    defer recorder.deinit();
-    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const runtime = testRuntime(arena.allocator(), run, cfg);
-    var buffer: [128]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buffer);
-
-    try std.testing.expectError(error.DockerDisabled, runtime.exec("api", false, &writer));
-}
-
-test "exec reports missing containers and uses shell override" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true, "exec_defaults": {"db": "psql"}},
-        \\  "services": []
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var recorder = proc_runner.Recorder.init(arena.allocator());
-    defer recorder.deinit();
-    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const runtime = testRuntime(arena.allocator(), run, cfg);
-    var buffer: [256]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buffer);
-
-    try recorder.enqueue("\n", "", .{ .exited = 0 });
-    try std.testing.expectError(error.ContainerNotRunning, runtime.exec("db", false, &writer));
-    try recorder.enqueue("api\n", "", .{ .exited = 0 });
-    try std.testing.expectError(error.ContainerNotRunning, runtime.exec("db", false, &writer));
-    try recorder.enqueue("db\n", "", .{ .exited = 0 });
-    try runtime.exec("db", true, &writer);
-
-    const command = recorder.commands.items[3];
-    try std.testing.expect(command.interactive);
-    try proc_runner.expectCommandArg(command, 6, "bash");
-}
-
-test "exec passes default command without shell wrapping" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true, "exec_defaults": {"db": "psql -c 'select 1'"}},
-        \\  "services": []
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var recorder = proc_runner.Recorder.init(arena.allocator());
-    defer recorder.deinit();
-    try recorder.enqueue("db\n", "", .{ .exited = 0 });
-    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const runtime = testRuntime(arena.allocator(), run, cfg);
-    var buffer: [128]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buffer);
-
-    try runtime.exec("db", false, &writer);
-
-    const command = recorder.commands.items[1];
-    try std.testing.expect(command.interactive);
-    try proc_runner.expectCommandArgv(command, &.{ "docker", "compose", "-f", "compose.yaml", "exec", "db", "psql", "-c", "select 1" });
-    try std.testing.expect(!proc_runner.commandContains(command, "bash -lc"));
 }
 
 test "close kills session after service stop wait failure" {
