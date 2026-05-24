@@ -196,6 +196,10 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ self.tmux_path, "set-option", "-t", self.session, name, value }, .{ .check = true, .discard = true });
     }
 
+    pub fn setHook(self: Client, name: []const u8, command: []const u8) !void {
+        _ = try self.runner.run(&.{ self.tmux_path, "set-hook", "-t", self.session, name, command }, .{ .check = true, .discard = true });
+    }
+
     pub fn showOption(self: Client, name: []const u8) !?[]const u8 {
         const result = runner.captured(self.runner.run(&.{ self.tmux_path, "show-option", "-t", self.session, "-qv", name }, .{}) catch return null);
         defer self.gpa.free(result.stdout);
@@ -351,10 +355,12 @@ test "options and binding helpers record tmux argv" {
     const client = testClient(&recorder);
 
     try client.setOption("@mode", "all");
+    try client.setHook("client-attached", "zask sync-size");
     try client.bindRunShell("w", "zask preview-list");
 
     try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "set-option", "-t", "demo", "@mode", "all" });
-    try runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "bind-key", "-T", "prefix", "w", "run-shell", "zask preview-list" });
+    try runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "set-hook", "-t", "demo", "client-attached", "zask sync-size" });
+    try runner.expectCommandArgv(recorder.commands.items[2], &.{ "tmux", "bind-key", "-T", "prefix", "w", "run-shell", "zask preview-list" });
 }
 
 test "sendKeys records tmux command through runner" {

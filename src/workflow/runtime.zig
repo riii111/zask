@@ -52,16 +52,7 @@ pub const Runtime = struct {
             try writer.flush();
             return error.SessionNotRunning;
         }
-        try self.attachExisting();
-    }
-
-    fn attachExisting(self: Runtime) !void {
-        const tx = self.tmux();
-        if (try self.inTmux()) {
-            try tx.switchClient();
-        } else {
-            try tx.attachSession();
-        }
+        try self.attachExistingWithRefreshedHooks();
     }
 
     pub fn logs(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
@@ -80,6 +71,11 @@ pub const Runtime = struct {
     }
 
     pub fn previewList(self: Runtime, pane_id: []const u8, client_width: u16, client_height: u16) !void {
+        try self.syncWindowSizes(client_width, client_height);
+        try self.tmux().chooseTree(pane_id);
+    }
+
+    pub fn syncWindowSizes(self: Runtime, client_width: u16, client_height: u16) !void {
         if (client_width == 0 or client_height <= tmux_status_bar_height) return error.InvalidPreviewSize;
         const expected_height = client_height - tmux_status_bar_height;
         const tx = self.tmux();
@@ -101,14 +97,12 @@ pub const Runtime = struct {
             if (window.width != client_width or window.height != expected_height) return error.WindowSizeMismatch;
         }
         for (resized) |window| try tx.restoreWindowAutoSize(window.id);
-
-        try tx.chooseTree(pane_id);
     }
 
     pub fn open(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
         const guard = self.acquireLock() catch |err| switch (err) {
             error.LockBusy => {
-                if (try self.sessionExists()) return self.attachExisting();
+                if (try self.sessionExists()) return self.attachExistingWithRefreshedHooks();
                 return err;
             },
             else => return err,
@@ -129,7 +123,7 @@ pub const Runtime = struct {
             try self.lifecycle().startAll(profile, writer);
             try writer.writeAll("Attaching to workspace...\n");
             try writer.flush();
-            try self.attach(writer);
+            try self.attachExisting();
             return;
         }
         try writer.writeAll("Opening workspace...\n");
@@ -145,7 +139,7 @@ pub const Runtime = struct {
         try self.lifecycle().startAll(profile, writer);
         try writer.writeAll("Attaching to workspace...\n");
         try writer.flush();
-        try self.attach(writer);
+        try self.attachExisting();
     }
 
     pub fn close(self: Runtime, writer: *std.Io.Writer) !void {
@@ -256,6 +250,22 @@ pub const Runtime = struct {
         try self.tmux().selectWindow(session_layout.dashboard_window);
     }
 
+    fn attachExistingWithRefreshedHooks(self: Runtime) !void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        try tmux_setup.bindClientSizeHooks(arena.allocator(), self.tmux());
+        try self.attachExisting();
+    }
+
+    fn attachExisting(self: Runtime) !void {
+        const tx = self.tmux();
+        if (try self.inTmux()) {
+            try tx.switchClient();
+        } else {
+            try tx.attachSession();
+        }
+    }
+
     fn sessionExists(self: Runtime) !bool {
         return self.tmux().hasSession();
     }
@@ -357,7 +367,7 @@ test "runtime.close: kills session after resource stop" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "runtime.attach: switches tmux client" {
+test "runtime.attach: refreshes size hooks before switching client" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -380,9 +390,11 @@ test "runtime.attach: switches tmux client" {
 
     try runtime.attach(&writer);
 
-    try std.testing.expectEqual(@as(usize, 2), recorder.commands.items.len);
     try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
-    try proc_runner.expectCommandArg(recorder.commands.items[1], 1, "switch-client");
+    try proc_runner.expectCommandArg(recorder.commands.items[1], 1, "set-hook");
+    try proc_runner.expectCommandArg(recorder.commands.items[2], 1, "switch-client");
+    try proc_runner.expectCommandContaining(&recorder, "sync-size");
+    try proc_runner.expectNoTmuxSizingCommands(&recorder);
 }
 
 test "runtime.attach: reports missing session" {
@@ -645,6 +657,35 @@ test "runtime.previewList: rejects resized window mismatch" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
+test "syncWindowSizes resizes windows without opening tree mode" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("@1|80|24\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("@1|120|39\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+
+    try runtime.syncWindowSizes(120, 40);
+
+    try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "list-windows");
+    try proc_runner.expectCommandArg(recorder.commands.items[1], 1, "resize-window");
+    try proc_runner.expectCommandArg(recorder.commands.items[2], 1, "list-windows");
+    try proc_runner.expectCommandArg(recorder.commands.items[3], 1, "set-option");
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "choose-tree") == null);
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
 test "runtime.open: attaches when lock is busy" {
     const json =
         \\{
@@ -684,7 +725,8 @@ test "runtime.open: attaches when lock is busy" {
     try runtime.open("all", &writer);
 
     try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
-    try proc_runner.expectCommandArg(recorder.commands.items[1], 1, "switch-client");
+    try proc_runner.expectCommandArg(recorder.commands.items[1], 1, "set-hook");
+    try proc_runner.expectCommandArg(recorder.commands.items[2], 1, "switch-client");
 }
 
 test "runtime.open: preserves lock busy before session exists" {

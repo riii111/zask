@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const proc_runner = @import("../platform/runner.zig");
+const shell = @import("../platform/shell.zig");
 const tmux_client = @import("../platform/tmux.zig");
 const tmux_options = @import("../model/tmux_options.zig");
 
@@ -21,6 +22,11 @@ pub fn applySessionOptions(gpa: std.mem.Allocator, tx: tmux_client.Client, opts:
     try tx.setOption(tmux_options.dash_mode, "all");
     try tx.setOption(tmux_options.zask_path, opts.zask_path);
     try tx.setOption(tmux_options.config_path, opts.config_path);
+    try bindClientSizeHooks(gpa, tx);
+}
+
+pub fn bindClientSizeHooks(gpa: std.mem.Allocator, tx: tmux_client.Client) !void {
+    try tx.setHook("client-active", try syncSizeCommand(gpa));
 }
 
 pub fn bindControlKeys(gpa: std.mem.Allocator, tx: tmux_client.Client) !void {
@@ -39,6 +45,17 @@ pub fn bindControlKeys(gpa: std.mem.Allocator, tx: tmux_client.Client) !void {
         \\  tmux set-option -t "$session" {s} all;
         \\fi
     , .{ tmux_options.dash_mode, tmux_options.dash_mode, tmux_options.dash_mode }));
+}
+
+fn syncSizeCommand(gpa: std.mem.Allocator) ![]const u8 {
+    const command = try std.fmt.allocPrint(gpa,
+        \\session="#{{session_name}}";
+        \\zask=$(tmux show-option -t "$session" -qv {s});
+        \\config=$(tmux show-option -t "$session" -qv {s});
+        \\"$zask" --config "$config" sync-size "#{{client_width}}" "#{{client_height}}"
+    , .{ tmux_options.zask_path, tmux_options.config_path });
+    const quoted = try shell.quote(gpa, command);
+    return try std.fmt.allocPrint(gpa, "run-shell {s}", .{quoted});
 }
 
 test "list binding delegates preview sizing to zask command" {
@@ -61,4 +78,21 @@ test "list binding delegates preview sizing to zask command" {
     try proc_runner.expectCommandArgContains(command, 6, "#{client_height}");
     try proc_runner.expectCommandArgNotContains(command, 6, "resize-window");
     try proc_runner.expectCommandArgNotContains(command, 6, "choose-tree");
+}
+
+test "client size hook runs sync command when client becomes active" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const tx = tmux_client.Client{ .gpa = arena.allocator(), .runner = run, .session = "demo" };
+
+    try bindClientSizeHooks(arena.allocator(), tx);
+
+    try proc_runner.expectCommandContaining(&recorder, "client-active");
+    try proc_runner.expectCommandContaining(&recorder, "run-shell");
+    try proc_runner.expectCommandContaining(&recorder, "sync-size");
+    try proc_runner.expectCommandContaining(&recorder, "#{client_width}");
+    try proc_runner.expectCommandContaining(&recorder, "#{client_height}");
 }
