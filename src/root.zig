@@ -11,7 +11,6 @@ pub const log_session = @import("workflow/log_session.zig");
 pub const observations = @import("model/observations.zig");
 pub const phases = @import("workflow/phases.zig");
 pub const paths = @import("platform/paths.zig");
-pub const render = @import("workflow/render.zig");
 pub const runner = @import("platform/runner.zig");
 pub const runtime = @import("workflow/runtime.zig");
 pub const shell = @import("platform/shell.zig");
@@ -19,7 +18,7 @@ pub const tmux = @import("platform/tmux.zig");
 pub const tmux_setup = @import("workflow/tmux_setup.zig");
 pub const validate = @import("model/validate.zig");
 pub const waits = @import("workflow/waits.zig");
-pub const yaml = @import("platform/yaml.zig");
+pub const zask_command = @import("workflow/zask_command.zig");
 
 pub fn greeting() []const u8 {
     return "Hello from zask";

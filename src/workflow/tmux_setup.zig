@@ -1,17 +1,32 @@
 const std = @import("std");
 
+const proc_runner = @import("../platform/runner.zig");
 const tmux_client = @import("../platform/tmux.zig");
 const tmux_options = @import("../model/tmux_options.zig");
 
-pub fn applySessionOptions(tx: tmux_client.Client, zask_path: []const u8, config_path: []const u8) !void {
+pub const SessionOptions = struct {
+    project: []const u8,
+    zask_path: []const u8,
+    config_path: []const u8,
+};
+
+pub fn applySessionOptions(gpa: std.mem.Allocator, tx: tmux_client.Client, opts: SessionOptions) !void {
     try tx.setOption("prefix", "C-q");
+    try tx.setOption("status-left", try std.fmt.allocPrint(gpa, "[{s}] Ctrl+q w:list | f:follow | ':number | z:zoom | [:scroll | d:detach ", .{opts.project}));
+    try tx.setOption("status-left-length", "80");
+    try tx.setOption("status-right", "");
+    try tx.setOption("remain-on-exit", "on");
+    try tx.setOption("automatic-rename", "off");
     try tx.setOption("status-format[0]", "#[align=left]#{T;=/#{status-left-length}:status-left}#[align=right]#{T;=/#{status-right-length}:status-right}");
     try tx.setOption(tmux_options.dash_mode, "all");
-    try tx.setOption(tmux_options.zask_path, zask_path);
-    try tx.setOption(tmux_options.config_path, config_path);
+    try tx.setOption(tmux_options.zask_path, opts.zask_path);
+    try tx.setOption(tmux_options.config_path, opts.config_path);
 }
 
 pub fn bindControlKeys(gpa: std.mem.Allocator, tx: tmux_client.Client) !void {
+    try tx.bindRunShell("w",
+        \\width="#{client_width}"; height="#{client_height}"; height=$((height - 1)); session="#{session_name}"; tmux list-windows -t "$session" -F "#{window_id}" | while IFS= read -r window; do tmux resize-window -x "$width" -y "$height" -t "$window"; done; tmux choose-tree -Zw -t "#{pane_id}"
+    );
     try tx.bindRunShell("m", try std.fmt.allocPrint(gpa,
         \\session="#{{session_name}}";
         \\mode=$(tmux show-option -t "$session" -qv {s});
@@ -27,4 +42,22 @@ pub fn bindControlKeys(gpa: std.mem.Allocator, tx: tmux_client.Client) !void {
         \\config=$(tmux show-option -t "$session" -qv {s});
         \\"$zask" --config "$config" follow "#{{window_name}}"
     , .{ tmux_options.zask_path, tmux_options.config_path }));
+}
+
+test "list binding resizes preview windows before choose-tree" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const tx = tmux_client.Client{ .gpa = arena.allocator(), .runner = run, .session = "demo" };
+
+    try bindControlKeys(arena.allocator(), tx);
+
+    const command = recorder.commands.items[0];
+    try std.testing.expectEqualStrings("bind-key", command.argv[1]);
+    try std.testing.expectEqualStrings("w", command.argv[4]);
+    try std.testing.expectEqualStrings("run-shell", command.argv[5]);
+    try std.testing.expect(std.mem.indexOf(u8, command.argv[6], "resize-window -x \"$width\" -y \"$height\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command.argv[6], "tmux choose-tree -Zw -t") != null);
 }

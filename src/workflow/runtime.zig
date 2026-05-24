@@ -7,13 +7,13 @@ const lock = @import("../platform/lock.zig");
 const log_session = @import("log_session.zig");
 const observations = @import("../model/observations.zig");
 const paths = @import("../platform/paths.zig");
-const render = @import("render.zig");
 const proc_runner = @import("../platform/runner.zig");
 const shell = @import("../platform/shell.zig");
 const tmux_client = @import("../platform/tmux.zig");
 const tmux_setup = @import("tmux_setup.zig");
 const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
+const zask_command = @import("zask_command.zig");
 
 const bye_kill_settle = std.Io.Duration.fromSeconds(1);
 
@@ -27,10 +27,6 @@ pub const Runtime = struct {
     runner_impl: proc_runner.Runner,
     tmux_impl: tmux_client.Client,
     docker_impl: docker_client.Compose,
-
-    pub fn renderSession(self: Runtime, writer: *std.Io.Writer) !void {
-        try render.renderTmuxp(self.cfg, self.gpa, writer, self.zask_path, self.config_path);
-    }
 
     pub fn list(self: Runtime, writer: *std.Io.Writer) !void {
         if (self.cfg.dockerEnabled()) try writer.writeAll("docker\n");
@@ -129,11 +125,9 @@ pub const Runtime = struct {
             try self.attach();
             return;
         }
-        const session_file = try self.writeSessionFile();
-        _ = try self.runner().run(&.{ "tmuxp", "load", "-d", session_file }, .{ .interactive = true, .check = true });
         const tx = self.tmux();
+        try self.createSessionSkeleton();
         errdefer tx.killSession() catch {};
-        try tmux_setup.applySessionOptions(tx, self.zask_path, self.config_path);
         try tmux_setup.bindControlKeys(self.gpa, tx);
         try self.logSession().init();
         try self.setupPipePane(writer);
@@ -175,7 +169,9 @@ pub const Runtime = struct {
     pub fn re(self: Runtime, writer: *std.Io.Writer) !void {
         if (try self.inTmux()) {
             const tx = self.tmux();
-            try tx.detachClientExec(try std.fmt.allocPrint(self.gpa, "{s} --config {s} re", .{ try shell.quote(self.gpa, self.zask_path), try shell.quote(self.gpa, self.config_path) }));
+            const command = try zask_command.invoke(self.gpa, self.zask_path, self.config_path, "re");
+            defer self.gpa.free(command);
+            try tx.detachClientExec(command);
             return;
         }
         const guard = try self.acquireLock();
@@ -257,15 +253,34 @@ pub const Runtime = struct {
         return lock.Lock.acquire(self.gpa, self.runner(), try self.cfg.projectName(), try paths.runtimeBase(self.gpa, self.environ));
     }
 
-    fn writeSessionFile(self: Runtime) ![]const u8 {
-        const dir = try std.fs.path.join(self.gpa, &.{ try paths.configBase(self.gpa, self.environ), try self.cfg.projectName() });
-        _ = try self.runner().run(&.{ "mkdir", "-p", dir }, .{ .check = true, .discard = true });
-        const path = try std.fs.path.join(self.gpa, &.{ dir, "session.yml" });
-        var out: std.Io.Writer.Allocating = .init(self.gpa);
-        defer out.deinit();
-        try self.renderSession(&out.writer);
-        try paths.writeFileMode(self.io, path, out.writer.buffered(), @enumFromInt(0o600));
-        return path;
+    fn createSessionSkeleton(self: Runtime) !void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        const tx = self.tmux();
+        const root = try self.cfg.projectRoot(scratch);
+        try tx.newSession("dashboard", root, try zask_command.invoke(scratch, self.zask_path, self.config_path, "dashboard"));
+        errdefer tx.killSession() catch {};
+        try tmux_setup.applySessionOptions(scratch, tx, .{
+            .project = try self.cfg.projectName(),
+            .zask_path = self.zask_path,
+            .config_path = self.config_path,
+        });
+        try tx.splitWindow("dashboard", root, try zask_command.invoke(scratch, self.zask_path, self.config_path, "monitor"));
+        try tx.setWindowOption("dashboard", "main-pane-width", "50%");
+        try tx.selectLayout("dashboard", "main-vertical");
+
+        var previous_window: []const u8 = "dashboard";
+        for (try self.cfg.services()) |service| {
+            const name = try config.Config.serviceName(service);
+            try tx.newWindowAfter(previous_window, name, try self.cfg.serviceDir(scratch, service), try zask_command.waitingPlaceholder(scratch, name));
+            previous_window = name;
+        }
+
+        if (self.cfg.dockerEnabled()) {
+            try tx.newWindowAfter(previous_window, "docker", try self.cfg.dockerDir(scratch), try zask_command.waitingPlaceholder(scratch, "Docker Services"));
+        }
+        try tx.selectWindow("dashboard");
     }
 
     fn setupPipePane(self: Runtime, writer: *std.Io.Writer) !void {
@@ -273,8 +288,6 @@ pub const Runtime = struct {
         const tx = self.tmux();
         for (try self.cfg.services()) |service| {
             const name = try config.Config.serviceName(service);
-            const target = try tx.target(name);
-            defer self.gpa.free(target);
             const log_file = manager.prepareLogFile(name) catch |err| {
                 try writer.print("Warning: log setup failed for {s}: {}\n", .{ name, err });
                 continue;
@@ -287,7 +300,7 @@ pub const Runtime = struct {
                 try writer.print("Warning: log setup failed for {s}: {}\n", .{ name, err });
                 continue;
             };
-            _ = tx.pipePane(target, command) catch {};
+            _ = tx.pipePane(name, command) catch {};
         }
     }
 
@@ -296,9 +309,7 @@ pub const Runtime = struct {
         const tx = self.tmux();
         for (try self.cfg.services()) |service| {
             const name = try config.Config.serviceName(service);
-            const target = try tx.target(name);
-            defer self.gpa.free(target);
-            _ = tx.pipePane(target, null) catch {};
+            _ = tx.pipePane(name, null) catch {};
         }
     }
 
@@ -513,7 +524,42 @@ test "attach from tmux switches client without mutating window sizes" {
     try std.testing.expectEqualStrings("switch-client", recorder.commands.items[0].argv[1]);
 }
 
-test "hello creates session with interactive tmuxp and no sizing commands" {
+test "session skeleton creates dashboard service and docker windows" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"enabled": true, "dir": "infra", "compose_file": "compose.yaml"},
+        \\  "services": [{"name":"api","dir":"backend","command":"serve","group":"backend"}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    var runtime = testRuntime(arena.allocator(), run, cfg);
+
+    try runtime.createSessionSkeleton();
+
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "tmuxp") == null);
+    try proc_runner.expectCommandContaining(&recorder, "new-session");
+    try proc_runner.expectCommandContaining(&recorder, "split-window");
+    try proc_runner.expectCommandContaining(&recorder, "main-pane-width");
+    try proc_runner.expectCommandContaining(&recorder, "main-vertical");
+    try proc_runner.expectCommandContaining(&recorder, "new-window");
+    try proc_runner.expectCommandContaining(&recorder, "demo:dashboard");
+    try proc_runner.expectCommandContaining(&recorder, "demo:api");
+    try proc_runner.expectCommandContaining(&recorder, "/tmp/demo/backend");
+    try proc_runner.expectCommandContaining(&recorder, "/tmp/demo/infra");
+    try proc_runner.expectCommandOrder(&recorder, "remain-on-exit", "api");
+    try proc_runner.expectCommandOrder(&recorder, "docker", "select-window");
+    try proc_runner.expectCommandContaining(&recorder, "@zask_dash_mode");
+    try proc_runner.expectNoTmuxSizingCommands(&recorder);
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "hello creates session without tmuxp and keeps setup order" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -526,8 +572,6 @@ test "hello creates session with interactive tmuxp and no sizing commands" {
     const io = threaded.io();
     const home_dir = try std.fmt.allocPrint(arena.allocator(), "/private/tmp/zask-test-home-{d}", .{std.c.getpid()});
     defer std.Io.Dir.cwd().deleteTree(io, home_dir) catch {};
-    const session_dir = try std.fs.path.join(arena.allocator(), &.{ home_dir, ".config", "zask", "demo" });
-    _ = try std.Io.Dir.cwd().createDirPathStatus(io, session_dir, @enumFromInt(0o700));
     var environ = env.Map.init(arena.allocator());
     defer environ.deinit();
     try environ.put("HOME", home_dir);
@@ -539,20 +583,21 @@ test "hello creates session with interactive tmuxp and no sizing commands" {
     var runtime = testRuntime(arena.allocator(), run, cfg);
     runtime.io = io;
     runtime.environ = &environ;
-    runtime.runner_impl = run;
-    runtime.tmux_impl.runner = run;
-    runtime.docker_impl.runner = run;
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
     try runtime.helloUnlocked("all", &writer);
 
-    const load = proc_runner.findCommandContaining(&recorder, "tmuxp").?;
-    try std.testing.expect(load.interactive);
-    try std.testing.expectEqualStrings("load", load.argv[1]);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "tmuxp") == null);
+    try proc_runner.expectCommandContaining(&recorder, "new-session");
+    try proc_runner.expectCommandContaining(&recorder, "split-window");
     try proc_runner.expectCommandContaining(&recorder, "set-option");
     try proc_runner.expectCommandContaining(&recorder, "@zask_dash_mode");
     try proc_runner.expectCommandContaining(&recorder, "bind-key");
+    try proc_runner.expectCommandContaining(&recorder, "choose-tree -Zw");
+    try proc_runner.expectCommandContaining(&recorder, "resize-window -x");
+    try proc_runner.expectCommandOrder(&recorder, "bind-key", "date");
+    try proc_runner.expectCommandOrder(&recorder, "@zask_log_session_id", "attach-session");
     try proc_runner.expectNoTmuxSizingCommands(&recorder);
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
