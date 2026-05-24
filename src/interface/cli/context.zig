@@ -27,7 +27,12 @@ pub const Context = struct {
     base: CommandContext,
     parsed: ParsedArgs,
     writer: *std.Io.Writer,
+    print_help: *const fn (*std.Io.Writer) anyerror!void,
     runtime_value: ?Runtime = null,
+
+    pub fn help(self: *Context) !void {
+        try self.print_help(self.writer);
+    }
 
     pub fn runtime(self: *Context) !Runtime {
         if (self.runtime_value == null) {
