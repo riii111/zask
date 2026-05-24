@@ -102,33 +102,16 @@ pub const Client = struct {
 
     pub fn observePane(self: Client, window: []const u8) observations.PaneObservation {
         const info = self.paneInfo(window) catch |err| switch (err) {
-            error.WindowMissing => return .{ .state = .window_missing },
-            else => return .{ .state = .tmux_unavailable },
+            error.WindowMissing => return observations.PaneObservation.empty(.window_missing),
+            else => return observations.PaneObservation.empty(.tmux_unavailable),
         };
-        if (info.dead) return .{
-            .state = .dead,
-            .exit_code = info.exit_code,
-            .pid = info.pid,
-            .command = info.command,
-            .owned = true,
-        };
-        const run_result = self.runner.run(&.{ "pgrep", "-P", info.pid }, .{}) catch return .{
-            .state = .tmux_unavailable,
-            .exit_code = info.exit_code,
-            .pid = info.pid,
-            .command = info.command,
-            .owned = true,
-        };
+        if (info.dead) return info.toObservation(.dead);
+        const run_result = self.runner.run(&.{ "pgrep", "-P", info.pid }, .{}) catch return info.toObservation(.tmux_unavailable);
         const result = runner.captured(run_result);
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
-        return .{
-            .state = if (std.mem.trim(u8, result.stdout, " \t\r\n").len > 0) .busy else .idle,
-            .exit_code = info.exit_code,
-            .pid = info.pid,
-            .command = info.command,
-            .owned = true,
-        };
+        const state: observations.PaneState = if (std.mem.trim(u8, result.stdout, " \t\r\n").len > 0) .busy else .idle;
+        return info.toObservation(state);
     }
 
     pub fn paneInfo(self: Client, window: []const u8) !PaneInfo {
@@ -228,6 +211,10 @@ pub const PaneInfo = struct {
         gpa.free(self.exit_code);
         gpa.free(self.pid);
         gpa.free(self.command);
+    }
+
+    fn toObservation(self: PaneInfo, state: observations.PaneState) observations.PaneObservation {
+        return observations.PaneObservation.fromOwned(state, self.exit_code, self.pid, self.command);
     }
 };
 

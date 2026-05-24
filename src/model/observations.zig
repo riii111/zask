@@ -22,13 +22,24 @@ pub const PaneState = enum {
 
 pub const PaneObservation = struct {
     state: PaneState,
-    exit_code: []const u8 = "0",
-    pid: []const u8 = "0",
+    exit_code: []const u8 = "",
+    pid: []const u8 = "",
     command: []const u8 = "",
-    owned: bool = false,
+
+    pub fn empty(state: PaneState) PaneObservation {
+        return .{ .state = state };
+    }
+
+    pub fn fromOwned(state: PaneState, exit_code: []const u8, pid: []const u8, command: []const u8) PaneObservation {
+        return .{
+            .state = state,
+            .exit_code = exit_code,
+            .pid = pid,
+            .command = command,
+        };
+    }
 
     pub fn deinit(self: PaneObservation, gpa: std.mem.Allocator) void {
-        if (!self.owned) return;
         gpa.free(self.exit_code);
         gpa.free(self.pid);
         gpa.free(self.command);
@@ -94,4 +105,22 @@ test "compose observation reports contained services" {
 test "compose observation deinit accepts unowned empty services" {
     const observation = ComposeObservation{ .state = .empty };
     observation.deinit(std.testing.allocator);
+}
+
+test "pane observation deinit accepts empty observation" {
+    const observation = PaneObservation.empty(.window_missing);
+    observation.deinit(std.testing.allocator);
+}
+
+test "pane observation owns pane fields" {
+    const exit_code = try std.testing.allocator.dupe(u8, "130");
+    const pid = try std.testing.allocator.dupe(u8, "12345");
+    const command = try std.testing.allocator.dupe(u8, "node");
+    const observation = PaneObservation.fromOwned(.dead, exit_code, pid, command);
+    defer observation.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(PaneState.dead, observation.state);
+    try std.testing.expectEqualStrings("130", observation.exit_code);
+    try std.testing.expectEqualStrings("12345", observation.pid);
+    try std.testing.expectEqualStrings("node", observation.command);
 }
