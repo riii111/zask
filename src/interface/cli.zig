@@ -350,27 +350,66 @@ test "project alias without arguments prints usage" {
 }
 
 test "command metadata parses aliases and global commands" {
-    try std.testing.expectEqual(Command.help, parseCommand("-h").?);
-    try std.testing.expect(parseCommand("render-session") == null);
-    try std.testing.expect(isGlobalCommand("--help"));
-    try std.testing.expect(!isGlobalCommand("list"));
+    const command_cases = [_]struct {
+        input: []const u8,
+        expected: ?Command,
+    }{
+        .{ .input = "-h", .expected = .help },
+        .{ .input = "--help", .expected = .help },
+        .{ .input = "hello", .expected = .hello },
+        .{ .input = "render-session", .expected = null },
+    };
+    for (command_cases) |case| {
+        try std.testing.expectEqual(case.expected, parseCommand(case.input));
+    }
+
+    const global_cases = [_]struct {
+        input: []const u8,
+        expected: bool,
+    }{
+        .{ .input = "--help", .expected = true },
+        .{ .input = "version", .expected = true },
+        .{ .input = "list", .expected = false },
+    };
+    for (global_cases) |case| {
+        try std.testing.expectEqual(case.expected, isGlobalCommand(case.input));
+    }
 }
 
-test "validates command arity strictly" {
-    try validateArity(.hello, &.{});
-    try validateArity(.hello, &.{"--docker"});
-    try std.testing.expectError(error.InvalidArguments, validateArity(.hello, &.{ "--docker", "extra" }));
-    try std.testing.expectError(error.InvalidArguments, validateArity(.logs, &.{}));
-    try validateArity(.logs, &.{"api"});
-    try std.testing.expectError(error.InvalidArguments, validateArity(.logs, &.{ "api", "extra" }));
-    try std.testing.expectError(error.InvalidArguments, validateArity(.up, &.{ "api", "extra" }));
-    try std.testing.expectError(error.InvalidArguments, validateArity(.restart, &.{}));
-    try std.testing.expectError(error.InvalidArguments, validateArity(.restart, &.{ "api", "extra" }));
-    try validateArity(.exec, &.{"api"});
-    try validateArity(.exec, &.{ "api", "--shell" });
-    try std.testing.expectError(error.InvalidArguments, validateArity(.exec, &.{ "api", "--shell", "extra" }));
-    try validateArity(.preview_list, &.{ "%1", "120", "40" });
-    try std.testing.expectError(error.InvalidArguments, validateArity(.preview_list, &.{ "%1", "120" }));
+test "accepts valid command arity" {
+    const cases = [_]struct {
+        command: Command,
+        args: []const []const u8,
+    }{
+        .{ .command = .hello, .args = &.{} },
+        .{ .command = .hello, .args = &.{"--docker"} },
+        .{ .command = .logs, .args = &.{"api"} },
+        .{ .command = .exec, .args = &.{"api"} },
+        .{ .command = .exec, .args = &.{ "api", "--shell" } },
+        .{ .command = .preview_list, .args = &.{ "%1", "120", "40" } },
+    };
+    for (cases) |case| {
+        try validateArity(case.command, case.args);
+    }
+}
+
+test "rejects invalid command arity" {
+    const cases = [_]struct {
+        command: Command,
+        args: []const []const u8,
+    }{
+        .{ .command = .hello, .args = &.{ "--docker", "extra" } },
+        .{ .command = .logs, .args = &.{} },
+        .{ .command = .logs, .args = &.{ "api", "extra" } },
+        .{ .command = .up, .args = &.{ "api", "extra" } },
+        .{ .command = .restart, .args = &.{} },
+        .{ .command = .restart, .args = &.{ "api", "extra" } },
+        .{ .command = .exec, .args = &.{ "api", "--shell", "extra" } },
+        .{ .command = .preview_list, .args = &.{ "%1", "120" } },
+    };
+    for (cases) |case| {
+        try std.testing.expectError(error.InvalidArguments, validateArity(case.command, case.args));
+    }
 }
 
 test "invalid command arity prints usage before returning error" {
@@ -390,16 +429,42 @@ test "incomplete config form prints usage before returning error" {
 }
 
 test "normalizes docker target aliases" {
-    try std.testing.expectEqualStrings("docker", normalizeTarget("--docker"));
-    try std.testing.expectEqualStrings("api", normalizeTarget("api"));
-    try std.testing.expectEqualStrings("docker", (try requiredTarget(&.{"--docker"})));
+    const cases = [_]struct {
+        input: []const u8,
+        expected: []const u8,
+    }{
+        .{ .input = "--docker", .expected = "docker" },
+        .{ .input = "api", .expected = "api" },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqualStrings(case.expected, normalizeTarget(case.input));
+    }
+
+    try std.testing.expectEqualStrings("docker", try requiredTarget(&.{"--docker"}));
     try std.testing.expect(optionalTarget(&.{}) == null);
 }
 
-test "parses exec shell flag position strictly" {
-    try std.testing.expect(try execUseShell(&.{ "api", "--shell" }));
-    try std.testing.expect(!try execUseShell(&.{"api"}));
-    try std.testing.expectError(error.InvalidArguments, execUseShell(&.{ "api", "foo", "--shell" }));
+test "accepts exec shell flag only after container" {
+    const cases = [_]struct {
+        args: []const []const u8,
+        expected: bool,
+    }{
+        .{ .args = &.{"api"}, .expected = false },
+        .{ .args = &.{ "api", "--shell" }, .expected = true },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(case.expected, try execUseShell(case.args));
+    }
+}
+
+test "rejects invalid exec shell flag position" {
+    const cases = [_][]const []const u8{
+        &.{},
+        &.{ "api", "foo", "--shell" },
+    };
+    for (cases) |case| {
+        try std.testing.expectError(error.InvalidArguments, execUseShell(case));
+    }
 }
 
 test "parses project command form" {
