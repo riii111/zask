@@ -98,15 +98,15 @@ const launcher_commands = [_]LauncherCommand{
     .{ .usage = "open --<profile>", .description = "Open configured profile" },
     .{ .usage = "open --docker", .description = "Open docker only" },
     .{ .usage = "close", .description = "Stop resources and close workspace" },
-    .{ .usage = "attach", .description = "Attach to existing workspace" },
     .{ .usage = "re", .description = "Restart session" },
-    .{ .usage = "status", .description = "Show all status" },
+    .{ .usage = "attach", .description = "Attach to existing workspace" },
     .{ .usage = "start <svc|group|docker>", .description = "Start a resource" },
     .{ .usage = "start --all", .description = "Start all resources" },
     .{ .usage = "stop <svc|group|docker>", .description = "Stop a resource" },
     .{ .usage = "stop --all", .description = "Stop all resources" },
     .{ .usage = "restart <svc|group|docker>", .description = "Restart a resource" },
     .{ .usage = "logs <svc>", .description = "Jump to window" },
+    .{ .usage = "status", .description = "Show all status" },
 };
 
 fn writeCommandHelp(writer: *std.Io.Writer, project: []const u8) !void {
