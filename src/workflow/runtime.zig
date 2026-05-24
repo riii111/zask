@@ -9,8 +9,8 @@ const observations = @import("../model/observations.zig");
 const paths = @import("../platform/paths.zig");
 const proc_runner = @import("../platform/runner.zig");
 const shell = @import("../platform/shell.zig");
+const session_layout = @import("session_layout.zig");
 const tmux_client = @import("../platform/tmux.zig");
-const tmux_options = @import("../model/tmux_options.zig");
 const tmux_setup = @import("tmux_setup.zig");
 const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
@@ -127,12 +127,14 @@ pub const Runtime = struct {
             return;
         }
         const tx = self.tmux();
-        try self.createBaseSession();
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        try self.openSessionWithDashboardWindow(scratch);
         errdefer tx.killSession() catch {};
-        try self.buildDashboardWindow();
-        const previous_window = try self.appendServiceWindows();
-        defer self.gpa.free(previous_window);
-        try self.appendDockerWindow(previous_window);
+        try self.applyBaseSessionOptions(scratch);
+        try self.configureDashboardWindow(scratch);
+        try self.appendServiceAndDockerWindows(scratch);
         try self.focusDashboard();
         try tmux_setup.bindControlKeys(self.gpa, tx);
         try self.logSession().init();
@@ -259,56 +261,43 @@ pub const Runtime = struct {
         return lock.Lock.acquire(self.gpa, self.runner(), try self.cfg.projectName(), try paths.runtimeBase(self.gpa, self.environ));
     }
 
-    fn createBaseSession(self: Runtime) !void {
-        var arena = std.heap.ArenaAllocator.init(self.gpa);
-        defer arena.deinit();
-        const scratch = arena.allocator();
+    fn openSessionWithDashboardWindow(self: Runtime, scratch: std.mem.Allocator) !void {
         const tx = self.tmux();
         const root = try self.cfg.projectRoot(scratch);
-        try tx.newSession(tmux_options.dashboard_window, root, try zask_command.invoke(scratch, self.zask_path, self.config_path, "dashboard"));
-        try tmux_setup.applySessionOptions(scratch, tx, try self.cfg.projectName(), self.zask_path, self.config_path);
+        try tx.newSession(session_layout.dashboard_window, root, try zask_command.invoke(scratch, self.zask_path, self.config_path, "dashboard"));
     }
 
-    fn buildDashboardWindow(self: Runtime) !void {
-        var arena = std.heap.ArenaAllocator.init(self.gpa);
-        defer arena.deinit();
-        const scratch = arena.allocator();
+    fn applyBaseSessionOptions(self: Runtime, scratch: std.mem.Allocator) !void {
+        try tmux_setup.applySessionOptions(scratch, self.tmux(), .{
+            .project = try self.cfg.projectName(),
+            .zask_path = self.zask_path,
+            .config_path = self.config_path,
+        });
+    }
+
+    fn configureDashboardWindow(self: Runtime, scratch: std.mem.Allocator) !void {
         const tx = self.tmux();
         const root = try self.cfg.projectRoot(scratch);
-        try tx.splitWindow(tmux_options.dashboard_window, root, try zask_command.invoke(scratch, self.zask_path, self.config_path, "monitor"));
-        try tx.setWindowOption(tmux_options.dashboard_window, tmux_options.dashboard_pane_width_option, tmux_options.dashboard_pane_width);
-        try tx.selectLayout(tmux_options.dashboard_window, tmux_options.dashboard_layout);
+        try tx.splitWindow(session_layout.dashboard_window, root, try zask_command.invoke(scratch, self.zask_path, self.config_path, "monitor"));
+        try tx.setWindowOption(session_layout.dashboard_window, session_layout.dashboard_pane_width_option, session_layout.dashboard_pane_width_value);
+        try tx.selectLayout(session_layout.dashboard_window, session_layout.dashboard_layout);
     }
 
-    fn appendServiceWindows(self: Runtime) ![]const u8 {
-        var arena = std.heap.ArenaAllocator.init(self.gpa);
-        defer arena.deinit();
-        const scratch = arena.allocator();
+    fn appendServiceAndDockerWindows(self: Runtime, scratch: std.mem.Allocator) !void {
         const tx = self.tmux();
-        var previous_window = try self.gpa.dupe(u8, tmux_options.dashboard_window);
-        errdefer self.gpa.free(previous_window);
+        var previous_window: []const u8 = session_layout.dashboard_window;
         for (try self.cfg.services()) |service| {
-            const name = try self.gpa.dupe(u8, try config.Config.serviceName(service));
-            errdefer self.gpa.free(name);
+            const name = try config.Config.serviceName(service);
             try tx.newWindowAfter(previous_window, name, try self.cfg.serviceDir(scratch, service), try zask_command.waitingPlaceholder(scratch, name));
-            self.gpa.free(previous_window);
             previous_window = name;
         }
-        return previous_window;
-    }
-
-    fn appendDockerWindow(self: Runtime, previous_window: []const u8) !void {
-        var arena = std.heap.ArenaAllocator.init(self.gpa);
-        defer arena.deinit();
-        const scratch = arena.allocator();
-        const tx = self.tmux();
         if (self.cfg.dockerEnabled()) {
-            try tx.newWindowAfter(previous_window, tmux_options.docker_window, try self.cfg.dockerDir(scratch), try zask_command.waitingPlaceholder(scratch, tmux_options.docker_label));
+            try tx.newWindowAfter(previous_window, session_layout.docker_window, try self.cfg.dockerDir(scratch), try zask_command.waitingPlaceholder(scratch, session_layout.docker_placeholder_title));
         }
     }
 
     fn focusDashboard(self: Runtime) !void {
-        try self.tmux().selectWindow(tmux_options.dashboard_window);
+        try self.tmux().selectWindow(session_layout.dashboard_window);
     }
 
     fn setupPipePane(self: Runtime, writer: *std.Io.Writer) !void {
@@ -568,11 +557,10 @@ test "new session setup creates dashboard service and docker windows" {
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     var runtime = testRuntime(arena.allocator(), run, cfg);
 
-    try runtime.createBaseSession();
-    try runtime.buildDashboardWindow();
-    const previous_window = try runtime.appendServiceWindows();
-    defer arena.allocator().free(previous_window);
-    try runtime.appendDockerWindow(previous_window);
+    try runtime.openSessionWithDashboardWindow(arena.allocator());
+    try runtime.applyBaseSessionOptions(arena.allocator());
+    try runtime.configureDashboardWindow(arena.allocator());
+    try runtime.appendServiceAndDockerWindows(arena.allocator());
     try runtime.focusDashboard();
 
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "tmuxp") == null);
@@ -589,6 +577,61 @@ test "new session setup creates dashboard service and docker windows" {
     try proc_runner.expectCommandOrder(&recorder, "docker", "select-window");
     try proc_runner.expectCommandContaining(&recorder, "@zask_dash_mode");
     try proc_runner.expectNoTmuxSizingCommands(&recorder);
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "new session setup places docker after dashboard when services are empty" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"enabled": true, "dir": "infra", "compose_file": "compose.yaml"},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    var runtime = testRuntime(arena.allocator(), run, cfg);
+
+    try runtime.openSessionWithDashboardWindow(arena.allocator());
+    try runtime.applyBaseSessionOptions(arena.allocator());
+    try runtime.configureDashboardWindow(arena.allocator());
+    try runtime.appendServiceAndDockerWindows(arena.allocator());
+    try runtime.focusDashboard();
+
+    try proc_runner.expectCommandContaining(&recorder, "demo:dashboard");
+    try proc_runner.expectCommandContaining(&recorder, "/tmp/demo/infra");
+    try proc_runner.expectCommandOrder(&recorder, "docker", "select-window");
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "hello kills partially created session when session options fail" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "set-option failed", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    var runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.CommandFailed, runtime.helloUnlocked("all", &writer));
+
+    try proc_runner.expectCommandOrder(&recorder, "new-session", "kill-session");
+    try proc_runner.expectCommandContaining(&recorder, "set-option");
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
