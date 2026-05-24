@@ -4,6 +4,7 @@ const attach = @import("cli/attach.zig");
 const bye = @import("cli/bye.zig");
 const cli_context = @import("cli/context.zig");
 const detach = @import("cli/detach.zig");
+const exec = @import("cli/exec.zig");
 const follow = @import("cli/follow.zig");
 const help = @import("cli/help.zig");
 const hello = @import("cli/hello.zig");
@@ -135,6 +136,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
     if (command == .up) return runCommand(up, &run_context);
     if (command == .stop) return runCommand(stop, &run_context);
     if (command == .restart) return runCommand(restart, &run_context);
+    if (command == .exec) return runCommand(exec, &run_context);
     const rt = try run_context.runtime();
     dispatchRuntimeCommand(rt, command, parsed.args, writer) catch |err| {
         if (err == error.InvalidArguments) try printHelp(writer);
@@ -158,7 +160,7 @@ fn dispatchRuntimeCommand(rt: Runtime, command: Command, args: []const []const u
         .up => unreachable,
         .stop => unreachable,
         .restart => unreachable,
-        .exec => rt.exec(try oneArg(args), try execUseShell(args), writer),
+        .exec => unreachable,
         .dashboard => dashboard_ui.runLauncher(rt.gpa, rt.io, rt.environ, rt.cfg, writer),
         .monitor => dashboard_ui.runMonitor(rt.gpa, rt.io, rt.cfg, writer),
         .preview_list => rt.previewList(args[0], try parseSizeArg(args[1]), try parseSizeArg(args[2])),
@@ -265,16 +267,6 @@ fn optionalTarget(args: []const []const u8) ?[]const u8 {
 
 fn requiredTarget(args: []const []const u8) ![]const u8 {
     return normalizeTarget(try oneArg(args));
-}
-
-fn execUseShell(args: []const []const u8) !bool {
-    if (args.len == 0) return error.InvalidArguments;
-    var use_shell = false;
-    for (args[1..]) |arg| {
-        if (!std.mem.eql(u8, arg, "--shell")) return error.InvalidArguments;
-        use_shell = true;
-    }
-    return use_shell;
 }
 
 fn normalizeTarget(target: []const u8) []const u8 {
@@ -427,29 +419,6 @@ test "normalizes docker target aliases" {
 
     try std.testing.expectEqualStrings("docker", try requiredTarget(&.{"--docker"}));
     try std.testing.expect(optionalTarget(&.{}) == null);
-}
-
-test "accepts exec shell flag only after container" {
-    const cases = [_]struct {
-        args: []const []const u8,
-        expected: bool,
-    }{
-        .{ .args = &.{"api"}, .expected = false },
-        .{ .args = &.{ "api", "--shell" }, .expected = true },
-    };
-    for (cases) |case| {
-        try std.testing.expectEqual(case.expected, try execUseShell(case.args));
-    }
-}
-
-test "rejects invalid exec shell flag position" {
-    const cases = [_][]const []const u8{
-        &.{},
-        &.{ "api", "foo", "--shell" },
-    };
-    for (cases) |case| {
-        try std.testing.expectError(error.InvalidArguments, execUseShell(case));
-    }
 }
 
 test "invalid command arity prints usage before returning error" {
