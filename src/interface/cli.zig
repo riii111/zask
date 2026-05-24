@@ -3,6 +3,7 @@ const build_options = @import("build_options");
 const attach = @import("cli/attach.zig");
 const cli_context = @import("cli/context.zig");
 const detach = @import("cli/detach.zig");
+const follow = @import("cli/follow.zig");
 const help = @import("cli/help.zig");
 const list = @import("cli/list.zig");
 const logs = @import("cli/logs.zig");
@@ -119,6 +120,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
     if (command == .attach) return runCommand(attach, &run_context);
     if (command == .detach) return runCommand(detach, &run_context);
     if (command == .logs) return runCommand(logs, &run_context);
+    if (command == .follow) return runCommand(follow, &run_context);
     const rt = try run_context.runtime();
     dispatchRuntimeCommand(rt, command, parsed.args, writer) catch |err| {
         if (err == error.InvalidArguments) try printHelp(writer);
@@ -134,7 +136,7 @@ fn dispatchRuntimeCommand(rt: Runtime, command: Command, args: []const []const u
         .attach => unreachable,
         .detach => unreachable,
         .logs => unreachable,
-        .follow => rt.follow(try oneArg(args), writer),
+        .follow => unreachable,
         .hello => rt.hello(try resolveHelloProfile(rt.cfg, args), writer),
         .bye => rt.bye(writer),
         .kill => rt.kill(writer),
