@@ -38,11 +38,22 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     const test_step = b.step("test", "Run tests");
+    const test_filters = b.option(
+        []const []const u8,
+        "test-filter",
+        "Skip tests that do not match any filter",
+    ) orelse &.{};
 
-    const mod_tests = b.addTest(.{ .root_module = zask_mod });
+    const mod_tests = b.addTest(.{
+        .root_module = zask_mod,
+        .filters = test_filters,
+    });
     test_step.dependOn(&b.addRunArtifact(mod_tests).step);
 
-    const exe_tests = b.addTest(.{ .root_module = exe.root_module });
+    const exe_tests = b.addTest(.{
+        .root_module = exe.root_module,
+        .filters = test_filters,
+    });
     test_step.dependOn(&b.addRunArtifact(exe_tests).step);
 
     const tmux_integration_options = b.addOptions();
@@ -56,7 +67,10 @@ pub fn build(b: *std.Build) void {
         },
     });
     tmux_integration_mod.addOptions("tmux_integration_options", tmux_integration_options);
-    const tmux_integration_tests = b.addTest(.{ .root_module = tmux_integration_mod });
+    const tmux_integration_tests = b.addTest(.{
+        .root_module = tmux_integration_mod,
+        .filters = test_filters,
+    });
     const tmux_integration_step = b.step("test-tmux", "Run tmux integration tests");
     tmux_integration_step.dependOn(&b.addRunArtifact(tmux_integration_tests).step);
 }
