@@ -3,6 +3,7 @@ const build_options = @import("build_options");
 const attach = @import("cli/attach.zig");
 const bye = @import("cli/bye.zig");
 const cli_context = @import("cli/context.zig");
+const dashboard = @import("cli/dashboard.zig");
 const detach = @import("cli/detach.zig");
 const exec = @import("cli/exec.zig");
 const follow = @import("cli/follow.zig");
@@ -137,6 +138,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
     if (command == .stop) return runCommand(stop, &run_context);
     if (command == .restart) return runCommand(restart, &run_context);
     if (command == .exec) return runCommand(exec, &run_context);
+    if (command == .dashboard) return runCommand(dashboard, &run_context);
     const rt = try run_context.runtime();
     dispatchRuntimeCommand(rt, command, parsed.args, writer) catch |err| {
         if (err == error.InvalidArguments) try printHelp(writer);
@@ -161,7 +163,7 @@ fn dispatchRuntimeCommand(rt: Runtime, command: Command, args: []const []const u
         .stop => unreachable,
         .restart => unreachable,
         .exec => unreachable,
-        .dashboard => dashboard_ui.runLauncher(rt.gpa, rt.io, rt.environ, rt.cfg, writer),
+        .dashboard => unreachable,
         .monitor => dashboard_ui.runMonitor(rt.gpa, rt.io, rt.cfg, writer),
         .preview_list => rt.previewList(args[0], try parseSizeArg(args[1]), try parseSizeArg(args[2])),
     };
