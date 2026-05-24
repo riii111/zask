@@ -213,6 +213,7 @@ pub const PaneInfo = struct {
         gpa.free(self.command);
     }
 
+    /// Transfers ownership of pane field slices into the returned observation.
     fn consumeIntoObservation(self: PaneInfo, state: observations.PaneState) observations.PaneObservation {
         return observations.PaneObservation.fromOwnedFields(state, self.exit_code, self.pid, self.command);
     }
@@ -392,7 +393,7 @@ test "observePane returns window missing when pane info command fails" {
 test "observePane returns tmux unavailable when pane info cannot be captured" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
-    recorder.term = .{ .signal = std.c.SIG.TERM };
+    recorder.term = .{ .signal = std.posix.SIG.TERM };
     const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
     const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
 
@@ -403,6 +404,24 @@ test "observePane returns tmux unavailable when pane info cannot be captured" {
     try std.testing.expectEqualStrings("", observation.exit_code);
     try std.testing.expectEqualStrings("", observation.pid);
     try std.testing.expectEqualStrings("", observation.command);
+}
+
+test "observePane returns tmux unavailable with pane fields when pgrep cannot spawn" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
+    try recorder.enqueueError(error.FileNotFound);
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+    const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
+
+    const observation = client.observePane("api");
+    defer observation.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(observations.PaneState.tmux_unavailable, observation.state);
+    try std.testing.expectEqualStrings("0", observation.exit_code);
+    try std.testing.expectEqualStrings("12345", observation.pid);
+    try std.testing.expectEqualStrings("node", observation.command);
+    try std.testing.expectEqualStrings("pgrep", recorder.commands.items[1].argv[0]);
 }
 
 test "observePane returns dead pane fields without checking children" {

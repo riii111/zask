@@ -26,6 +26,7 @@ pub const PaneObservation = struct {
     pid: []const u8 = "",
     command: []const u8 = "",
 
+    /// Builds an observation with zero-length default fields.
     pub fn empty(state: PaneState) PaneObservation {
         return .{ .state = state };
     }
@@ -61,6 +62,7 @@ pub const ComposeObservation = struct {
     state: ComposeState,
     services: []const []const u8 = &.{},
 
+    /// Builds an observation with a zero-length default services slice.
     pub fn empty(state: ComposeState) ComposeObservation {
         return .{ .state = state };
     }

@@ -100,13 +100,14 @@ pub const Recorder = struct {
     gpa: std.mem.Allocator,
     commands: std.ArrayList(RecordedCommand),
     responses: std.ArrayList(RecordedResponse),
+    errors: std.ArrayList(anyerror),
     sleeps: std.ArrayList(RecordedSleep),
     stdout: []const u8 = "",
     stderr: []const u8 = "",
     term: std.process.Child.Term = .{ .exited = 0 },
 
     pub fn init(gpa: std.mem.Allocator) Recorder {
-        return .{ .gpa = gpa, .commands = .empty, .responses = .empty, .sleeps = .empty };
+        return .{ .gpa = gpa, .commands = .empty, .responses = .empty, .errors = .empty, .sleeps = .empty };
     }
 
     pub fn deinit(self: *Recorder) void {
@@ -121,6 +122,7 @@ pub const Recorder = struct {
             self.gpa.free(response.stderr);
         }
         self.responses.deinit(self.gpa);
+        self.errors.deinit(self.gpa);
         self.sleeps.deinit(self.gpa);
     }
 
@@ -130,6 +132,10 @@ pub const Recorder = struct {
             .stderr = try self.gpa.dupe(u8, stderr),
             .term = term,
         });
+    }
+
+    pub fn enqueueError(self: *Recorder, err: anyerror) !void {
+        try self.errors.append(self.gpa, err);
     }
 
     pub fn recordSleep(self: *Recorder, duration: std.Io.Duration) void {
@@ -155,6 +161,7 @@ pub const Recorder = struct {
                 .stderr = try self.gpa.dupe(u8, response.stderr),
             };
         }
+        if (self.errors.items.len > 0) return self.errors.orderedRemove(0);
         return .{
             .term = self.term,
             .stdout = try self.gpa.dupe(u8, self.stdout),
