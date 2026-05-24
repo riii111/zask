@@ -2,6 +2,8 @@ const std = @import("std");
 
 const config = @import("../model/config.zig");
 const config_value = @import("../model/config_value.zig");
+const lifecycle_mod = @import("lifecycle.zig");
+const runner_mod = @import("../platform/runner.zig");
 const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
 
@@ -74,6 +76,20 @@ fn phaseCwd(ctx: anytype, dir: []const u8) ![]const u8 {
     return std.fs.path.join(ctx.gpa, &.{ try ctx.cfg.projectRoot(ctx.gpa), dir });
 }
 
+fn parseTestConfig(gpa: std.mem.Allocator, json: []const u8) !config.Config {
+    return config.Config.parse(gpa, json, "/home/me");
+}
+
+fn testLifecycle(gpa: std.mem.Allocator, run: runner_mod.Runner, cfg: config.Config) lifecycle_mod.Lifecycle {
+    return .{
+        .gpa = gpa,
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = gpa, .runner = run, .session = "demo" },
+        .docker = .{ .gpa = gpa, .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+}
+
 test "classifies lifecycle phase kinds" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -91,8 +107,6 @@ test "classifies lifecycle phase kinds" {
 }
 
 test "precheck failure prints hint and preserves abort semantics" {
-    const lifecycle_mod = @import("lifecycle.zig");
-    const runner_mod = @import("../platform/runner.zig");
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -106,14 +120,8 @@ test "precheck failure prints hint and preserves abort semantics" {
     defer recorder.deinit();
     try recorder.enqueue("", "missing", .{ .exited = 1 });
     const run = runner_mod.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const lifecycle = lifecycle_mod.Lifecycle{
-        .gpa = arena.allocator(),
-        .cfg = cfg,
-        .runner = run,
-        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
-        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
-    };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -122,8 +130,6 @@ test "precheck failure prints hint and preserves abort semantics" {
 }
 
 test "command phase warn continues and abort fails startup" {
-    const lifecycle_mod = @import("lifecycle.zig");
-    const runner_mod = @import("../platform/runner.zig");
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -141,14 +147,8 @@ test "command phase warn continues and abort fails startup" {
     try recorder.enqueue("", "", .{ .exited = 1 });
     try recorder.enqueue("", "", .{ .exited = 1 });
     const run = runner_mod.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const lifecycle = lifecycle_mod.Lifecycle{
-        .gpa = arena.allocator(),
-        .cfg = cfg,
-        .runner = run,
-        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
-        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
-    };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -162,8 +162,6 @@ test "command phase warn continues and abort fails startup" {
 }
 
 test "phase cwd rejects path traversal" {
-    const runner_mod = @import("../platform/runner.zig");
-    const lifecycle_mod = @import("lifecycle.zig");
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -175,14 +173,8 @@ test "phase cwd rejects path traversal" {
     var recorder = runner_mod.Recorder.init(arena.allocator());
     defer recorder.deinit();
     const run = runner_mod.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const lifecycle = lifecycle_mod.Lifecycle{
-        .gpa = arena.allocator(),
-        .cfg = cfg,
-        .runner = run,
-        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
-        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
-    };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
 
     try std.testing.expectError(error.InvalidPath, phaseCwd(lifecycle, "../escape"));
 }

@@ -264,6 +264,26 @@ fn dockerStartDecision(state: observations.PaneState) StartDecision {
     return serviceStartDecision(state);
 }
 
+fn parseTestConfig(gpa: std.mem.Allocator, json: []const u8) !config.Config {
+    return config.Config.parse(gpa, json, "/home/me");
+}
+
+fn testLifecycle(gpa: std.mem.Allocator, run: proc_runner.Runner, cfg: config.Config) Lifecycle {
+    return .{
+        .gpa = gpa,
+        .cfg = cfg,
+        .runner = run,
+        .tmux = .{ .gpa = gpa, .runner = run, .session = "demo" },
+        .docker = .{ .gpa = gpa, .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+    };
+}
+
+fn testLifecycleWithDockerDir(gpa: std.mem.Allocator, run: proc_runner.Runner, cfg: config.Config, docker_dir: []const u8) Lifecycle {
+    var lifecycle = testLifecycle(gpa, run, cfg);
+    lifecycle.docker.dir = docker_dir;
+    return lifecycle;
+}
+
 test "maps pane observations to lifecycle start and stop decisions" {
     const cases = [_]struct {
         state: observations.PaneState,
@@ -302,14 +322,8 @@ test "precheck abort stops startup and warn continues" {
     try recorder.enqueue("", "", .{ .exited = 1 });
     try recorder.enqueue("", "", .{ .exited = 1 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const lifecycle = Lifecycle{
-        .gpa = arena.allocator(),
-        .cfg = cfg,
-        .runner = run,
-        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
-        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
-    };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -339,14 +353,8 @@ test "startAll starts idle docker before service command" {
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("\n", "", .{ .exited = 1 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const lifecycle = Lifecycle{
-        .gpa = arena.allocator(),
-        .cfg = cfg,
-        .runner = run,
-        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
-        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
-    };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -373,14 +381,8 @@ test "command phase runs interactively" {
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const lifecycle = Lifecycle{
-        .gpa = arena.allocator(),
-        .cfg = cfg,
-        .runner = run,
-        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
-        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
-    };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -411,14 +413,8 @@ test "wait helpers report timeouts" {
         try recorder.enqueue("12346\n", "", .{ .exited = 0 });
     }
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const lifecycle = Lifecycle{
-        .gpa = arena.allocator(),
-        .cfg = cfg,
-        .runner = run,
-        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
-        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
-    };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -442,14 +438,8 @@ test "window readiness distinguishes missing windows from unavailable tmux" {
     defer recorder.deinit();
     try recorder.enqueue("", "", .{ .signal = @enumFromInt(1) });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const lifecycle = Lifecycle{
-        .gpa = arena.allocator(),
-        .cfg = cfg,
-        .runner = run,
-        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
-        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
-    };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
 
     try std.testing.expectError(error.TmuxUnavailable, waits.ensureWindowReady(lifecycle, "api"));
     try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
@@ -468,14 +458,8 @@ test "window readiness retries missing windows until timeout" {
     defer recorder.deinit();
     recorder.term = .{ .exited = 1 };
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const lifecycle = Lifecycle{
-        .gpa = arena.allocator(),
-        .cfg = cfg,
-        .runner = run,
-        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
-        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
-    };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
 
     try std.testing.expectError(error.WindowNotReady, waits.ensureWindowReady(lifecycle, "api"));
     try std.testing.expectEqual(@as(usize, waits.windowReadyAttempts()), recorder.commands.items.len);
@@ -494,14 +478,8 @@ test "service start reports missing window as failure" {
     defer recorder.deinit();
     recorder.term = .{ .exited = 1 };
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const lifecycle = Lifecycle{
-        .gpa = arena.allocator(),
-        .cfg = cfg,
-        .runner = run,
-        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
-        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
-    };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -522,14 +500,8 @@ test "stop and restart targets require an active session" {
     defer recorder.deinit();
     recorder.term = .{ .exited = 1 };
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const lifecycle = Lifecycle{
-        .gpa = arena.allocator(),
-        .cfg = cfg,
-        .runner = run,
-        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
-        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
-    };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -555,14 +527,8 @@ test "docker stop reaches compose down without tmux session" {
     defer recorder.deinit();
     recorder.term = .{ .exited = 1 };
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const lifecycle = Lifecycle{
-        .gpa = arena.allocator(),
-        .cfg = cfg,
-        .runner = run,
-        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
-        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
-    };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -590,14 +556,8 @@ test "docker stop reaches compose down when tmux send fails" {
     try recorder.enqueue("", "", .{ .exited = 1 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const lifecycle = Lifecycle{
-        .gpa = arena.allocator(),
-        .cfg = cfg,
-        .runner = run,
-        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
-        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
-    };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -627,14 +587,8 @@ test "docker start is a no-op when docker pane is running" {
     try recorder.enqueue("NAME SERVICE STATUS\none api running\n", "", .{ .exited = 0 });
     try recorder.enqueue("NAME SERVICE STATUS\none api running\n", "", .{ .exited = 0 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const lifecycle = Lifecycle{
-        .gpa = arena.allocator(),
-        .cfg = cfg,
-        .runner = run,
-        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
-        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
-    };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -671,14 +625,8 @@ test "docker start sends compose up after transient busy pane" {
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("api\n", "", .{ .exited = 0 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const lifecycle = Lifecycle{
-        .gpa = arena.allocator(),
-        .cfg = cfg,
-        .runner = run,
-        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
-        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
-    };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -710,14 +658,8 @@ test "docker start disables compose menu and waits when started" {
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("NAME SERVICE STATUS\none api running\n", "", .{ .exited = 0 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const lifecycle = Lifecycle{
-        .gpa = arena.allocator(),
-        .cfg = cfg,
-        .runner = run,
-        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
-        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
-    };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -743,14 +685,8 @@ test "docker restart stops compose before reporting missing session" {
     defer recorder.deinit();
     recorder.term = .{ .exited = 1 };
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const lifecycle = Lifecycle{
-        .gpa = arena.allocator(),
-        .cfg = cfg,
-        .runner = run,
-        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
-        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
-    };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -783,14 +719,8 @@ test "docker restart runs compose down before compose up" {
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("api\n", "", .{ .exited = 0 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const lifecycle = Lifecycle{
-        .gpa = arena.allocator(),
-        .cfg = cfg,
-        .runner = run,
-        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
-        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
-    };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
@@ -815,14 +745,8 @@ test "startAll dispatches quoted service command to tmux" {
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const lifecycle = Lifecycle{
-        .gpa = arena.allocator(),
-        .cfg = cfg,
-        .runner = run,
-        .tmux = .{ .gpa = arena.allocator(), .runner = run, .session = "demo" },
-        .docker = .{ .gpa = arena.allocator(), .runner = run, .dir = "/tmp/demo app", .file = "compose.yaml" },
-    };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycleWithDockerDir(arena.allocator(), run, cfg, "/tmp/demo app");
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
