@@ -10,6 +10,7 @@ const hello = @import("cli/hello.zig");
 const kill = @import("cli/kill.zig");
 const list = @import("cli/list.zig");
 const logs = @import("cli/logs.zig");
+const re = @import("cli/re.zig");
 const status = @import("cli/status.zig");
 const version = @import("cli/version.zig");
 const root = @import("../root.zig");
@@ -127,6 +128,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
     if (command == .hello) return runCommand(hello, &run_context);
     if (command == .bye) return runCommand(bye, &run_context);
     if (command == .kill) return runCommand(kill, &run_context);
+    if (command == .re) return runCommand(re, &run_context);
     const rt = try run_context.runtime();
     dispatchRuntimeCommand(rt, command, parsed.args, writer) catch |err| {
         if (err == error.InvalidArguments) try printHelp(writer);
@@ -146,7 +148,7 @@ fn dispatchRuntimeCommand(rt: Runtime, command: Command, args: []const []const u
         .hello => unreachable,
         .bye => unreachable,
         .kill => unreachable,
-        .re => rt.re(writer),
+        .re => unreachable,
         .up => rt.up(optionalTarget(args), writer),
         .stop => rt.stop(optionalTarget(args), writer),
         .restart => rt.restart(try requiredTarget(args), writer),
