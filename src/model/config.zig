@@ -274,6 +274,10 @@ fn isAllowedRuntime(runtime: []const u8) bool {
     return false;
 }
 
+fn parseTestConfig(arena: *std.heap.ArenaAllocator, json: []const u8) !Config {
+    return Config.parse(arena.allocator(), json, "/home/me");
+}
+
 test "loads defaults and resolves paths" {
     const json =
         \\{
@@ -287,7 +291,7 @@ test "loads defaults and resolves paths" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+    const cfg = try parseTestConfig(&arena, json);
     try std.testing.expectEqualStrings("demo", try cfg.projectName());
     try std.testing.expectEqualStrings("/home/me/work/demo", try cfg.projectRoot(arena.allocator()));
     try std.testing.expectEqualStrings("/home/me/work/demo/backend", try cfg.serviceDir(arena.allocator(), try cfg.findService("api")));
@@ -317,7 +321,7 @@ test "resolves profiles and phase group overrides" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+    const cfg = try parseTestConfig(&arena, json);
 
     try std.testing.expectEqualStrings("core", cfg.resolveStartProfileOption("--core").?);
     try std.testing.expectEqualStrings("core services", cfg.startProfileLabel("core"));
@@ -341,7 +345,7 @@ test "resolves command phase profile overrides and fallback" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+    const cfg = try parseTestConfig(&arena, json);
     const phases = cfg.phases();
 
     try std.testing.expectEqualStrings("override", try Config.commandPhaseCommand(phases[0], "core"));
@@ -358,7 +362,7 @@ test "rejects unknown runtimes and missing services" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+    const cfg = try parseTestConfig(&arena, json);
 
     try std.testing.expectError(error.UnknownRuntime, Config.serviceStartCommand(arena.allocator(), try cfg.findService("api")));
     try std.testing.expectError(error.UnknownService, cfg.findService("missing"));
@@ -375,7 +379,7 @@ test "rejects malformed group aliases" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+    const cfg = try parseTestConfig(&arena, json);
 
     try std.testing.expectError(error.InvalidConfig, cfg.resolveGroup(arena.allocator(), "bad"));
 }
@@ -389,7 +393,7 @@ test "rejects malformed service collection" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+    const cfg = try parseTestConfig(&arena, json);
 
     try std.testing.expectError(error.InvalidConfig, cfg.services());
 }
@@ -403,7 +407,7 @@ test "rejects invalid identifiers at config boundaries" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+    const cfg = try parseTestConfig(&arena, json);
 
     try std.testing.expectError(error.InvalidIdentifier, cfg.projectName());
     try std.testing.expectError(error.InvalidIdentifier, Config.serviceName((try cfg.services())[0]));
@@ -418,7 +422,7 @@ test "rejects project-relative service paths that escape root" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+    const cfg = try parseTestConfig(&arena, json);
 
     try std.testing.expectError(error.InvalidPath, cfg.serviceDir(arena.allocator(), try cfg.findService("api")));
 }
@@ -432,7 +436,7 @@ test "allows external service paths outside project root" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+    const cfg = try parseTestConfig(&arena, json);
 
     try std.testing.expectEqualStrings("../external", try cfg.serviceDir(arena.allocator(), try cfg.findService("api")));
 }
@@ -447,7 +451,7 @@ test "rejects docker paths that escape project root" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const cfg = try Config.parse(arena.allocator(), json, "/home/me");
+    const cfg = try parseTestConfig(&arena, json);
 
     try std.testing.expectError(error.InvalidPath, cfg.dockerDir(arena.allocator()));
 }

@@ -23,19 +23,48 @@ pub fn relativeSubPath(value: []const u8) !void {
     }
 }
 
-test "validates identifiers" {
-    try identifier("sample-agent");
-    try identifier("studio_api");
-    try std.testing.expectError(error.InvalidIdentifier, identifier("../sample"));
-    try std.testing.expectError(error.InvalidIdentifier, identifier("bad'name"));
-    try std.testing.expectError(error.InvalidIdentifier, identifier("-rf"));
-    try std.testing.expectError(error.InvalidIdentifier, identifier("bad\nname"));
+test "identifier accepts alphanumeric underscore and hyphen after first byte" {
+    const cases = [_][]const u8{
+        "sample-agent",
+        "studio_api",
+        "api2",
+    };
+    for (cases) |case| {
+        try identifier(case);
+    }
 }
 
-test "validates relative subpaths" {
-    try relativeSubPath(".");
-    try relativeSubPath("backend/api");
-    try std.testing.expectError(error.InvalidPath, relativeSubPath("../escape"));
-    try std.testing.expectError(error.InvalidPath, relativeSubPath("backend/../escape"));
-    try std.testing.expectError(error.InvalidPath, relativeSubPath("/tmp/escape"));
+test "identifier rejects empty pathlike quoted and leading hyphen input" {
+    const cases = [_][]const u8{
+        "",
+        "../sample",
+        "bad'name",
+        "-rf",
+        "bad\nname",
+    };
+    for (cases) |case| {
+        try std.testing.expectError(error.InvalidIdentifier, identifier(case));
+    }
+}
+
+test "relative subpath accepts empty current and nested paths" {
+    const cases = [_][]const u8{
+        "",
+        ".",
+        "backend/api",
+    };
+    for (cases) |case| {
+        try relativeSubPath(case);
+    }
+}
+
+test "relative subpath rejects parent traversal and absolute paths" {
+    const cases = [_][]const u8{
+        "../escape",
+        "backend/../escape",
+        "/tmp/escape",
+    };
+    for (cases) |case| {
+        try std.testing.expectError(error.InvalidPath, relativeSubPath(case));
+    }
 }
