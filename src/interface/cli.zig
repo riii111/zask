@@ -1,6 +1,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const attach = @import("cli/attach.zig");
+const bye = @import("cli/bye.zig");
 const cli_context = @import("cli/context.zig");
 const detach = @import("cli/detach.zig");
 const follow = @import("cli/follow.zig");
@@ -123,6 +124,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
     if (command == .logs) return runCommand(logs, &run_context);
     if (command == .follow) return runCommand(follow, &run_context);
     if (command == .hello) return runCommand(hello, &run_context);
+    if (command == .bye) return runCommand(bye, &run_context);
     const rt = try run_context.runtime();
     dispatchRuntimeCommand(rt, command, parsed.args, writer) catch |err| {
         if (err == error.InvalidArguments) try printHelp(writer);
@@ -140,7 +142,7 @@ fn dispatchRuntimeCommand(rt: Runtime, command: Command, args: []const []const u
         .logs => unreachable,
         .follow => unreachable,
         .hello => unreachable,
-        .bye => rt.bye(writer),
+        .bye => unreachable,
         .kill => rt.kill(writer),
         .re => rt.re(writer),
         .up => rt.up(optionalTarget(args), writer),
