@@ -83,7 +83,9 @@ pub fn run(ctx: *Context, opts: Options) !void {
         return error.ConfigAlreadyExists;
     }
 
-    const json = try renderConfig(ctx.base.gpa, opts);
+    const root = try resolveRoot(ctx.base.gpa, io, opts.root);
+    defer root.deinit(ctx.base.gpa);
+    const json = try renderConfig(ctx.base.gpa, opts, root.value);
     defer ctx.base.gpa.free(json);
     _ = try config.Config.parse(ctx.base.gpa, json, try paths.home(ctx.base.environ));
 
@@ -116,7 +118,32 @@ fn takeValue(args: []const []const u8, index: *usize) ![]const u8 {
     return args[index.*];
 }
 
-fn renderConfig(gpa: std.mem.Allocator, opts: Options) ![]u8 {
+const ResolvedRoot = struct {
+    value: ?[]const u8,
+    allocated: bool = false,
+
+    fn deinit(self: ResolvedRoot, gpa: std.mem.Allocator) void {
+        if (self.allocated) gpa.free(self.value.?);
+    }
+};
+
+fn resolveRoot(gpa: std.mem.Allocator, io: std.Io, root: ?[]const u8) !ResolvedRoot {
+    const value = root orelse return .{ .value = null };
+    if (std.fs.path.isAbsolute(value) or std.mem.startsWith(u8, value, "~")) return .{ .value = value };
+
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(cwd);
+    return resolveRootFromCwd(gpa, cwd, value);
+}
+
+fn resolveRootFromCwd(gpa: std.mem.Allocator, cwd: []const u8, root: []const u8) !ResolvedRoot {
+    if (std.fs.path.isAbsolute(root) or std.mem.startsWith(u8, root, "~")) return .{ .value = root };
+
+    const resolved = try std.fs.path.resolve(gpa, &.{ cwd, root });
+    return .{ .value = resolved, .allocated = true };
+}
+
+fn renderConfig(gpa: std.mem.Allocator, opts: Options, root: ?[]const u8) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
     var writer = &out.writer;
@@ -130,7 +157,7 @@ fn renderConfig(gpa: std.mem.Allocator, opts: Options) ![]u8 {
     try json.objectField("name");
     try json.write(opts.project);
     try json.objectField("root");
-    try json.write(opts.root orelse default_root);
+    try json.write(root orelse default_root);
     try json.objectField("session_name");
     try json.write(opts.project);
     try json.endObject();
@@ -230,7 +257,7 @@ test "init.config: renders parseable minimal config" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const opts = try Options.parse(&.{"demo"});
-    const json = try renderConfig(std.testing.allocator, opts);
+    const json = try renderConfig(std.testing.allocator, opts, opts.root);
     defer std.testing.allocator.free(json);
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
 
@@ -245,7 +272,7 @@ test "init.config: renders service and docker config" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const opts = try Options.parse(&.{ "demo", "--root", ".", "--service", "web", "--command", "npm run dev", "--port", "3000", "--docker", "--docker-dir", "infra", "--compose-file", "compose.yaml" });
-    const json = try renderConfig(std.testing.allocator, opts);
+    const json = try renderConfig(std.testing.allocator, opts, opts.root);
     defer std.testing.allocator.free(json);
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     const services = try cfg.services();
@@ -256,6 +283,25 @@ test "init.config: renders service and docker config" {
     try std.testing.expectEqual(@as(?i64, 3000), config.Config.servicePort(services[0]));
     try std.testing.expect(cfg.dockerEnabled());
     try std.testing.expectEqualStrings("compose.yaml", cfg.dockerComposeFile());
+}
+
+test "init.root: resolves relative root against init cwd" {
+    const cases = [_]struct {
+        root: ?[]const u8,
+        expected: ?[]const u8,
+        allocated: bool,
+    }{
+        .{ .root = ".", .expected = "/work/demo", .allocated = true },
+        .{ .root = "backend", .expected = "/work/demo/backend", .allocated = true },
+        .{ .root = "/srv/demo", .expected = "/srv/demo", .allocated = false },
+        .{ .root = "~/projects/demo", .expected = "~/projects/demo", .allocated = false },
+    };
+    for (cases) |case| {
+        const root = try resolveRootFromCwd(std.testing.allocator, "/work/demo", case.root.?);
+        defer root.deinit(std.testing.allocator);
+        try std.testing.expectEqual(case.allocated, root.allocated);
+        try std.testing.expectEqualStrings(case.expected.?, root.value.?);
+    }
 }
 
 test "init.run: rejects existing config without force" {
