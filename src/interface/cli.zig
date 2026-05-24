@@ -1,5 +1,4 @@
 const std = @import("std");
-const build_options = @import("build_options");
 const attach = @import("cli/attach.zig");
 const bye = @import("cli/bye.zig");
 const cli_context = @import("cli/context.zig");
@@ -21,9 +20,7 @@ const stop = @import("cli/stop.zig");
 const up = @import("cli/up.zig");
 const version = @import("cli/version.zig");
 const root = @import("../root.zig");
-const config = @import("../model/config.zig");
 const env = @import("../platform/env.zig");
-const Runtime = @import("../workflow/runtime.zig").Runtime;
 
 const CommandContext = cli_context.CommandContext;
 const ParsedArgs = cli_context.ParsedArgs;
@@ -48,6 +45,30 @@ const Command = enum {
     dashboard,
     monitor,
     preview_list,
+
+    fn run(self: Command, context: *cli_context.Context) !void {
+        return switch (self) {
+            .version => runCommand(version, context),
+            .help => runCommand(help, context),
+            .list => runCommand(list, context),
+            .status => runCommand(status, context),
+            .attach => runCommand(attach, context),
+            .detach => runCommand(detach, context),
+            .logs => runCommand(logs, context),
+            .follow => runCommand(follow, context),
+            .hello => runCommand(hello, context),
+            .bye => runCommand(bye, context),
+            .kill => runCommand(kill, context),
+            .re => runCommand(re, context),
+            .up => runCommand(up, context),
+            .stop => runCommand(stop, context),
+            .restart => runCommand(restart, context),
+            .exec => runCommand(exec, context),
+            .dashboard => runCommand(dashboard, context),
+            .monitor => runCommand(monitor, context),
+            .preview_list => runCommand(preview_list, context),
+        };
+    }
 };
 
 const CommandSpec = struct {
@@ -56,31 +77,28 @@ const CommandSpec = struct {
     usage: ?[]const u8 = null,
     description: []const u8 = "",
     global: bool = false,
-    min_args: usize = 0,
-    max_args: usize = 0,
 };
 
 const command_specs = [_]CommandSpec{
-    .{ .command = .hello, .names = &.{"hello"}, .usage = "hello [--docker|--<profile>]", .description = "Start session + services + attach", .max_args = 1 },
+    .{ .command = .hello, .names = &.{"hello"}, .usage = "hello [--docker|--<profile>]", .description = "Start session + services + attach" },
     .{ .command = .bye, .names = &.{"bye"}, .usage = "bye", .description = "Graceful shutdown" },
     .{ .command = .re, .names = &.{"re"}, .usage = "re", .description = "Restart session" },
     .{ .command = .attach, .names = &.{"attach"}, .usage = "attach | detach | kill", .description = "Manage tmux session" },
     .{ .command = .detach, .names = &.{"detach"} },
     .{ .command = .kill, .names = &.{"kill"} },
-    .{ .command = .up, .names = &.{"up"}, .usage = "up [--all|docker|name]", .description = "Start service, group, docker, or all", .max_args = 1 },
-    .{ .command = .stop, .names = &.{"stop"}, .usage = "stop [--all|docker|name]", .description = "Stop service, group, docker, or all", .max_args = 1 },
-    .{ .command = .restart, .names = &.{"restart"}, .usage = "restart <docker|name>", .description = "Restart service, group, or docker", .min_args = 1, .max_args = 1 },
+    .{ .command = .up, .names = &.{"up"}, .usage = "up [--all|docker|name]", .description = "Start service, group, docker, or all" },
+    .{ .command = .stop, .names = &.{"stop"}, .usage = "stop [--all|docker|name]", .description = "Stop service, group, docker, or all" },
+    .{ .command = .restart, .names = &.{"restart"}, .usage = "restart <docker|name>", .description = "Restart service, group, or docker" },
     .{ .command = .status, .names = &.{"status"}, .usage = "status | list", .description = "Show service state or config services" },
     .{ .command = .list, .names = &.{"list"} },
-    .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window", .min_args = 1, .max_args = 1 },
-    .{ .command = .follow, .names = &.{"follow"}, .usage = "follow <service>", .description = "Tail captured log in tmux popup", .min_args = 1, .max_args = 1 },
-    .{ .command = .exec, .names = &.{"exec"}, .usage = "exec <container> [--shell]", .description = "Enter Docker container", .min_args = 1, .max_args = 2 },
+    .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window" },
+    .{ .command = .follow, .names = &.{"follow"}, .usage = "follow <service>", .description = "Tail captured log in tmux popup" },
+    .{ .command = .exec, .names = &.{"exec"}, .usage = "exec <container> [--shell]", .description = "Enter Docker container" },
     .{ .command = .version, .names = &.{"version"}, .usage = "version", .description = "Print zask version", .global = true },
     .{ .command = .help, .names = &.{ "help", "--help", "-h" }, .usage = "help", .description = "Print this help", .global = true },
     .{ .command = .dashboard, .names = &.{"dashboard"} },
     .{ .command = .monitor, .names = &.{"monitor"} },
-    // Internal command invoked by tmux bindings; omitted from public help.
-    .{ .command = .preview_list, .names = &.{"preview-list"}, .min_args = 3, .max_args = 3 },
+    .{ .command = .preview_list, .names = &.{"preview-list"} },
 };
 
 pub fn run(init: std.process.Init) !void {
@@ -118,61 +136,8 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
         return err;
     };
     const command = parseCommand(parsed.command) orelse return error.UnknownCommand;
-    validateArity(command, parsed.args) catch |err| {
-        if (err == error.InvalidArguments) try printHelp(writer);
-        return err;
-    };
     var run_context: cli_context.Context = .{ .base = context, .parsed = parsed, .writer = writer, .print_help = printHelp };
-    if (command == .version) return runCommand(version, &run_context);
-    if (command == .help) return runCommand(help, &run_context);
-    if (command == .list) return runCommand(list, &run_context);
-    if (command == .status) return runCommand(status, &run_context);
-    if (command == .attach) return runCommand(attach, &run_context);
-    if (command == .detach) return runCommand(detach, &run_context);
-    if (command == .logs) return runCommand(logs, &run_context);
-    if (command == .follow) return runCommand(follow, &run_context);
-    if (command == .hello) return runCommand(hello, &run_context);
-    if (command == .bye) return runCommand(bye, &run_context);
-    if (command == .kill) return runCommand(kill, &run_context);
-    if (command == .re) return runCommand(re, &run_context);
-    if (command == .up) return runCommand(up, &run_context);
-    if (command == .stop) return runCommand(stop, &run_context);
-    if (command == .restart) return runCommand(restart, &run_context);
-    if (command == .exec) return runCommand(exec, &run_context);
-    if (command == .dashboard) return runCommand(dashboard, &run_context);
-    if (command == .monitor) return runCommand(monitor, &run_context);
-    if (command == .preview_list) return runCommand(preview_list, &run_context);
-    const rt = try run_context.runtime();
-    dispatchRuntimeCommand(rt, command, parsed.args, writer) catch |err| {
-        if (err == error.InvalidArguments) try printHelp(writer);
-        return err;
-    };
-}
-
-fn dispatchRuntimeCommand(rt: Runtime, command: Command, args: []const []const u8, writer: *std.Io.Writer) !void {
-    _ = rt;
-    _ = args;
-    _ = writer;
-    return switch (command) {
-        .version, .help => unreachable,
-        .list => unreachable,
-        .status => unreachable,
-        .attach => unreachable,
-        .detach => unreachable,
-        .logs => unreachable,
-        .follow => unreachable,
-        .hello => unreachable,
-        .bye => unreachable,
-        .kill => unreachable,
-        .re => unreachable,
-        .up => unreachable,
-        .stop => unreachable,
-        .restart => unreachable,
-        .exec => unreachable,
-        .dashboard => unreachable,
-        .monitor => unreachable,
-        .preview_list => unreachable,
-    };
+    try command.run(&run_context);
 }
 
 fn printGreeting(writer: *std.Io.Writer) !void {
@@ -249,37 +214,6 @@ fn parseCommand(command: []const u8) ?Command {
         }
     }
     return null;
-}
-
-fn commandSpec(command: Command) CommandSpec {
-    for (command_specs) |spec| {
-        if (spec.command == command) return spec;
-    }
-    unreachable;
-}
-
-fn validateArity(command: Command, args: []const []const u8) !void {
-    const spec = commandSpec(command);
-    if (args.len < spec.min_args or args.len > spec.max_args) return error.InvalidArguments;
-}
-
-fn oneArg(args: []const []const u8) ![]const u8 {
-    if (args.len == 0) return error.InvalidArguments;
-    return args[0];
-}
-
-fn optionalTarget(args: []const []const u8) ?[]const u8 {
-    if (args.len == 0) return null;
-    return normalizeTarget(args[0]);
-}
-
-fn requiredTarget(args: []const []const u8) ![]const u8 {
-    return normalizeTarget(try oneArg(args));
-}
-
-fn normalizeTarget(target: []const u8) []const u8 {
-    if (std.mem.eql(u8, target, "--docker")) return "docker";
-    return target;
 }
 
 // -----------------------------------------------------------------------------
@@ -371,58 +305,6 @@ test "rejects incomplete config and project command forms" {
     try std.testing.expectError(error.InvalidArguments, parseArgs(.{ .gpa = std.testing.allocator }, &.{"--config"}));
     try std.testing.expectError(error.InvalidArguments, parseArgs(.{ .gpa = std.testing.allocator }, &.{ "--config", "demo.json" }));
     try std.testing.expectError(error.ProjectRequired, parseArgs(.{ .gpa = std.testing.allocator }, &.{"list"}));
-}
-
-test "accepts valid command arity" {
-    const cases = [_]struct {
-        command: Command,
-        args: []const []const u8,
-    }{
-        .{ .command = .hello, .args = &.{} },
-        .{ .command = .hello, .args = &.{"--docker"} },
-        .{ .command = .logs, .args = &.{"api"} },
-        .{ .command = .exec, .args = &.{"api"} },
-        .{ .command = .exec, .args = &.{ "api", "--shell" } },
-        .{ .command = .preview_list, .args = &.{ "%1", "120", "40" } },
-    };
-    for (cases) |case| {
-        try validateArity(case.command, case.args);
-    }
-}
-
-test "rejects invalid command arity" {
-    const cases = [_]struct {
-        command: Command,
-        args: []const []const u8,
-    }{
-        .{ .command = .hello, .args = &.{ "--docker", "extra" } },
-        .{ .command = .logs, .args = &.{} },
-        .{ .command = .logs, .args = &.{ "api", "extra" } },
-        .{ .command = .up, .args = &.{ "api", "extra" } },
-        .{ .command = .restart, .args = &.{} },
-        .{ .command = .restart, .args = &.{ "api", "extra" } },
-        .{ .command = .exec, .args = &.{ "api", "--shell", "extra" } },
-        .{ .command = .preview_list, .args = &.{ "%1", "120" } },
-    };
-    for (cases) |case| {
-        try std.testing.expectError(error.InvalidArguments, validateArity(case.command, case.args));
-    }
-}
-
-test "normalizes docker target aliases" {
-    const cases = [_]struct {
-        input: []const u8,
-        expected: []const u8,
-    }{
-        .{ .input = "--docker", .expected = "docker" },
-        .{ .input = "api", .expected = "api" },
-    };
-    for (cases) |case| {
-        try std.testing.expectEqualStrings(case.expected, normalizeTarget(case.input));
-    }
-
-    try std.testing.expectEqualStrings("docker", try requiredTarget(&.{"--docker"}));
-    try std.testing.expect(optionalTarget(&.{}) == null);
 }
 
 test "invalid command arity prints usage before returning error" {
