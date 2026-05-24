@@ -1,0 +1,35 @@
+const std = @import("std");
+const Context = @import("context.zig").Context;
+const target = @import("target.zig");
+
+pub const Options = struct {
+    target: ?[]const u8 = null,
+
+    pub fn parse(args: []const []const u8) !Options {
+        if (args.len > 1) return error.InvalidArguments;
+        return .{ .target = if (args.len == 0) null else target.normalize(args[0]) };
+    }
+
+    pub fn deinit(self: Options) void {
+        _ = self;
+    }
+};
+
+pub fn run(ctx: *Context, opts: Options) !void {
+    const rt = try ctx.runtime();
+    try rt.stop(opts.target, ctx.writer);
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+test "options parse optional target" {
+    try std.testing.expect((try Options.parse(&.{})).target == null);
+    try std.testing.expectEqualStrings("api", (try Options.parse(&.{"api"})).target.?);
+    try std.testing.expectEqualStrings("docker", (try Options.parse(&.{"--docker"})).target.?);
+}
+
+test "options reject extra arguments" {
+    try std.testing.expectError(error.InvalidArguments, Options.parse(&.{ "api", "extra" }));
+}

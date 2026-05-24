@@ -1,22 +1,29 @@
 const std = @import("std");
-const build_options = @import("build_options");
+const attach = @import("cli/attach.zig");
+const bye = @import("cli/bye.zig");
+const cli_context = @import("cli/context.zig");
+const dashboard = @import("cli/dashboard.zig");
+const detach = @import("cli/detach.zig");
+const exec = @import("cli/exec.zig");
+const follow = @import("cli/follow.zig");
+const help = @import("cli/help.zig");
+const hello = @import("cli/hello.zig");
+const kill = @import("cli/kill.zig");
+const list = @import("cli/list.zig");
+const logs = @import("cli/logs.zig");
+const monitor = @import("cli/monitor.zig");
+const preview_list = @import("cli/preview_list.zig");
+const re = @import("cli/re.zig");
+const restart = @import("cli/restart.zig");
+const status = @import("cli/status.zig");
+const stop = @import("cli/stop.zig");
+const up = @import("cli/up.zig");
+const version = @import("cli/version.zig");
 const root = @import("../root.zig");
-const config = @import("../model/config.zig");
-const dashboard_ui = @import("ui/dashboard.zig");
-const docker_client = @import("../platform/docker.zig");
 const env = @import("../platform/env.zig");
-const paths = @import("../platform/paths.zig");
-const proc_runner = @import("../platform/runner.zig");
-const tmux_client = @import("../platform/tmux.zig");
-const validate = @import("../model/validate.zig");
-const Runtime = @import("../workflow/runtime.zig").Runtime;
 
-const ParsedArgs = struct {
-    config_path: ?[]const u8 = null,
-    project: ?[]const u8 = null,
-    command: []const u8,
-    args: []const []const u8,
-};
+const CommandContext = cli_context.CommandContext;
+const ParsedArgs = cli_context.ParsedArgs;
 
 const Command = enum {
     version,
@@ -38,46 +45,61 @@ const Command = enum {
     dashboard,
     monitor,
     preview_list,
+
+    fn run(self: Command, context: *cli_context.Context) !void {
+        return switch (self) {
+            .version => runCommand(version, context),
+            .help => runCommand(help, context),
+            .list => runCommand(list, context),
+            .status => runCommand(status, context),
+            .attach => runCommand(attach, context),
+            .detach => runCommand(detach, context),
+            .logs => runCommand(logs, context),
+            .follow => runCommand(follow, context),
+            .hello => runCommand(hello, context),
+            .bye => runCommand(bye, context),
+            .kill => runCommand(kill, context),
+            .re => runCommand(re, context),
+            .up => runCommand(up, context),
+            .stop => runCommand(stop, context),
+            .restart => runCommand(restart, context),
+            .exec => runCommand(exec, context),
+            .dashboard => runCommand(dashboard, context),
+            .monitor => runCommand(monitor, context),
+            .preview_list => runCommand(preview_list, context),
+        };
+    }
 };
 
 const CommandSpec = struct {
     command: Command,
     names: []const []const u8,
-    usage: ?[]const u8 = null,
+    usage: []const u8 = "",
     description: []const u8 = "",
     global: bool = false,
-    min_args: usize = 0,
-    max_args: usize = 0,
+    show_in_help: bool = true,
 };
 
 const command_specs = [_]CommandSpec{
-    .{ .command = .hello, .names = &.{"hello"}, .usage = "hello [--docker|--<profile>]", .description = "Start session + services + attach", .max_args = 1 },
+    .{ .command = .hello, .names = &.{"hello"}, .usage = "hello [--docker|--<profile>]", .description = "Start session + services + attach" },
     .{ .command = .bye, .names = &.{"bye"}, .usage = "bye", .description = "Graceful shutdown" },
     .{ .command = .re, .names = &.{"re"}, .usage = "re", .description = "Restart session" },
     .{ .command = .attach, .names = &.{"attach"}, .usage = "attach | detach | kill", .description = "Manage tmux session" },
-    .{ .command = .detach, .names = &.{"detach"} },
-    .{ .command = .kill, .names = &.{"kill"} },
-    .{ .command = .up, .names = &.{"up"}, .usage = "up [--all|docker|name]", .description = "Start service, group, docker, or all", .max_args = 1 },
-    .{ .command = .stop, .names = &.{"stop"}, .usage = "stop [--all|docker|name]", .description = "Stop service, group, docker, or all", .max_args = 1 },
-    .{ .command = .restart, .names = &.{"restart"}, .usage = "restart <docker|name>", .description = "Restart service, group, or docker", .min_args = 1, .max_args = 1 },
+    .{ .command = .detach, .names = &.{"detach"}, .show_in_help = false },
+    .{ .command = .kill, .names = &.{"kill"}, .show_in_help = false },
+    .{ .command = .up, .names = &.{"up"}, .usage = "up [--all|docker|name]", .description = "Start service, group, docker, or all" },
+    .{ .command = .stop, .names = &.{"stop"}, .usage = "stop [--all|docker|name]", .description = "Stop service, group, docker, or all" },
+    .{ .command = .restart, .names = &.{"restart"}, .usage = "restart <docker|name>", .description = "Restart service, group, or docker" },
     .{ .command = .status, .names = &.{"status"}, .usage = "status | list", .description = "Show service state or config services" },
-    .{ .command = .list, .names = &.{"list"} },
-    .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window", .min_args = 1, .max_args = 1 },
-    .{ .command = .follow, .names = &.{"follow"}, .usage = "follow <service>", .description = "Tail captured log in tmux popup", .min_args = 1, .max_args = 1 },
-    .{ .command = .exec, .names = &.{"exec"}, .usage = "exec <container> [--shell]", .description = "Enter Docker container", .min_args = 1, .max_args = 2 },
+    .{ .command = .list, .names = &.{"list"}, .show_in_help = false },
+    .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window" },
+    .{ .command = .follow, .names = &.{"follow"}, .usage = "follow <service>", .description = "Tail captured log in tmux popup" },
+    .{ .command = .exec, .names = &.{"exec"}, .usage = "exec <container> [--shell]", .description = "Enter Docker container" },
     .{ .command = .version, .names = &.{"version"}, .usage = "version", .description = "Print zask version", .global = true },
     .{ .command = .help, .names = &.{ "help", "--help", "-h" }, .usage = "help", .description = "Print this help", .global = true },
-    .{ .command = .dashboard, .names = &.{"dashboard"} },
-    .{ .command = .monitor, .names = &.{"monitor"} },
-    // Internal command invoked by tmux bindings; omitted from public help.
-    .{ .command = .preview_list, .names = &.{"preview-list"}, .min_args = 3, .max_args = 3 },
-};
-
-pub const CommandContext = struct {
-    gpa: std.mem.Allocator,
-    io: ?std.Io = null,
-    environ: ?*const env.Map = null,
-    argv0: []const u8 = "zask",
+    .{ .command = .dashboard, .names = &.{"dashboard"}, .show_in_help = false },
+    .{ .command = .monitor, .names = &.{"monitor"}, .show_in_help = false },
+    .{ .command = .preview_list, .names = &.{"preview-list"}, .show_in_help = false },
 };
 
 pub fn run(init: std.process.Init) !void {
@@ -106,7 +128,7 @@ pub fn run(init: std.process.Init) !void {
 
 pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *std.Io.Writer) !void {
     if (args.len == 0) {
-        if (isProjectAlias(context.argv0)) return printHelp(writer);
+        if (cli_context.isProjectAlias(context.argv0)) return printHelp(writer);
         return printGreeting(writer);
     }
 
@@ -115,71 +137,42 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
         return err;
     };
     const command = parseCommand(parsed.command) orelse return error.UnknownCommand;
-    validateArity(command, parsed.args) catch |err| {
-        if (err == error.InvalidArguments) try printHelp(writer);
-        return err;
-    };
-    if (command == .version) {
-        return printVersion(writer);
-    }
-    if (command == .help) {
-        return printHelp(writer);
-    }
-    const rt = try loadRuntime(context, parsed);
-    dispatchRuntimeCommand(rt, command, parsed.args, writer) catch |err| {
-        if (err == error.InvalidArguments) try printHelp(writer);
-        return err;
-    };
-}
-
-fn dispatchRuntimeCommand(rt: Runtime, command: Command, args: []const []const u8, writer: *std.Io.Writer) !void {
-    return switch (command) {
-        .version, .help => unreachable,
-        .list => rt.list(writer),
-        .status => rt.status(writer),
-        .attach => rt.attach(),
-        .detach => rt.detach(writer),
-        .logs => rt.logs(try oneArg(args), writer),
-        .follow => rt.follow(try oneArg(args), writer),
-        .hello => rt.hello(try resolveHelloProfile(rt.cfg, args), writer),
-        .bye => rt.bye(writer),
-        .kill => rt.kill(writer),
-        .re => rt.re(writer),
-        .up => rt.up(optionalTarget(args), writer),
-        .stop => rt.stop(optionalTarget(args), writer),
-        .restart => rt.restart(try requiredTarget(args), writer),
-        .exec => rt.exec(try oneArg(args), try execUseShell(args), writer),
-        .dashboard => dashboard_ui.runLauncher(rt.gpa, rt.io, rt.environ, rt.cfg, writer),
-        .monitor => dashboard_ui.runMonitor(rt.gpa, rt.io, rt.cfg, writer),
-        .preview_list => rt.previewList(args[0], try parseSizeArg(args[1]), try parseSizeArg(args[2])),
-    };
+    var run_context: cli_context.Context = .{ .base = context, .parsed = parsed, .writer = writer, .print_help = printHelp };
+    try command.run(&run_context);
 }
 
 fn printGreeting(writer: *std.Io.Writer) !void {
     try writer.print("{s}\n", .{root.greeting()});
 }
 
-fn printVersion(writer: *std.Io.Writer) !void {
-    try writer.print("zask {s}\n", .{build_options.version});
-}
-
 fn printHelp(writer: *std.Io.Writer) !void {
     try writer.writeAll("Usage: zask <command>\n\nCommands:\n");
     const usage_width = maxHelpUsageWidth();
     for (command_specs) |spec| {
-        if (spec.usage) |usage| {
-            try writer.print("  {s}", .{usage});
-            try writeSpaces(writer, usage_width - usage.len + 2);
-            try writer.print("{s}\n", .{spec.description});
-        }
+        if (!spec.show_in_help) continue;
+        try writer.print("  {s}", .{spec.usage});
+        try writeSpaces(writer, usage_width - spec.usage.len + 2);
+        try writer.print("{s}\n", .{spec.description});
     }
     try writer.writeByte('\n');
+}
+
+fn runCommand(comptime module: type, context: *cli_context.Context) !void {
+    const opts = module.Options.parse(context.parsed.args) catch |err| {
+        if (err == error.InvalidArguments) context.help() catch {};
+        return err;
+    };
+    defer opts.deinit();
+    module.run(context, opts) catch |err| {
+        if (err == error.InvalidArguments) context.help() catch {};
+        return err;
+    };
 }
 
 fn maxHelpUsageWidth() usize {
     var width: usize = 0;
     for (command_specs) |spec| {
-        if (spec.usage) |usage| width = @max(width, usage.len);
+        if (spec.show_in_help) width = @max(width, spec.usage.len);
     }
     return width;
 }
@@ -195,18 +188,13 @@ fn parseArgs(context: CommandContext, args: []const []const u8) !ParsedArgs {
         if (args.len < 3) return error.InvalidArguments;
         return .{ .config_path = args[1], .command = args[2], .args = args[3..] };
     }
-    if (isProjectAlias(context.argv0)) {
+    if (cli_context.isProjectAlias(context.argv0)) {
         const basename = std.fs.path.basename(context.argv0);
         return .{ .project = basename, .command = args[0], .args = args[1..] };
     }
     if (isGlobalCommand(args[0])) return .{ .command = args[0], .args = args[1..] };
     if (args.len < 2) return error.ProjectRequired;
     return .{ .project = args[0], .command = args[1], .args = args[2..] };
-}
-
-fn isProjectAlias(argv0: []const u8) bool {
-    const basename = std.fs.path.basename(argv0);
-    return !std.mem.eql(u8, basename, "zask") and !std.mem.eql(u8, basename, "zask-debug");
 }
 
 fn isGlobalCommand(command: []const u8) bool {
@@ -226,100 +214,6 @@ fn parseCommand(command: []const u8) ?Command {
         }
     }
     return null;
-}
-
-fn commandSpec(command: Command) CommandSpec {
-    for (command_specs) |spec| {
-        if (spec.command == command) return spec;
-    }
-    unreachable;
-}
-
-fn validateArity(command: Command, args: []const []const u8) !void {
-    const spec = commandSpec(command);
-    if (args.len < spec.min_args or args.len > spec.max_args) return error.InvalidArguments;
-}
-
-fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
-    const io = context.io orelse return error.MissingIo;
-    const path = try absoluteConfigPath(context.gpa, io, if (parsed.config_path) |p| p else try projectConfigPath(context.gpa, context.environ, parsed.project orelse return error.ProjectRequired));
-    const cfg = try config.loadPath(context.gpa, io, path, try paths.home(context.environ));
-    const runner: proc_runner.Runner = .{ .gpa = context.gpa, .io = io };
-    return .{
-        .gpa = context.gpa,
-        .io = io,
-        .environ = context.environ,
-        .cfg = cfg,
-        .config_path = path,
-        .zask_path = try zaskExecutablePath(context.gpa, io, context.argv0),
-        .runner_impl = runner,
-        .tmux_impl = tmux_client.Client{ .gpa = context.gpa, .runner = runner, .session = try cfg.sessionName() },
-        .docker_impl = docker_client.Compose{ .gpa = context.gpa, .runner = runner, .dir = try cfg.dockerDir(context.gpa), .file = cfg.dockerComposeFile() },
-    };
-}
-
-fn projectConfigPath(gpa: std.mem.Allocator, environ: ?*const env.Map, project: []const u8) ![]const u8 {
-    try validate.identifier(project);
-    return std.fs.path.join(gpa, &.{ try paths.configBase(gpa, environ), project, "config.json" });
-}
-
-fn absoluteConfigPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
-    if (std.fs.path.isAbsolute(path)) return path;
-    return std.Io.Dir.cwd().realPathFileAlloc(io, path, gpa);
-}
-
-fn absoluteExePath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
-    if (std.fs.path.isAbsolute(path)) return path;
-    if (std.mem.indexOfScalar(u8, path, '/') != null) {
-        return std.Io.Dir.cwd().realPathFileAlloc(io, path, gpa);
-    }
-    return path;
-}
-
-fn zaskExecutablePath(gpa: std.mem.Allocator, io: std.Io, argv0: []const u8) ![]const u8 {
-    if (!isProjectAlias(argv0)) return absoluteExePath(gpa, io, argv0);
-    if (std.mem.indexOfScalar(u8, argv0, '/') == null) return "zask";
-    const sibling = try std.fs.path.join(gpa, &.{ std.fs.path.dirname(argv0) orelse ".", "zask" });
-    return absoluteExePath(gpa, io, sibling);
-}
-
-fn oneArg(args: []const []const u8) ![]const u8 {
-    if (args.len == 0) return error.InvalidArguments;
-    return args[0];
-}
-
-fn optionalTarget(args: []const []const u8) ?[]const u8 {
-    if (args.len == 0) return null;
-    return normalizeTarget(args[0]);
-}
-
-fn requiredTarget(args: []const []const u8) ![]const u8 {
-    return normalizeTarget(try oneArg(args));
-}
-
-fn execUseShell(args: []const []const u8) !bool {
-    if (args.len == 0) return error.InvalidArguments;
-    var use_shell = false;
-    for (args[1..]) |arg| {
-        if (!std.mem.eql(u8, arg, "--shell")) return error.InvalidArguments;
-        use_shell = true;
-    }
-    return use_shell;
-}
-
-fn normalizeTarget(target: []const u8) []const u8 {
-    if (std.mem.eql(u8, target, "--docker")) return "docker";
-    return target;
-}
-
-fn parseSizeArg(arg: []const u8) !u16 {
-    return std.fmt.parseUnsigned(u16, arg, 10) catch return error.InvalidArguments;
-}
-
-fn resolveHelloProfile(cfg: config.Config, args: []const []const u8) ![]const u8 {
-    if (args.len == 0) return "all";
-    if (std.mem.eql(u8, args[0], "--docker")) return "docker";
-    return cfg.resolveStartProfileOption(args[0]) orelse error.InvalidArguments;
 }
 
 // -----------------------------------------------------------------------------
@@ -411,121 +305,6 @@ test "rejects incomplete config and project command forms" {
     try std.testing.expectError(error.InvalidArguments, parseArgs(.{ .gpa = std.testing.allocator }, &.{"--config"}));
     try std.testing.expectError(error.InvalidArguments, parseArgs(.{ .gpa = std.testing.allocator }, &.{ "--config", "demo.json" }));
     try std.testing.expectError(error.ProjectRequired, parseArgs(.{ .gpa = std.testing.allocator }, &.{"list"}));
-}
-
-test "accepts valid command arity" {
-    const cases = [_]struct {
-        command: Command,
-        args: []const []const u8,
-    }{
-        .{ .command = .hello, .args = &.{} },
-        .{ .command = .hello, .args = &.{"--docker"} },
-        .{ .command = .logs, .args = &.{"api"} },
-        .{ .command = .exec, .args = &.{"api"} },
-        .{ .command = .exec, .args = &.{ "api", "--shell" } },
-        .{ .command = .preview_list, .args = &.{ "%1", "120", "40" } },
-    };
-    for (cases) |case| {
-        try validateArity(case.command, case.args);
-    }
-}
-
-test "rejects invalid command arity" {
-    const cases = [_]struct {
-        command: Command,
-        args: []const []const u8,
-    }{
-        .{ .command = .hello, .args = &.{ "--docker", "extra" } },
-        .{ .command = .logs, .args = &.{} },
-        .{ .command = .logs, .args = &.{ "api", "extra" } },
-        .{ .command = .up, .args = &.{ "api", "extra" } },
-        .{ .command = .restart, .args = &.{} },
-        .{ .command = .restart, .args = &.{ "api", "extra" } },
-        .{ .command = .exec, .args = &.{ "api", "--shell", "extra" } },
-        .{ .command = .preview_list, .args = &.{ "%1", "120" } },
-    };
-    for (cases) |case| {
-        try std.testing.expectError(error.InvalidArguments, validateArity(case.command, case.args));
-    }
-}
-
-test "accepts hello profile aliases" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": [],
-        \\  "start_profiles": {"api": {"profile": "backend"}}
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-
-    const cases = [_]struct {
-        args: []const []const u8,
-        expected: []const u8,
-    }{
-        .{ .args = &.{}, .expected = "all" },
-        .{ .args = &.{"--docker"}, .expected = "docker" },
-        .{ .args = &.{"--api"}, .expected = "backend" },
-    };
-    for (cases) |case| {
-        try std.testing.expectEqualStrings(case.expected, try resolveHelloProfile(cfg, case.args));
-    }
-}
-
-test "rejects unknown hello profile" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": [],
-        \\  "start_profiles": {"api": {"profile": "backend"}}
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-
-    try std.testing.expectError(error.InvalidArguments, resolveHelloProfile(cfg, &.{"--missing"}));
-}
-
-test "normalizes docker target aliases" {
-    const cases = [_]struct {
-        input: []const u8,
-        expected: []const u8,
-    }{
-        .{ .input = "--docker", .expected = "docker" },
-        .{ .input = "api", .expected = "api" },
-    };
-    for (cases) |case| {
-        try std.testing.expectEqualStrings(case.expected, normalizeTarget(case.input));
-    }
-
-    try std.testing.expectEqualStrings("docker", try requiredTarget(&.{"--docker"}));
-    try std.testing.expect(optionalTarget(&.{}) == null);
-}
-
-test "accepts exec shell flag only after container" {
-    const cases = [_]struct {
-        args: []const []const u8,
-        expected: bool,
-    }{
-        .{ .args = &.{"api"}, .expected = false },
-        .{ .args = &.{ "api", "--shell" }, .expected = true },
-    };
-    for (cases) |case| {
-        try std.testing.expectEqual(case.expected, try execUseShell(case.args));
-    }
-}
-
-test "rejects invalid exec shell flag position" {
-    const cases = [_][]const []const u8{
-        &.{},
-        &.{ "api", "foo", "--shell" },
-    };
-    for (cases) |case| {
-        try std.testing.expectError(error.InvalidArguments, execUseShell(case));
-    }
 }
 
 test "invalid command arity prints usage before returning error" {
