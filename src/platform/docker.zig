@@ -20,8 +20,8 @@ pub const Compose = struct {
         defer self.gpa.free(result.stderr);
         if (result.term != .exited or result.term.exited != 0) return observations.ComposeObservation.empty(.unavailable);
         const services = parseServices(self.gpa, result.stdout) catch return observations.ComposeObservation.empty(.unavailable);
-        if (services.len == 0) return observations.ComposeObservation.fromOwnedServices(.empty, services);
-        return observations.ComposeObservation.fromOwnedServices(.running, services);
+        if (services.len == 0) return observations.ComposeObservation.fromOwned(.empty, services);
+        return observations.ComposeObservation.fromOwned(.running, services);
     }
 
     pub fn runningServices(self: Compose) !std.process.RunResult {

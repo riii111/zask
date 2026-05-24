@@ -32,7 +32,7 @@ pub const PaneObservation = struct {
     }
 
     /// Takes ownership of all pane field slices.
-    pub fn fromOwnedFields(state: PaneState, exit_code: []const u8, pid: []const u8, command: []const u8) PaneObservation {
+    pub fn fromOwned(state: PaneState, exit_code: []const u8, pid: []const u8, command: []const u8) PaneObservation {
         return .{
             .state = state,
             .exit_code = exit_code,
@@ -68,7 +68,7 @@ pub const ComposeObservation = struct {
     }
 
     /// Takes ownership of the services slice and each service name.
-    pub fn fromOwnedServices(state: ComposeState, services: []const []const u8) ComposeObservation {
+    pub fn fromOwned(state: ComposeState, services: []const []const u8) ComposeObservation {
         return .{
             .state = state,
             .services = services,
@@ -108,7 +108,7 @@ test "compose observation reports contained services" {
     const services = try std.testing.allocator.alloc([]const u8, 2);
     services[0] = try std.testing.allocator.dupe(u8, "api");
     services[1] = try std.testing.allocator.dupe(u8, "db");
-    const observation = ComposeObservation.fromOwnedServices(.running, services);
+    const observation = ComposeObservation.fromOwned(.running, services);
     defer observation.deinit(std.testing.allocator);
 
     try std.testing.expect(observation.contains("api"));
@@ -129,7 +129,7 @@ test "pane observation deinit frees exit_code pid and command" {
     const exit_code = try std.testing.allocator.dupe(u8, "130");
     const pid = try std.testing.allocator.dupe(u8, "12345");
     const command = try std.testing.allocator.dupe(u8, "node");
-    const observation = PaneObservation.fromOwnedFields(.dead, exit_code, pid, command);
+    const observation = PaneObservation.fromOwned(.dead, exit_code, pid, command);
     defer observation.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(PaneState.dead, observation.state);

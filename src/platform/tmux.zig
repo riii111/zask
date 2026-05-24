@@ -214,8 +214,9 @@ pub const PaneInfo = struct {
     }
 
     /// Transfers ownership of pane field slices into the returned observation.
+    /// The original PaneInfo must not be deinit'd afterwards.
     fn consumeIntoObservation(self: PaneInfo, state: observations.PaneState) observations.PaneObservation {
-        return observations.PaneObservation.fromOwnedFields(state, self.exit_code, self.pid, self.command);
+        return observations.PaneObservation.fromOwned(state, self.exit_code, self.pid, self.command);
     }
 };
 

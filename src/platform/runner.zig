@@ -134,6 +134,7 @@ pub const Recorder = struct {
         });
     }
 
+    /// Queues a spawn-time error after queued responses are consumed.
     pub fn enqueueError(self: *Recorder, err: anyerror) !void {
         try self.errors.append(self.gpa, err);
     }
@@ -222,6 +223,7 @@ pub fn expectNoTmuxSizingCommands(recorder: *const Recorder) !void {
 
 pub fn expectNoRemainingResponses(recorder: *const Recorder) !void {
     try std.testing.expectEqual(@as(usize, 0), recorder.responses.items.len);
+    try std.testing.expectEqual(@as(usize, 0), recorder.errors.items.len);
 }
 
 fn findCommandIndexContaining(recorder: *const Recorder, needle: []const u8, start: usize) ?usize {
@@ -278,6 +280,23 @@ test "recorder returns queued responses in order" {
     try std.testing.expectEqualStrings("second", second.stdout);
     try std.testing.expectEqualStrings("warn", second.stderr);
     try std.testing.expectEqual(@as(u8, 1), second.term.exited);
+}
+
+test "recorder returns queued responses before queued errors" {
+    var recorder = Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("first", "", .{ .exited = 0 });
+    try recorder.enqueueError(error.FileNotFound);
+    const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+
+    const first = captured(try run.run(&.{"one"}, .{}));
+    defer std.testing.allocator.free(first.stdout);
+    defer std.testing.allocator.free(first.stderr);
+
+    try std.testing.expectEqualStrings("first", first.stdout);
+    try std.testing.expectError(error.FileNotFound, run.run(&.{"two"}, .{}));
+    try std.testing.expectEqual(@as(usize, 2), recorder.commands.items.len);
+    try expectNoRemainingResponses(&recorder);
 }
 
 test "checked runner rejects non-zero exits" {
