@@ -218,8 +218,8 @@ test "command metadata parses aliases and global commands" {
         .{ .input = "-h", .expected = .help },
         .{ .input = "--help", .expected = .help },
         .{ .input = "hello", .expected = .hello },
-        .{ .input = "follow", .expected = null },
         .{ .input = "list", .expected = null },
+        .{ .input = "detach", .expected = null },
         .{ .input = "dashboard", .expected = null },
         .{ .input = "preview-list", .expected = null },
         .{ .input = "render-session", .expected = null },
@@ -257,7 +257,7 @@ test "help prints usage" {
 
     try runWithArgs(.{ .gpa = std.testing.allocator }, &.{"help"}, &writer);
     try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage: zask <command>"));
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "follow <service>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "attach | detach") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "render-session") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "preview-list") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "exec <container>") != null);
