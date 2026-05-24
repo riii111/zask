@@ -112,6 +112,10 @@ fn validateSessionId(value: []const u8) !void {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 test "log entry comparison prefers newer mtime" {
     try std.testing.expect(logEntryNewer({}, .{ .name = "new", .mtime = 2 }, .{ .name = "old", .mtime = 1 }));
 }

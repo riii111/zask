@@ -30,6 +30,10 @@ pub fn waitingPlaceholder(gpa: std.mem.Allocator, label: []const u8) ![]const u8
     return std.fmt.allocPrint(gpa, "printf '=== %s ===\\nWaiting for start command...\\n' {s}; exec \"${{SHELL:-sh}}\"", .{quoted_label});
 }
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 test "invoke quotes zask and config paths" {
     const command = try invoke(std.testing.allocator, "/tmp/zask path", "/tmp/demo config.json", "dashboard");
     defer std.testing.allocator.free(command);

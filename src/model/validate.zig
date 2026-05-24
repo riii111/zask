@@ -23,6 +23,10 @@ pub fn relativeSubPath(value: []const u8) !void {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 test "identifier accepts alphanumeric underscore and hyphen after first byte" {
     const cases = [_][]const u8{
         "sample-agent",

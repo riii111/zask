@@ -274,6 +274,10 @@ fn isAllowedRuntime(runtime: []const u8) bool {
     return false;
 }
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 fn parseTestConfig(arena: *std.heap.ArenaAllocator, json: []const u8) !Config {
     return Config.parse(arena.allocator(), json, "/home/me");
 }

@@ -264,6 +264,10 @@ fn dockerStartDecision(state: observations.PaneState) StartDecision {
     return serviceStartDecision(state);
 }
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 fn parseTestConfig(gpa: std.mem.Allocator, json: []const u8) !config.Config {
     return config.Config.parse(gpa, json, "/home/me");
 }

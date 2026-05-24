@@ -322,6 +322,10 @@ fn resolveHelloProfile(cfg: config.Config, args: []const []const u8) ![]const u8
     return cfg.resolveStartProfileOption(args[0]) orelse error.InvalidArguments;
 }
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 test "command metadata parses aliases and global commands" {
     const command_cases = [_]struct {
         input: []const u8,

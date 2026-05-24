@@ -76,6 +76,10 @@ fn phaseCwd(ctx: anytype, dir: []const u8) ![]const u8 {
     return std.fs.path.join(ctx.gpa, &.{ try ctx.cfg.projectRoot(ctx.gpa), dir });
 }
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 fn parseTestConfig(gpa: std.mem.Allocator, json: []const u8) !config.Config {
     return config.Config.parse(gpa, json, "/home/me");
 }
