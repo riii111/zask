@@ -309,13 +309,7 @@ test "newSession records tmux session argv" {
 
     try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
     const command = recorder.commands.items[0];
-    try std.testing.expectEqualStrings("tmux", command.argv[0]);
-    try std.testing.expectEqualStrings("new-session", command.argv[1]);
-    try std.testing.expectEqualStrings("-d", command.argv[2]);
-    try std.testing.expectEqualStrings("demo", command.argv[4]);
-    try std.testing.expectEqualStrings("dashboard", command.argv[6]);
-    try std.testing.expectEqualStrings("/tmp/demo app", command.argv[8]);
-    try std.testing.expectEqualStrings("zask dashboard", command.argv[9]);
+    try runner.expectCommandArgv(command, &.{ "tmux", "new-session", "-d", "-s", "demo", "-n", "dashboard", "-c", "/tmp/demo app", "zask dashboard" });
 }
 
 test "window layout helpers record tmux argv" {
@@ -328,21 +322,13 @@ test "window layout helpers record tmux argv" {
     try client.selectLayout("dashboard", "main-vertical");
 
     const split = recorder.commands.items[0];
-    try std.testing.expectEqualStrings("split-window", split.argv[1]);
-    try std.testing.expectEqualStrings("demo:dashboard", split.argv[3]);
-    try std.testing.expectEqualStrings("/tmp/demo app", split.argv[5]);
-    try std.testing.expectEqualStrings("zask monitor", split.argv[6]);
+    try runner.expectCommandArgv(split, &.{ "tmux", "split-window", "-t", "demo:dashboard", "-c", "/tmp/demo app", "zask monitor" });
 
     const option = recorder.commands.items[1];
-    try std.testing.expectEqualStrings("set-window-option", option.argv[1]);
-    try std.testing.expectEqualStrings("demo:dashboard", option.argv[3]);
-    try std.testing.expectEqualStrings("main-pane-width", option.argv[4]);
-    try std.testing.expectEqualStrings("50%", option.argv[5]);
+    try runner.expectCommandArgv(option, &.{ "tmux", "set-window-option", "-t", "demo:dashboard", "main-pane-width", "50%" });
 
     const layout = recorder.commands.items[2];
-    try std.testing.expectEqualStrings("select-layout", layout.argv[1]);
-    try std.testing.expectEqualStrings("demo:dashboard", layout.argv[3]);
-    try std.testing.expectEqualStrings("main-vertical", layout.argv[4]);
+    try runner.expectCommandArgv(layout, &.{ "tmux", "select-layout", "-t", "demo:dashboard", "main-vertical" });
 }
 
 test "newWindow records append target when requested" {
@@ -354,21 +340,10 @@ test "newWindow records append target when requested" {
     try client.newWindowAfter("api", "worker", "/tmp/demo app/worker", "echo worker");
 
     const window = recorder.commands.items[0];
-    try std.testing.expectEqualStrings("new-window", window.argv[1]);
-    try std.testing.expectEqualStrings("-d", window.argv[2]);
-    try std.testing.expectEqualStrings("demo", window.argv[4]);
-    try std.testing.expectEqualStrings("api", window.argv[6]);
-    try std.testing.expectEqualStrings("/tmp/demo app/backend", window.argv[8]);
-    try std.testing.expectEqualStrings("echo waiting", window.argv[9]);
+    try runner.expectCommandArgv(window, &.{ "tmux", "new-window", "-d", "-t", "demo", "-n", "api", "-c", "/tmp/demo app/backend", "echo waiting" });
 
     const after_window = recorder.commands.items[1];
-    try std.testing.expectEqualStrings("new-window", after_window.argv[1]);
-    try std.testing.expectEqualStrings("-d", after_window.argv[2]);
-    try std.testing.expectEqualStrings("-a", after_window.argv[3]);
-    try std.testing.expectEqualStrings("demo:api", after_window.argv[5]);
-    try std.testing.expectEqualStrings("worker", after_window.argv[7]);
-    try std.testing.expectEqualStrings("/tmp/demo app/worker", after_window.argv[9]);
-    try std.testing.expectEqualStrings("echo worker", after_window.argv[10]);
+    try runner.expectCommandArgv(after_window, &.{ "tmux", "new-window", "-d", "-a", "-t", "demo:api", "-n", "worker", "-c", "/tmp/demo app/worker", "echo worker" });
 }
 
 test "client lifecycle commands record tmux argv" {
@@ -382,13 +357,12 @@ test "client lifecycle commands record tmux argv" {
     try client.detachClientExec("zask re");
     try client.killSession();
 
-    try std.testing.expectEqualStrings("switch-client", recorder.commands.items[0].argv[1]);
-    try std.testing.expectEqualStrings("attach-session", recorder.commands.items[1].argv[1]);
+    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "switch-client", "-t", "demo" });
+    try runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "attach-session", "-t", "demo" });
     try std.testing.expect(recorder.commands.items[1].interactive);
-    try std.testing.expectEqualStrings("detach-client", recorder.commands.items[2].argv[1]);
-    try std.testing.expectEqualStrings("-E", recorder.commands.items[3].argv[2]);
-    try std.testing.expectEqualStrings("zask re", recorder.commands.items[3].argv[3]);
-    try std.testing.expectEqualStrings("kill-session", recorder.commands.items[4].argv[1]);
+    try runner.expectCommandArgv(recorder.commands.items[2], &.{ "tmux", "detach-client" });
+    try runner.expectCommandArgv(recorder.commands.items[3], &.{ "tmux", "detach-client", "-E", "zask re" });
+    try runner.expectCommandArgv(recorder.commands.items[4], &.{ "tmux", "kill-session", "-t", "demo" });
 }
 
 test "options popup and pipe helpers record tmux argv" {
@@ -402,16 +376,10 @@ test "options popup and pipe helpers record tmux argv" {
     try client.pipePane("api", "cat >> api.log");
     try client.pipePane("api", null);
 
-    try std.testing.expectEqualStrings("set-option", recorder.commands.items[0].argv[1]);
-    try std.testing.expectEqualStrings("@mode", recorder.commands.items[0].argv[4]);
-    try std.testing.expectEqualStrings("bind-key", recorder.commands.items[1].argv[1]);
-    try std.testing.expectEqualStrings("f", recorder.commands.items[1].argv[4]);
-    try std.testing.expectEqualStrings("run-shell", recorder.commands.items[1].argv[5]);
-    try std.testing.expectEqualStrings("popup", recorder.commands.items[2].argv[1]);
-    try std.testing.expectEqualStrings("80%", recorder.commands.items[2].argv[3]);
-    try std.testing.expectEqualStrings("tail -f log", recorder.commands.items[2].argv[7]);
-    try std.testing.expectEqualStrings("pipe-pane", recorder.commands.items[3].argv[1]);
-    try std.testing.expectEqualStrings("cat >> api.log", recorder.commands.items[3].argv[4]);
+    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "set-option", "-t", "demo", "@mode", "all" });
+    try runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "bind-key", "-T", "prefix", "f", "run-shell", "zask follow api" });
+    try runner.expectCommandArgv(recorder.commands.items[2], &.{ "tmux", "popup", "-w", "80%", "-h", "60%", "-E", "tail -f log" });
+    try runner.expectCommandArgv(recorder.commands.items[3], &.{ "tmux", "pipe-pane", "-t", "demo:api", "cat >> api.log" });
     try std.testing.expectEqual(@as(usize, 4), recorder.commands.items[4].argv.len);
 }
 
@@ -423,11 +391,7 @@ test "sendKeys records tmux command through runner" {
     try client.sendKeys("api", &.{ "echo ok", "Enter" });
 
     const command = recorder.commands.items[0];
-    try std.testing.expectEqualStrings("tmux", command.argv[0]);
-    try std.testing.expectEqualStrings("send-keys", command.argv[1]);
-    try std.testing.expectEqualStrings("demo:api", command.argv[3]);
-    try std.testing.expectEqualStrings("echo ok", command.argv[4]);
-    try std.testing.expectEqualStrings("Enter", command.argv[5]);
+    try runner.expectCommandArgv(command, &.{ "tmux", "send-keys", "-t", "demo:api", "echo ok", "Enter" });
 }
 
 test "window sizing helpers record and parse tmux argv" {
@@ -449,18 +413,10 @@ test "window sizing helpers record and parse tmux argv" {
     try std.testing.expectEqualStrings("@1", windows[0].id);
     try std.testing.expectEqual(@as(u16, 120), windows[0].width);
     try std.testing.expectEqual(@as(u16, 39), windows[0].height);
-    try std.testing.expectEqualStrings("list-windows", recorder.commands.items[0].argv[1]);
-    try std.testing.expectEqualStrings("resize-window", recorder.commands.items[1].argv[1]);
-    try std.testing.expectEqualStrings("120", recorder.commands.items[1].argv[3]);
-    try std.testing.expectEqualStrings("39", recorder.commands.items[1].argv[5]);
-    try std.testing.expectEqualStrings("@1", recorder.commands.items[1].argv[7]);
-    try std.testing.expectEqualStrings("set-option", recorder.commands.items[2].argv[1]);
-    try std.testing.expectEqualStrings("-w", recorder.commands.items[2].argv[2]);
-    try std.testing.expectEqualStrings("@1", recorder.commands.items[2].argv[4]);
-    try std.testing.expectEqualStrings("window-size", recorder.commands.items[2].argv[5]);
-    try std.testing.expectEqualStrings("latest", recorder.commands.items[2].argv[6]);
-    try std.testing.expectEqualStrings("choose-tree", recorder.commands.items[3].argv[1]);
-    try std.testing.expectEqualStrings("%1", recorder.commands.items[3].argv[4]);
+    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "list-windows", "-t", "demo", "-F", "#{window_id}|#{window_width}|#{window_height}" });
+    try runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "resize-window", "-x", "120", "-y", "39", "-t", "@1" });
+    try runner.expectCommandArgv(recorder.commands.items[2], &.{ "tmux", "set-option", "-w", "-t", "@1", "window-size", "latest" });
+    try runner.expectCommandArgv(recorder.commands.items[3], &.{ "tmux", "choose-tree", "-Zw", "-t", "%1" });
 }
 
 test "paneRunning checks pane child processes" {
@@ -471,9 +427,7 @@ test "paneRunning checks pane child processes" {
     const client = testClient(&recorder);
 
     try std.testing.expect(client.paneRunning("api"));
-    try std.testing.expectEqualStrings("pgrep", recorder.commands.items[1].argv[0]);
-    try std.testing.expectEqualStrings("-P", recorder.commands.items[1].argv[1]);
-    try std.testing.expectEqualStrings("12345", recorder.commands.items[1].argv[2]);
+    try runner.expectCommandArgv(recorder.commands.items[1], &.{ "pgrep", "-P", "12345" });
 }
 
 test "paneRunning rejects dead panes and panes without children" {
@@ -538,7 +492,7 @@ test "observePane returns tmux unavailable with pane fields when pgrep cannot sp
     try std.testing.expectEqualStrings("0", observation.exit_code);
     try std.testing.expectEqualStrings("12345", observation.pid);
     try std.testing.expectEqualStrings("node", observation.command);
-    try std.testing.expectEqualStrings("pgrep", recorder.commands.items[1].argv[0]);
+    try runner.expectCommandArg(recorder.commands.items[1], 0, "pgrep");
 }
 
 test "observePane returns dead pane fields without checking children" {

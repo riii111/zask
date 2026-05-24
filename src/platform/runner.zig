@@ -201,6 +201,40 @@ pub fn expectCommandContaining(recorder: *const Recorder, needle: []const u8) !v
     try std.testing.expect(findCommandContaining(recorder, needle) != null);
 }
 
+pub fn expectCommandArgv(command: RecordedCommand, expected: []const []const u8) !void {
+    try std.testing.expectEqual(expected.len, command.argv.len);
+    for (expected, command.argv) |expected_arg, actual_arg| {
+        try std.testing.expectEqualStrings(expected_arg, actual_arg);
+    }
+}
+
+pub fn expectCommandArgvStartsWith(command: RecordedCommand, expected: []const []const u8) !void {
+    try std.testing.expect(command.argv.len >= expected.len);
+    for (expected, command.argv[0..expected.len]) |expected_arg, actual_arg| {
+        try std.testing.expectEqualStrings(expected_arg, actual_arg);
+    }
+}
+
+pub fn expectCommandArg(command: RecordedCommand, index: usize, expected: []const u8) !void {
+    try std.testing.expect(command.argv.len > index);
+    try std.testing.expectEqualStrings(expected, command.argv[index]);
+}
+
+pub fn expectCommandArgContains(command: RecordedCommand, index: usize, needle: []const u8) !void {
+    try std.testing.expect(command.argv.len > index);
+    try std.testing.expect(std.mem.indexOf(u8, command.argv[index], needle) != null);
+}
+
+pub fn expectCommandArgNotContains(command: RecordedCommand, index: usize, needle: []const u8) !void {
+    try std.testing.expect(command.argv.len > index);
+    try std.testing.expect(std.mem.indexOf(u8, command.argv[index], needle) == null);
+}
+
+pub fn expectCommandCwd(command: RecordedCommand, expected: []const u8) !void {
+    try std.testing.expect(command.cwd != null);
+    try std.testing.expectEqualStrings(expected, command.cwd.?);
+}
+
 pub fn expectCommandOrder(recorder: *const Recorder, before: []const u8, after: []const u8) !void {
     const before_index = findCommandIndexContaining(recorder, before, 0) orelse return error.CommandNotFound;
     const same_command = commandContains(recorder.commands.items[before_index], after);
@@ -252,9 +286,8 @@ test "recorder captures commands without spawning processes" {
     defer std.testing.allocator.free(result.stdout);
     defer std.testing.allocator.free(result.stderr);
     try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
-    try std.testing.expectEqualStrings("echo", recorder.commands.items[0].argv[0]);
-    try std.testing.expectEqualStrings("ok", recorder.commands.items[0].argv[1]);
-    try std.testing.expectEqualStrings("/tmp/demo", recorder.commands.items[0].cwd.?);
+    try expectCommandArgv(recorder.commands.items[0], &.{ "echo", "ok" });
+    try expectCommandCwd(recorder.commands.items[0], "/tmp/demo");
     try std.testing.expect(!recorder.commands.items[0].interactive);
 
     _ = try run.run(&.{"zsh"}, .{ .interactive = true });

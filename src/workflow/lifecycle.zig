@@ -394,9 +394,7 @@ test "command phase runs interactively" {
 
     const command = proc_runner.findCommandContaining(&recorder, "echo setup") orelse return error.CommandNotFound;
     try std.testing.expect(command.interactive);
-    try std.testing.expectEqualStrings("bash", command.argv[0]);
-    try std.testing.expectEqualStrings("-c", command.argv[1]);
-    try std.testing.expectEqualStrings("echo setup", command.argv[2]);
+    try proc_runner.expectCommandArgv(command, &.{ "bash", "-c", "echo setup" });
 }
 
 test "wait helpers report timeouts" {
@@ -540,9 +538,9 @@ test "docker stop reaches compose down without tmux session" {
     try lifecycle.stopTarget("docker", &writer);
 
     const down = proc_runner.findCommandContaining(&recorder, "down") orelse return error.CommandNotFound;
-    try std.testing.expectEqualStrings("docker", down.argv[0]);
-    try std.testing.expectEqualStrings("down", down.argv[4]);
-    try std.testing.expectEqualStrings("/tmp/demo", down.cwd.?);
+    try proc_runner.expectCommandArg(down, 0, "docker");
+    try proc_runner.expectCommandArg(down, 4, "down");
+    try proc_runner.expectCommandCwd(down, "/tmp/demo");
 }
 
 test "docker stop reaches compose down when tmux send fails" {
@@ -569,8 +567,8 @@ test "docker stop reaches compose down when tmux send fails" {
     try lifecycle.stopTarget("docker", &writer);
 
     const down = proc_runner.findCommandContaining(&recorder, "down") orelse return error.CommandNotFound;
-    try std.testing.expectEqualStrings("docker", down.argv[0]);
-    try std.testing.expectEqualStrings("down", down.argv[4]);
+    try proc_runner.expectCommandArg(down, 0, "docker");
+    try proc_runner.expectCommandArg(down, 4, "down");
 }
 
 test "docker start is a no-op when docker pane is running" {
@@ -638,8 +636,8 @@ test "docker start sends compose up after transient busy pane" {
     try lifecycle.startTarget("docker", &writer);
 
     const send_keys = proc_runner.findCommandContaining(&recorder, "docker compose") orelse return error.CommandNotFound;
-    try std.testing.expectEqualStrings("send-keys", send_keys.argv[1]);
-    try std.testing.expect(std.mem.indexOf(u8, send_keys.argv[4], "docker compose") != null);
+    try proc_runner.expectCommandArg(send_keys, 1, "send-keys");
+    try proc_runner.expectCommandArgContains(send_keys, 4, "docker compose");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting Docker...") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }
@@ -671,8 +669,8 @@ test "docker start disables compose menu and waits when started" {
     try lifecycle.startTarget("docker", &writer);
 
     const send_keys = proc_runner.findCommandContaining(&recorder, "COMPOSE_MENU=false") orelse return error.CommandNotFound;
-    try std.testing.expectEqualStrings("send-keys", send_keys.argv[1]);
-    try std.testing.expect(std.mem.indexOf(u8, send_keys.argv[4], "COMPOSE_MENU=false") != null);
+    try proc_runner.expectCommandArg(send_keys, 1, "send-keys");
+    try proc_runner.expectCommandArgContains(send_keys, 4, "COMPOSE_MENU=false");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }
 
@@ -698,8 +696,8 @@ test "docker restart stops compose before reporting missing session" {
     try std.testing.expectError(error.SessionNotRunning, lifecycle.restartTarget("docker", &writer));
 
     const down = proc_runner.findCommandContaining(&recorder, "down") orelse return error.CommandNotFound;
-    try std.testing.expectEqualStrings("docker", down.argv[0]);
-    try std.testing.expectEqualStrings("down", down.argv[4]);
+    try proc_runner.expectCommandArg(down, 0, "docker");
+    try proc_runner.expectCommandArg(down, 4, "down");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Session not running") != null);
 }
 
@@ -759,9 +757,5 @@ test "startAll dispatches quoted service command to tmux" {
     try lifecycle.startAll("all", &writer);
 
     const send_keys = proc_runner.findCommandContaining(&recorder, "cd '/tmp/demo app/backend' && serve") orelse return error.CommandNotFound;
-    try std.testing.expectEqualStrings("tmux", send_keys.argv[0]);
-    try std.testing.expectEqualStrings("send-keys", send_keys.argv[1]);
-    try std.testing.expectEqualStrings("demo:api", send_keys.argv[3]);
-    try std.testing.expectEqualStrings("cd '/tmp/demo app/backend' && serve", send_keys.argv[4]);
-    try std.testing.expectEqualStrings("Enter", send_keys.argv[5]);
+    try proc_runner.expectCommandArgv(send_keys, &.{ "tmux", "send-keys", "-t", "demo:api", "cd '/tmp/demo app/backend' && serve", "Enter" });
 }

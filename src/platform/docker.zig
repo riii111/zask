@@ -158,8 +158,8 @@ test "runningServices uses compose working directory" {
     defer std.testing.allocator.free(result.stdout);
     defer std.testing.allocator.free(result.stderr);
 
-    try std.testing.expectEqualStrings("/tmp/demo/docker", recorder.commands.items[0].cwd.?);
-    try std.testing.expectEqualStrings("compose.yaml", recorder.commands.items[0].argv[3]);
+    try runner.expectCommandCwd(recorder.commands.items[0], "/tmp/demo/docker");
+    try runner.expectCommandArg(recorder.commands.items[0], 3, "compose.yaml");
 }
 
 test "running ignores empty service output" {
@@ -221,9 +221,7 @@ test "execInteractive passes configured command directly" {
 
     const command = recorder.commands.items[0];
     try std.testing.expect(command.interactive);
-    try std.testing.expectEqualStrings("psql", command.argv[6]);
-    try std.testing.expectEqualStrings("-c", command.argv[7]);
-    try std.testing.expectEqualStrings("select 1", command.argv[8]);
+    try runner.expectCommandArgv(command, &.{ "docker", "compose", "-f", "compose.yaml", "exec", "db", "psql", "-c", "select 1" });
 }
 
 test "splitCommand parses shell-like command strings into argv" {

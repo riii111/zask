@@ -58,13 +58,13 @@ test "list binding delegates preview sizing to zask command" {
     try bindControlKeys(arena.allocator(), tx);
 
     const command = recorder.commands.items[0];
-    try std.testing.expectEqualStrings("bind-key", command.argv[1]);
-    try std.testing.expectEqualStrings("w", command.argv[4]);
-    try std.testing.expectEqualStrings("run-shell", command.argv[5]);
-    try std.testing.expect(std.mem.indexOf(u8, command.argv[6], "preview-list") != null);
-    try std.testing.expect(std.mem.indexOf(u8, command.argv[6], "#{pane_id}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, command.argv[6], "#{client_width}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, command.argv[6], "#{client_height}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, command.argv[6], "resize-window") == null);
-    try std.testing.expect(std.mem.indexOf(u8, command.argv[6], "choose-tree") == null);
+    try proc_runner.expectCommandArg(command, 1, "bind-key");
+    try proc_runner.expectCommandArg(command, 4, "w");
+    try proc_runner.expectCommandArg(command, 5, "run-shell");
+    try proc_runner.expectCommandArgContains(command, 6, "preview-list");
+    try proc_runner.expectCommandArgContains(command, 6, "#{pane_id}");
+    try proc_runner.expectCommandArgContains(command, 6, "#{client_width}");
+    try proc_runner.expectCommandArgContains(command, 6, "#{client_height}");
+    try proc_runner.expectCommandArgNotContains(command, 6, "resize-window");
+    try proc_runner.expectCommandArgNotContains(command, 6, "choose-tree");
 }

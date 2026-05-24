@@ -164,8 +164,8 @@ test "command phase warn continues and abort fails startup" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: command phase failed") != null);
     const warn_command = runner_mod.findCommandContaining(&recorder, "warn setup") orelse return error.CommandNotFound;
     const abort_command = runner_mod.findCommandContaining(&recorder, "abort setup") orelse return error.CommandNotFound;
-    try std.testing.expectEqualStrings("warn setup", warn_command.argv[2]);
-    try std.testing.expectEqualStrings("abort setup", abort_command.argv[2]);
+    try runner_mod.expectCommandArg(warn_command, 2, "warn setup");
+    try runner_mod.expectCommandArg(abort_command, 2, "abort setup");
     try runner_mod.expectNoRemainingResponses(&recorder);
 }
 

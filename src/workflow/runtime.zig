@@ -438,7 +438,7 @@ test "exec reports missing containers and uses shell override" {
 
     const command = recorder.commands.items[3];
     try std.testing.expect(command.interactive);
-    try std.testing.expectEqualStrings("bash", command.argv[6]);
+    try proc_runner.expectCommandArg(command, 6, "bash");
 }
 
 test "exec passes default command without shell wrapping" {
@@ -464,12 +464,7 @@ test "exec passes default command without shell wrapping" {
 
     const command = recorder.commands.items[1];
     try std.testing.expect(command.interactive);
-    try std.testing.expectEqualStrings("docker", command.argv[0]);
-    try std.testing.expectEqualStrings("exec", command.argv[4]);
-    try std.testing.expectEqualStrings("db", command.argv[5]);
-    try std.testing.expectEqualStrings("psql", command.argv[6]);
-    try std.testing.expectEqualStrings("-c", command.argv[7]);
-    try std.testing.expectEqualStrings("select 1", command.argv[8]);
+    try proc_runner.expectCommandArgv(command, &.{ "docker", "compose", "-f", "compose.yaml", "exec", "db", "psql", "-c", "select 1" });
     try std.testing.expect(!proc_runner.commandContains(command, "bash -lc"));
 }
 
@@ -499,8 +494,7 @@ test "bye kills session even when pipe cleanup fails" {
     try runtime.byeUnlocked(&writer);
 
     const kill = recorder.commands.items[recorder.commands.items.len - 1];
-    try std.testing.expectEqualStrings("tmux", kill.argv[0]);
-    try std.testing.expectEqualStrings("kill-session", kill.argv[1]);
+    try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "demo" });
 }
 
 test "bye reaches kill-session after cleanup failure" {
@@ -537,7 +531,7 @@ test "bye reaches kill-session after cleanup failure" {
     const kill_index = recorder.commands.items.len - 1;
     try proc_runner.expectCommandOrder(&recorder, "C-c", "down");
     try proc_runner.expectCommandOrder(&recorder, "down", "pipe-pane");
-    try std.testing.expectEqualStrings("kill-session", recorder.commands.items[kill_index].argv[1]);
+    try proc_runner.expectCommandArg(recorder.commands.items[kill_index], 1, "kill-session");
     try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items.len);
     try std.testing.expectEqual(waits.docker_ready_settle, recorder.sleeps.items[0].duration);
     try std.testing.expectEqual(bye_kill_settle, recorder.sleeps.items[1].duration);
@@ -567,7 +561,7 @@ test "attach from tmux switches client without mutating window sizes" {
     try runtime.attach();
 
     try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
-    try std.testing.expectEqualStrings("switch-client", recorder.commands.items[0].argv[1]);
+    try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "switch-client");
 }
 
 test "new session setup creates dashboard service and docker windows" {
@@ -730,7 +724,7 @@ test "hello refreshes bindings for existing session" {
 
     try runtime.helloUnlocked("all", &writer);
 
-    try std.testing.expectEqualStrings("has-session", recorder.commands.items[0].argv[1]);
+    try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
     try proc_runner.expectCommandContaining(&recorder, "set-option");
     try proc_runner.expectCommandContaining(&recorder, "preview-list");
     try proc_runner.expectCommandOrder(&recorder, "preview-list", "switch-client");
@@ -760,18 +754,18 @@ test "previewList resizes all windows before choose-tree" {
 
     try runtime.previewList("%1", 120, 40);
 
-    try std.testing.expectEqualStrings("list-windows", recorder.commands.items[0].argv[1]);
-    try std.testing.expectEqualStrings("resize-window", recorder.commands.items[1].argv[1]);
-    try std.testing.expectEqualStrings("@1", recorder.commands.items[1].argv[7]);
-    try std.testing.expectEqualStrings("resize-window", recorder.commands.items[2].argv[1]);
-    try std.testing.expectEqualStrings("@2", recorder.commands.items[2].argv[7]);
-    try std.testing.expectEqualStrings("list-windows", recorder.commands.items[3].argv[1]);
-    try std.testing.expectEqualStrings("set-option", recorder.commands.items[4].argv[1]);
-    try std.testing.expectEqualStrings("window-size", recorder.commands.items[4].argv[5]);
-    try std.testing.expectEqualStrings("latest", recorder.commands.items[4].argv[6]);
-    try std.testing.expectEqualStrings("set-option", recorder.commands.items[5].argv[1]);
-    try std.testing.expectEqualStrings("choose-tree", recorder.commands.items[6].argv[1]);
-    try std.testing.expectEqualStrings("%1", recorder.commands.items[6].argv[4]);
+    try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "list-windows");
+    try proc_runner.expectCommandArg(recorder.commands.items[1], 1, "resize-window");
+    try proc_runner.expectCommandArg(recorder.commands.items[1], 7, "@1");
+    try proc_runner.expectCommandArg(recorder.commands.items[2], 1, "resize-window");
+    try proc_runner.expectCommandArg(recorder.commands.items[2], 7, "@2");
+    try proc_runner.expectCommandArg(recorder.commands.items[3], 1, "list-windows");
+    try proc_runner.expectCommandArg(recorder.commands.items[4], 1, "set-option");
+    try proc_runner.expectCommandArg(recorder.commands.items[4], 5, "window-size");
+    try proc_runner.expectCommandArg(recorder.commands.items[4], 6, "latest");
+    try proc_runner.expectCommandArg(recorder.commands.items[5], 1, "set-option");
+    try proc_runner.expectCommandArg(recorder.commands.items[6], 1, "choose-tree");
+    try proc_runner.expectCommandArg(recorder.commands.items[6], 4, "%1");
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
@@ -797,12 +791,12 @@ test "previewList does not open choose-tree when resized windows mismatch" {
     try std.testing.expectError(error.WindowSizeMismatch, runtime.previewList("%1", 120, 40));
 
     try std.testing.expectEqual(@as(usize, 4), recorder.commands.items.len);
-    try std.testing.expectEqualStrings("list-windows", recorder.commands.items[0].argv[1]);
-    try std.testing.expectEqualStrings("resize-window", recorder.commands.items[1].argv[1]);
-    try std.testing.expectEqualStrings("list-windows", recorder.commands.items[2].argv[1]);
-    try std.testing.expectEqualStrings("set-option", recorder.commands.items[3].argv[1]);
-    try std.testing.expectEqualStrings("window-size", recorder.commands.items[3].argv[5]);
-    try std.testing.expectEqualStrings("latest", recorder.commands.items[3].argv[6]);
+    try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "list-windows");
+    try proc_runner.expectCommandArg(recorder.commands.items[1], 1, "resize-window");
+    try proc_runner.expectCommandArg(recorder.commands.items[2], 1, "list-windows");
+    try proc_runner.expectCommandArg(recorder.commands.items[3], 1, "set-option");
+    try proc_runner.expectCommandArg(recorder.commands.items[3], 5, "window-size");
+    try proc_runner.expectCommandArg(recorder.commands.items[3], 6, "latest");
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
@@ -844,8 +838,8 @@ test "hello attaches existing session when another hello holds the lock" {
 
     try runtime.hello("all", &writer);
 
-    try std.testing.expectEqualStrings("has-session", recorder.commands.items[0].argv[1]);
-    try std.testing.expectEqualStrings("switch-client", recorder.commands.items[1].argv[1]);
+    try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
+    try proc_runner.expectCommandArg(recorder.commands.items[1], 1, "switch-client");
 }
 
 fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.Config) Runtime {
