@@ -94,6 +94,19 @@ pub const Lifecycle = struct {
         try self.ensureServiceRunning(service, writer);
     }
 
+    pub fn stopDocker(self: Lifecycle, writer: *std.Io.Writer) !void {
+        if (!self.cfg.dockerEnabled()) return;
+        try writeProgress(writer, "Stopping Docker...\n", .{});
+        if (self.tmux.observeSession() == .active) {
+            var sent = true;
+            self.tmux.sendKeys("docker", &.{"C-c"}) catch {
+                sent = false;
+            };
+            if (sent) self.runner.sleep(waits.docker_ready_settle);
+        }
+        self.docker.down() catch {};
+    }
+
     fn stopService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
         try self.ensureServiceStopped(service, writer);
     }
@@ -203,19 +216,6 @@ pub const Lifecycle = struct {
         const pane = self.tmux.observePane("docker");
         defer pane.deinit(self.gpa);
         return pane.state;
-    }
-
-    pub fn stopDocker(self: Lifecycle, writer: *std.Io.Writer) !void {
-        if (!self.cfg.dockerEnabled()) return;
-        try writeProgress(writer, "Stopping Docker...\n", .{});
-        if (self.tmux.observeSession() == .active) {
-            var sent = true;
-            self.tmux.sendKeys("docker", &.{"C-c"}) catch {
-                sent = false;
-            };
-            if (sent) self.runner.sleep(waits.docker_ready_settle);
-        }
-        self.docker.down() catch {};
     }
 };
 

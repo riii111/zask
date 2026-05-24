@@ -242,14 +242,14 @@ pub const Config = struct {
     }
 };
 
-fn serviceHealthcheck(service: Value) ?Value {
-    if (service != .object) return null;
-    return service.object.get("healthcheck");
-}
-
 pub fn loadPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []const u8) !Config {
     const bytes = try readFile(gpa, io, path);
     return Config.parse(gpa, bytes, home);
+}
+
+fn serviceHealthcheck(service: Value) ?Value {
+    if (service != .object) return null;
+    return service.object.get("healthcheck");
 }
 
 fn readFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
