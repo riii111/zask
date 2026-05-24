@@ -4,6 +4,8 @@ const close = @import("cli/close.zig");
 const cli_context = @import("cli/context.zig");
 const dashboard = @import("cli/dashboard.zig");
 const help = @import("cli/help.zig");
+const init_cmd = @import("cli/init.zig");
+const list = @import("cli/list.zig");
 const logs = @import("cli/logs.zig");
 const monitor = @import("cli/monitor.zig");
 const open = @import("cli/open.zig");
@@ -24,6 +26,8 @@ const ParsedArgs = cli_context.ParsedArgs;
 const Command = enum {
     version,
     help,
+    init,
+    list,
     status,
     attach,
     logs,
@@ -42,6 +46,8 @@ const Command = enum {
         return switch (self) {
             .version => runCommand(version, context),
             .help => runCommand(help, context),
+            .init => runCommand(init_cmd, context),
+            .list => runCommand(list, context),
             .status => runCommand(status, context),
             .attach => runCommand(attach, context),
             .logs => runCommand(logs, context),
@@ -77,8 +83,10 @@ const command_specs = [_]CommandSpec{
     .{ .command = .start, .names = &.{"start"}, .usage = "start <--all|svc|group|docker>", .description = "Start resources in existing workspace" },
     .{ .command = .stop, .names = &.{"stop"}, .usage = "stop <--all|svc|group|docker>", .description = "Stop resources, keeping workspace open" },
     .{ .command = .restart, .names = &.{"restart"}, .usage = "restart <svc|group|docker>", .description = "Restart service, group, or docker" },
+    .{ .command = .list, .names = &.{"list"}, .usage = "list", .description = "List configured services" },
     .{ .command = .status, .names = &.{"status"}, .usage = "status", .description = "Show service state" },
     .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window" },
+    .{ .command = .init, .names = &.{"init"}, .usage = "init <project> [options]", .description = "Create project config", .global = true },
     .{ .command = .version, .names = &.{"version"}, .usage = "version", .description = "Print zask version", .global = true },
     .{ .command = .help, .names = &.{ "help", "--help", "-h" }, .usage = "help", .description = "Print this help", .global = true },
     .{ .command = .dashboard, .names = &.{"dashboard"}, .internal = true, .show_in_help = false },
@@ -102,7 +110,7 @@ pub fn run(init: std.process.Init) !void {
     const stdout = &stdout_file_writer.interface;
 
     runWithArgs(context, if (args.len > 1) args[1..] else &.{}, stdout) catch |err| switch (err) {
-        error.InvalidArguments, error.UnknownCommand, error.ProjectRequired => {
+        error.InvalidArguments, error.UnknownCommand, error.ProjectRequired, error.ConfigAlreadyExists => {
             try stdout.flush();
             std.process.exit(2);
         },
@@ -231,7 +239,7 @@ test "cli.command: parses public and internal names" {
         .{ .input = "up", .expected = null },
         .{ .input = "kill", .expected = null },
         .{ .input = "exec", .expected = null },
-        .{ .input = "list", .expected = null },
+        .{ .input = "list", .expected = .list },
         .{ .input = "detach", .expected = null },
         .{ .input = "dashboard", .expected = null },
         .{ .input = "preview-list", .expected = null },
@@ -250,6 +258,7 @@ test "cli.command: parses public and internal names" {
         expected: bool,
     }{
         .{ .input = "--help", .expected = true },
+        .{ .input = "init", .expected = true },
         .{ .input = "version", .expected = true },
         .{ .input = "status", .expected = false },
     };
@@ -277,6 +286,7 @@ test "cli.help: prints public commands" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "start <--all|svc|group|docker>") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "stop <--all|svc|group|docker>") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "restart <svc|group|docker>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "init <project> [options]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "attach | detach") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "open [--docker|--<profile>]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "hello") == null);
@@ -299,6 +309,13 @@ test "cli.parseArgs: accepts project command form" {
     const parsed = try parseArgs(.{ .gpa = std.testing.allocator }, &.{ "demo", "status" });
     try std.testing.expectEqualStrings("demo", parsed.project.?);
     try std.testing.expectEqualStrings("status", parsed.command);
+}
+
+test "cli.parseArgs: accepts init as global command" {
+    const parsed = try parseArgs(.{ .gpa = std.testing.allocator }, &.{ "init", "demo", "--root", "." });
+    try std.testing.expect(parsed.project == null);
+    try std.testing.expectEqualStrings("init", parsed.command);
+    try std.testing.expectEqualStrings("demo", parsed.args[0]);
 }
 
 test "cli.parseArgs: accepts explicit config command form" {

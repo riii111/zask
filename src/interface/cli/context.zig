@@ -65,7 +65,7 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
     };
 }
 
-fn projectConfigPath(gpa: std.mem.Allocator, environ: ?*const env.Map, project: []const u8) ![]const u8 {
+pub fn projectConfigPath(gpa: std.mem.Allocator, environ: ?*const env.Map, project: []const u8) ![]const u8 {
     try validate.identifier(project);
     return std.fs.path.join(gpa, &.{ try paths.configBase(gpa, environ), project, "config.json" });
 }
