@@ -159,12 +159,12 @@ fn printHelp(writer: *std.Io.Writer) !void {
 
 fn runCommand(comptime module: type, context: *cli_context.Context) !void {
     const opts = module.Options.parse(context.parsed.args) catch |err| {
-        if (err == error.InvalidArguments) try context.help();
+        if (err == error.InvalidArguments) context.help() catch {};
         return err;
     };
     defer opts.deinit();
     module.run(context, opts) catch |err| {
-        if (err == error.InvalidArguments) try context.help();
+        if (err == error.InvalidArguments) context.help() catch {};
         return err;
     };
 }
