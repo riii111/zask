@@ -132,13 +132,13 @@ pub const Runtime = struct {
         const scratch = arena.allocator();
         try self.openSessionWithDashboardWindow(scratch);
         errdefer tx.killSession() catch {};
-        try self.applyBaseSessionOptions(scratch);
+        try self.installSessionOptions(scratch);
         try self.configureDashboardWindow(scratch);
         try self.appendServiceAndDockerWindows(scratch);
         try self.focusDashboard();
-        try tmux_setup.bindControlKeys(self.gpa, tx);
+        try tmux_setup.bindControlKeys(scratch, tx);
         try self.logSession().init();
-        try self.setupPipePane(writer);
+        try self.setupPipePane(scratch, writer);
         try self.lifecycle().startAll(profile, writer);
         try self.attach();
     }
@@ -264,10 +264,10 @@ pub const Runtime = struct {
     fn openSessionWithDashboardWindow(self: Runtime, scratch: std.mem.Allocator) !void {
         const tx = self.tmux();
         const root = try self.cfg.projectRoot(scratch);
-        try tx.newSession(session_layout.dashboard_window, root, try zask_command.invoke(scratch, self.zask_path, self.config_path, "dashboard"));
+        try tx.newSession(session_layout.dashboard_window, root, try zask_command.invokeDashboard(scratch, self.zask_path, self.config_path));
     }
 
-    fn applyBaseSessionOptions(self: Runtime, scratch: std.mem.Allocator) !void {
+    fn installSessionOptions(self: Runtime, scratch: std.mem.Allocator) !void {
         try tmux_setup.applySessionOptions(scratch, self.tmux(), .{
             .project = try self.cfg.projectName(),
             .zask_path = self.zask_path,
@@ -278,7 +278,7 @@ pub const Runtime = struct {
     fn configureDashboardWindow(self: Runtime, scratch: std.mem.Allocator) !void {
         const tx = self.tmux();
         const root = try self.cfg.projectRoot(scratch);
-        try tx.splitWindow(session_layout.dashboard_window, root, try zask_command.invoke(scratch, self.zask_path, self.config_path, "monitor"));
+        try tx.splitWindow(session_layout.dashboard_window, root, try zask_command.invokeMonitor(scratch, self.zask_path, self.config_path));
         try tx.setWindowOption(session_layout.dashboard_window, session_layout.dashboard_pane_width_option, session_layout.dashboard_pane_width_value);
         try tx.selectLayout(session_layout.dashboard_window, session_layout.dashboard_layout);
     }
@@ -300,7 +300,7 @@ pub const Runtime = struct {
         try self.tmux().selectWindow(session_layout.dashboard_window);
     }
 
-    fn setupPipePane(self: Runtime, writer: *std.Io.Writer) !void {
+    fn setupPipePane(self: Runtime, scratch: std.mem.Allocator, writer: *std.Io.Writer) !void {
         const manager = self.logSession();
         const tx = self.tmux();
         for (try self.cfg.services()) |service| {
@@ -309,11 +309,11 @@ pub const Runtime = struct {
                 try writer.print("Warning: log setup failed for {s}: {}\n", .{ name, err });
                 continue;
             };
-            const quoted = shell.quote(self.gpa, log_file) catch |err| {
+            const quoted = shell.quote(scratch, log_file) catch |err| {
                 try writer.print("Warning: log setup failed for {s}: {}\n", .{ name, err });
                 continue;
             };
-            const command = std.fmt.allocPrint(self.gpa, "cat >> {s}", .{quoted}) catch |err| {
+            const command = std.fmt.allocPrint(scratch, "cat >> {s}", .{quoted}) catch |err| {
                 try writer.print("Warning: log setup failed for {s}: {}\n", .{ name, err });
                 continue;
             };
@@ -558,7 +558,7 @@ test "new session setup creates dashboard service and docker windows" {
     var runtime = testRuntime(arena.allocator(), run, cfg);
 
     try runtime.openSessionWithDashboardWindow(arena.allocator());
-    try runtime.applyBaseSessionOptions(arena.allocator());
+    try runtime.installSessionOptions(arena.allocator());
     try runtime.configureDashboardWindow(arena.allocator());
     try runtime.appendServiceAndDockerWindows(arena.allocator());
     try runtime.focusDashboard();
@@ -597,7 +597,7 @@ test "new session setup places docker after dashboard when services are empty" {
     var runtime = testRuntime(arena.allocator(), run, cfg);
 
     try runtime.openSessionWithDashboardWindow(arena.allocator());
-    try runtime.applyBaseSessionOptions(arena.allocator());
+    try runtime.installSessionOptions(arena.allocator());
     try runtime.configureDashboardWindow(arena.allocator());
     try runtime.appendServiceAndDockerWindows(arena.allocator());
     try runtime.focusDashboard();
