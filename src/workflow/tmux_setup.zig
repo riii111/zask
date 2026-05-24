@@ -24,8 +24,8 @@ pub fn applySessionOptions(gpa: std.mem.Allocator, tx: tmux_client.Client, opts:
 }
 
 pub fn bindControlKeys(gpa: std.mem.Allocator, tx: tmux_client.Client) !void {
-    try tx.bindCommand("w",
-        \\run-shell 'session="#{session_name}"; tmux list-windows -t "$session" -F "#{window_id}" | while IFS= read -r window; do tmux resize-window -a -t "$window"; done'; choose-tree -Zw
+    try tx.bindRunShell("w",
+        \\width="#{client_width}"; height="#{client_height}"; height=$((height - 1)); session="#{session_name}"; tmux list-windows -t "$session" -F "#{window_id}" | while IFS= read -r window; do tmux resize-window -x "$width" -y "$height" -t "$window"; done; tmux choose-tree -Zw -t "#{pane_id}"
     );
     try tx.bindRunShell("m", try std.fmt.allocPrint(gpa,
         \\session="#{{session_name}}";
@@ -57,6 +57,7 @@ test "list binding resizes preview windows before choose-tree" {
     const command = recorder.commands.items[0];
     try std.testing.expectEqualStrings("bind-key", command.argv[1]);
     try std.testing.expectEqualStrings("w", command.argv[4]);
-    try std.testing.expect(std.mem.indexOf(u8, command.argv[5], "resize-window -a") != null);
-    try std.testing.expect(std.mem.indexOf(u8, command.argv[5], "choose-tree -Zw") != null);
+    try std.testing.expectEqualStrings("run-shell", command.argv[5]);
+    try std.testing.expect(std.mem.indexOf(u8, command.argv[6], "resize-window -x \"$width\" -y \"$height\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command.argv[6], "tmux choose-tree -Zw -t") != null);
 }
