@@ -70,6 +70,51 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ self.tmux_path, "new-window", "-d", "-a", "-t", target_window, "-n", window_name, "-c", cwd, command }, .{ .check = true, .discard = true });
     }
 
+    pub fn listWindowSizes(self: Client) ![]WindowSize {
+        const result = runner.captured(try self.runner.run(&.{ self.tmux_path, "list-windows", "-t", self.session, "-F", "#{window_id}|#{window_width}|#{window_height}" }, .{ .check = true }));
+        defer self.gpa.free(result.stdout);
+        defer self.gpa.free(result.stderr);
+
+        var windows: std.ArrayList(WindowSize) = .empty;
+        errdefer {
+            for (windows.items) |window| window.deinit(self.gpa);
+            windows.deinit(self.gpa);
+        }
+
+        var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+        while (lines.next()) |line| {
+            if (line.len == 0) continue;
+            var fields = std.mem.splitScalar(u8, line, '|');
+            const id = fields.next() orelse return error.InvalidWindowSizeOutput;
+            const width_text = fields.next() orelse return error.InvalidWindowSizeOutput;
+            const height_text = fields.next() orelse return error.InvalidWindowSizeOutput;
+            if (fields.next() != null) return error.InvalidWindowSizeOutput;
+            const width = try std.fmt.parseUnsigned(u16, width_text, 10);
+            const height = try std.fmt.parseUnsigned(u16, height_text, 10);
+            try windows.ensureUnusedCapacity(self.gpa, 1);
+            const owned_id = try self.gpa.dupe(u8, id);
+            windows.appendAssumeCapacity(.{
+                .id = owned_id,
+                .width = width,
+                .height = height,
+            });
+        }
+
+        return try windows.toOwnedSlice(self.gpa);
+    }
+
+    pub fn resizeWindow(self: Client, target_window: []const u8, width: u16, height: u16) !void {
+        const width_text = try std.fmt.allocPrint(self.gpa, "{d}", .{width});
+        defer self.gpa.free(width_text);
+        const height_text = try std.fmt.allocPrint(self.gpa, "{d}", .{height});
+        defer self.gpa.free(height_text);
+        _ = try self.runner.run(&.{ self.tmux_path, "resize-window", "-x", width_text, "-y", height_text, "-t", target_window }, .{ .check = true, .discard = true });
+    }
+
+    pub fn restoreWindowAutoSize(self: Client, target_window: []const u8) !void {
+        _ = try self.runner.run(&.{ self.tmux_path, "set-option", "-w", "-t", target_window, "window-size", "latest" }, .{ .check = true, .discard = true });
+    }
+
     pub fn splitWindow(self: Client, window: []const u8, cwd: []const u8, command: []const u8) !void {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
@@ -178,6 +223,10 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ self.tmux_path, "bind-key", "-T", "prefix", key, "run-shell", command }, .{ .check = true, .discard = true });
     }
 
+    pub fn chooseTree(self: Client, pane_id: []const u8) !void {
+        _ = try self.runner.run(&.{ self.tmux_path, "choose-tree", "-Zw", "-t", pane_id }, .{ .check = true, .discard = true });
+    }
+
     pub fn popup(self: Client, width: []const u8, height: []const u8, command: []const u8) !void {
         _ = try self.runner.run(&.{ self.tmux_path, "popup", "-w", width, "-h", height, "-E", command }, .{ .check = true, .discard = true });
     }
@@ -186,6 +235,21 @@ pub const Client = struct {
         return std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ self.session, window });
     }
 };
+
+pub const WindowSize = struct {
+    id: []const u8,
+    width: u16,
+    height: u16,
+
+    pub fn deinit(self: WindowSize, gpa: std.mem.Allocator) void {
+        gpa.free(self.id);
+    }
+};
+
+pub fn freeWindowSizes(gpa: std.mem.Allocator, windows: []WindowSize) void {
+    for (windows) |window| window.deinit(gpa);
+    gpa.free(windows);
+}
 
 pub const PaneInfo = struct {
     dead: bool,
@@ -341,6 +405,40 @@ test "options popup and pipe helpers record tmux argv" {
     try std.testing.expectEqualStrings("pipe-pane", recorder.commands.items[3].argv[1]);
     try std.testing.expectEqualStrings("cat >> api.log", recorder.commands.items[3].argv[4]);
     try std.testing.expectEqual(@as(usize, 4), recorder.commands.items[4].argv.len);
+}
+
+test "window sizing helpers record and parse tmux argv" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("@1|120|39\n@2|120|39\n", "", .{ .exited = 0 });
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+    const client = Client{ .gpa = std.testing.allocator, .runner = run, .session = "demo" };
+
+    const windows = try client.listWindowSizes();
+    defer {
+        for (windows) |window| window.deinit(std.testing.allocator);
+        std.testing.allocator.free(windows);
+    }
+    try client.resizeWindow("@1", 120, 39);
+    try client.restoreWindowAutoSize("@1");
+    try client.chooseTree("%1");
+
+    try std.testing.expectEqual(@as(usize, 2), windows.len);
+    try std.testing.expectEqualStrings("@1", windows[0].id);
+    try std.testing.expectEqual(@as(u16, 120), windows[0].width);
+    try std.testing.expectEqual(@as(u16, 39), windows[0].height);
+    try std.testing.expectEqualStrings("list-windows", recorder.commands.items[0].argv[1]);
+    try std.testing.expectEqualStrings("resize-window", recorder.commands.items[1].argv[1]);
+    try std.testing.expectEqualStrings("120", recorder.commands.items[1].argv[3]);
+    try std.testing.expectEqualStrings("39", recorder.commands.items[1].argv[5]);
+    try std.testing.expectEqualStrings("@1", recorder.commands.items[1].argv[7]);
+    try std.testing.expectEqualStrings("set-option", recorder.commands.items[2].argv[1]);
+    try std.testing.expectEqualStrings("-w", recorder.commands.items[2].argv[2]);
+    try std.testing.expectEqualStrings("@1", recorder.commands.items[2].argv[4]);
+    try std.testing.expectEqualStrings("window-size", recorder.commands.items[2].argv[5]);
+    try std.testing.expectEqualStrings("latest", recorder.commands.items[2].argv[6]);
+    try std.testing.expectEqualStrings("choose-tree", recorder.commands.items[3].argv[1]);
+    try std.testing.expectEqualStrings("%1", recorder.commands.items[3].argv[4]);
 }
 
 test "paneRunning checks pane child processes" {

@@ -17,6 +17,7 @@ const waits = @import("waits.zig");
 const zask_command = @import("zask_command.zig");
 
 const bye_kill_settle = std.Io.Duration.fromSeconds(1);
+const tmux_status_bar_height = 1;
 
 pub const Runtime = struct {
     gpa: std.mem.Allocator,
@@ -108,6 +109,32 @@ pub const Runtime = struct {
         try tx.popup(self.cfg.popupWidth(), self.cfg.popupHeight(), try std.fmt.allocPrint(self.gpa, "nvim -c 'terminal tail -F {s}'", .{try shell.quote(self.gpa, log_file)}));
     }
 
+    pub fn previewList(self: Runtime, pane_id: []const u8, client_width: u16, client_height: u16) !void {
+        if (client_width == 0 or client_height <= tmux_status_bar_height) return error.InvalidPreviewSize;
+        const expected_height = client_height - tmux_status_bar_height;
+        const tx = self.tmux();
+
+        const windows = try tx.listWindowSizes();
+        defer tmux_client.freeWindowSizes(self.gpa, windows);
+        var resized_count: usize = 0;
+        errdefer {
+            for (windows[0..resized_count]) |window| tx.restoreWindowAutoSize(window.id) catch {};
+        }
+        for (windows) |window| {
+            try tx.resizeWindow(window.id, client_width, expected_height);
+            resized_count += 1;
+        }
+
+        const resized = try tx.listWindowSizes();
+        defer tmux_client.freeWindowSizes(self.gpa, resized);
+        for (resized) |window| {
+            if (window.width != client_width or window.height != expected_height) return error.WindowSizeMismatch;
+        }
+        for (resized) |window| try tx.restoreWindowAutoSize(window.id);
+
+        try tx.chooseTree(pane_id);
+    }
+
     pub fn hello(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
         const guard = self.acquireLock() catch |err| switch (err) {
             error.LockBusy => {
@@ -121,15 +148,17 @@ pub const Runtime = struct {
     }
 
     pub fn helloUnlocked(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const scratch = arena.allocator();
         if (try self.sessionExists()) {
+            try self.installSessionOptions(scratch);
+            try tmux_setup.bindControlKeys(scratch, self.tmux());
             try self.lifecycle().startAll(profile, writer);
             try self.attach();
             return;
         }
         const tx = self.tmux();
-        var arena = std.heap.ArenaAllocator.init(self.gpa);
-        defer arena.deinit();
-        const scratch = arena.allocator();
         try self.openSessionWithDashboardWindow(scratch);
         errdefer tx.killSession() catch {};
         try self.installSessionOptions(scratch);
@@ -670,11 +699,110 @@ test "hello creates session without tmuxp and keeps setup order" {
     try proc_runner.expectCommandContaining(&recorder, "set-option");
     try proc_runner.expectCommandContaining(&recorder, "@zask_dash_mode");
     try proc_runner.expectCommandContaining(&recorder, "bind-key");
-    try proc_runner.expectCommandContaining(&recorder, "choose-tree -Zw");
-    try proc_runner.expectCommandContaining(&recorder, "resize-window -x");
+    try proc_runner.expectCommandContaining(&recorder, "preview-list");
     try proc_runner.expectCommandOrder(&recorder, "bind-key", "date");
     try proc_runner.expectCommandOrder(&recorder, "@zask_log_session_id", "attach-session");
     try proc_runner.expectNoTmuxSizingCommands(&recorder);
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "hello refreshes bindings for existing session" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    try environ.put("TMUX", "/tmp/tmux");
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    var runtime = testRuntime(arena.allocator(), run, cfg);
+    runtime.environ = &environ;
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.helloUnlocked("all", &writer);
+
+    try std.testing.expectEqualStrings("has-session", recorder.commands.items[0].argv[1]);
+    try proc_runner.expectCommandContaining(&recorder, "set-option");
+    try proc_runner.expectCommandContaining(&recorder, "preview-list");
+    try proc_runner.expectCommandOrder(&recorder, "preview-list", "switch-client");
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "previewList resizes all windows before choose-tree" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("@1|80|24\n@2|80|24\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("@1|120|39\n@2|120|39\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+
+    try runtime.previewList("%1", 120, 40);
+
+    try std.testing.expectEqualStrings("list-windows", recorder.commands.items[0].argv[1]);
+    try std.testing.expectEqualStrings("resize-window", recorder.commands.items[1].argv[1]);
+    try std.testing.expectEqualStrings("@1", recorder.commands.items[1].argv[7]);
+    try std.testing.expectEqualStrings("resize-window", recorder.commands.items[2].argv[1]);
+    try std.testing.expectEqualStrings("@2", recorder.commands.items[2].argv[7]);
+    try std.testing.expectEqualStrings("list-windows", recorder.commands.items[3].argv[1]);
+    try std.testing.expectEqualStrings("set-option", recorder.commands.items[4].argv[1]);
+    try std.testing.expectEqualStrings("window-size", recorder.commands.items[4].argv[5]);
+    try std.testing.expectEqualStrings("latest", recorder.commands.items[4].argv[6]);
+    try std.testing.expectEqualStrings("set-option", recorder.commands.items[5].argv[1]);
+    try std.testing.expectEqualStrings("choose-tree", recorder.commands.items[6].argv[1]);
+    try std.testing.expectEqualStrings("%1", recorder.commands.items[6].argv[4]);
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "previewList does not open choose-tree when resized windows mismatch" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("@1|80|24\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("@1|119|39\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+
+    try std.testing.expectError(error.WindowSizeMismatch, runtime.previewList("%1", 120, 40));
+
+    try std.testing.expectEqual(@as(usize, 4), recorder.commands.items.len);
+    try std.testing.expectEqualStrings("list-windows", recorder.commands.items[0].argv[1]);
+    try std.testing.expectEqualStrings("resize-window", recorder.commands.items[1].argv[1]);
+    try std.testing.expectEqualStrings("list-windows", recorder.commands.items[2].argv[1]);
+    try std.testing.expectEqualStrings("set-option", recorder.commands.items[3].argv[1]);
+    try std.testing.expectEqualStrings("window-size", recorder.commands.items[3].argv[5]);
+    try std.testing.expectEqualStrings("latest", recorder.commands.items[3].argv[6]);
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
