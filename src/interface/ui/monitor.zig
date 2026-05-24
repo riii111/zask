@@ -135,7 +135,8 @@ fn serviceMonitorRow(ctx: Context, service: std.json.Value) !MonitorRow {
 
 fn dockerMonitorRow(ctx: Context) !MonitorRow {
     const pane = ctx.tmux.observePane("docker");
-    const compose = if (shouldObserveCompose(pane)) try observeDocker(ctx) else observations.ComposeObservation{ .state = .empty };
+    const skipped = observations.ComposeObservation.empty(.empty);
+    const compose = if (shouldObserveCompose(pane)) try observeDocker(ctx) else skipped;
     defer compose.deinit(ctx.gpa);
     return .{ .name = "docker", .status = dockerMonitorStatus(pane, compose), .exit_code = pane.exit_code, .command = pane.command, .port = "compose" };
 }
