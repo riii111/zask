@@ -1,6 +1,9 @@
 const std = @import("std");
 const shell = @import("../platform/shell.zig");
 
+const dashboard_command = "dashboard";
+const monitor_command = "monitor";
+
 /// Returns a shell command string owned by the caller.
 pub fn invoke(gpa: std.mem.Allocator, zask_path: []const u8, config_path: []const u8, command: []const u8) ![]const u8 {
     const quoted_zask_path = try shell.quote(gpa, zask_path);
@@ -8,6 +11,16 @@ pub fn invoke(gpa: std.mem.Allocator, zask_path: []const u8, config_path: []cons
     const quoted_config_path = try shell.quote(gpa, config_path);
     defer gpa.free(quoted_config_path);
     return std.fmt.allocPrint(gpa, "{s} --config {s} {s}", .{ quoted_zask_path, quoted_config_path, command });
+}
+
+/// Returns a shell command string owned by the caller.
+pub fn invokeDashboard(gpa: std.mem.Allocator, zask_path: []const u8, config_path: []const u8) ![]const u8 {
+    return invoke(gpa, zask_path, config_path, dashboard_command);
+}
+
+/// Returns a shell command string owned by the caller.
+pub fn invokeMonitor(gpa: std.mem.Allocator, zask_path: []const u8, config_path: []const u8) ![]const u8 {
+    return invoke(gpa, zask_path, config_path, monitor_command);
 }
 
 /// Returns a shell command string owned by the caller.
