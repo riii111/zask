@@ -1,6 +1,7 @@
 const std = @import("std");
 const config = @import("../../model/config.zig");
 const env = @import("../../platform/env.zig");
+const init_inference = @import("../../workflow/init_inference.zig");
 const paths = @import("../../platform/paths.zig");
 const validate = @import("../../model/validate.zig");
 const cli_context = @import("context.zig");
@@ -18,6 +19,7 @@ pub const Options = struct {
     docker: bool = false,
     docker_dir: []const u8 = "",
     compose_file: []const u8 = "docker-compose.yml",
+    compose_file_explicit: bool = false,
     force: bool = false,
 
     pub fn parse(args: []const []const u8) !Options {
@@ -53,6 +55,7 @@ pub const Options = struct {
             } else if (std.mem.eql(u8, arg, "--compose-file")) {
                 flags.compose_file = true;
                 opts.compose_file = try takeValue(args, &i);
+                opts.compose_file_explicit = true;
             } else if (std.mem.eql(u8, arg, "--force")) {
                 opts.force = true;
             } else {
@@ -83,12 +86,6 @@ const DetectedOptions = struct {
     compose_file: ?[]const u8 = null,
 };
 
-const DetectedService = struct {
-    name: []const u8 = "web",
-    command: []const u8,
-    script: []const u8,
-};
-
 pub fn run(ctx: *Context, opts: Options) !void {
     const io = ctx.base.io orelse return error.MissingIo;
     const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", ctx.base.gpa);
@@ -102,7 +99,8 @@ pub fn run(ctx: *Context, opts: Options) !void {
         return error.ConfigAlreadyExists;
     }
 
-    const detected = try applyDetections(ctx.base.gpa, io, cwd, opts);
+    var detected = try applyDetections(ctx.base.gpa, io, cwd, opts);
+    detected.opts.root = try resolveRootFromCwd(ctx.base.gpa, cwd, detected.opts.root);
     const json = try renderConfig(ctx.base.gpa, project, detected.opts);
     defer ctx.base.gpa.free(json);
     _ = try config.Config.parse(ctx.base.gpa, json, try paths.home(ctx.base.environ));
@@ -143,76 +141,29 @@ fn takeValue(args: []const []const u8, index: *usize) ![]const u8 {
     return args[index.*];
 }
 
+fn resolveRootFromCwd(gpa: std.mem.Allocator, cwd: []const u8, root: []const u8) ![]const u8 {
+    if (std.fs.path.isAbsolute(root) or std.mem.startsWith(u8, root, "~")) return root;
+    return std.fs.path.resolve(gpa, &.{ cwd, root });
+}
+
 fn applyDetections(gpa: std.mem.Allocator, io: std.Io, cwd: []const u8, opts: Options) !DetectedOptions {
     var result = DetectedOptions{ .opts = opts };
-    if (opts.service == null) {
-        if (try detectPackageService(gpa, io, cwd)) |service| {
-            result.opts.service = service.name;
-            result.opts.command = service.command;
-            result.package_script = service.script;
-        }
+    const detected = try init_inference.detect(gpa, io, cwd, .{
+        .service = opts.service,
+        .docker = opts.docker,
+        .compose_file_explicit = opts.compose_file_explicit,
+    });
+    if (detected.service) |service| {
+        result.opts.service = service.name;
+        result.opts.command = service.command;
+        result.package_script = service.script;
     }
-    if (!opts.docker) {
-        if (try detectComposeFile(gpa, io, cwd)) |compose_file| {
-            result.opts.docker = true;
-            result.opts.compose_file = compose_file;
-            result.compose_file = compose_file;
-        }
+    if (detected.compose_file) |compose_file| {
+        result.opts.docker = true;
+        result.opts.compose_file = compose_file;
+        result.compose_file = compose_file;
     }
     return result;
-}
-
-fn detectPackageService(gpa: std.mem.Allocator, io: std.Io, cwd: []const u8) !?DetectedService {
-    const path = try std.fs.path.join(gpa, &.{ cwd, "package.json" });
-    defer gpa.free(path);
-    if (!paths.exists(io, path)) return null;
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1024 * 1024)) catch return null;
-    const package = std.json.parseFromSliceLeaky(std.json.Value, gpa, bytes, .{ .ignore_unknown_fields = true }) catch return null;
-    if (package != .object) return null;
-    const scripts = package.object.get("scripts") orelse return null;
-    if (scripts != .object) return null;
-
-    const script_names = [_][]const u8{ "dev", "start", "serve" };
-    for (script_names) |script_name| {
-        const value = scripts.object.get(script_name) orelse continue;
-        if (value != .string) continue;
-        return .{
-            .command = try std.fmt.allocPrint(gpa, "{s} run {s}", .{ try detectPackageManager(gpa, io, cwd), script_name }),
-            .script = script_name,
-        };
-    }
-    return null;
-}
-
-fn detectPackageManager(gpa: std.mem.Allocator, io: std.Io, cwd: []const u8) ![]const u8 {
-    const lockfiles = [_]struct {
-        file: []const u8,
-        manager: []const u8,
-    }{
-        .{ .file = "pnpm-lock.yaml", .manager = "pnpm" },
-        .{ .file = "bun.lock", .manager = "bun" },
-        .{ .file = "bun.lockb", .manager = "bun" },
-        .{ .file = "yarn.lock", .manager = "yarn" },
-        .{ .file = "package-lock.json", .manager = "npm" },
-    };
-    for (lockfiles) |lockfile| {
-        if (try fileExistsIn(gpa, io, cwd, lockfile.file)) return lockfile.manager;
-    }
-    return "npm";
-}
-
-fn detectComposeFile(gpa: std.mem.Allocator, io: std.Io, cwd: []const u8) !?[]const u8 {
-    const candidates = [_][]const u8{ "compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml" };
-    for (candidates) |candidate| {
-        if (try fileExistsIn(gpa, io, cwd, candidate)) return candidate;
-    }
-    return null;
-}
-
-fn fileExistsIn(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, name: []const u8) !bool {
-    const path = try std.fs.path.join(gpa, &.{ dir, name });
-    defer gpa.free(path);
-    return paths.exists(io, path);
 }
 
 fn renderConfig(gpa: std.mem.Allocator, project: []const u8, opts: Options) ![]u8 {
@@ -408,48 +359,7 @@ test "init.config: omits default docker compose file" {
     try std.testing.expect(std.mem.indexOf(u8, json, "compose_file") == null);
 }
 
-test "init.detect: selects package dev script deterministically" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var threaded = std.Io.Threaded.init_single_threaded;
-    const base = try std.fs.path.join(arena.allocator(), &.{ ".zig-cache", "tmp", &tmp.sub_path });
-    const package_path = try testTmpPath(arena.allocator(), tmp, "package.json");
-    const lock_path = try testTmpPath(arena.allocator(), tmp, "pnpm-lock.yaml");
-
-    try paths.writeFile(threaded.io(), package_path,
-        \\{"scripts":{"start":"vite --host","dev":"vite","serve":"vite preview"}}
-    );
-    try paths.writeFile(threaded.io(), lock_path, "");
-
-    const detected = try applyDetections(arena.allocator(), threaded.io(), base, try Options.parse(&.{"demo"}));
-
-    try std.testing.expectEqualStrings("web", detected.opts.service.?);
-    try std.testing.expectEqualStrings("pnpm run dev", detected.opts.command.?);
-    try std.testing.expectEqualStrings("dev", detected.package_script.?);
-}
-
-test "init.detect: falls back to package start script" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var threaded = std.Io.Threaded.init_single_threaded;
-    const base = try std.fs.path.join(arena.allocator(), &.{ ".zig-cache", "tmp", &tmp.sub_path });
-    const package_path = try testTmpPath(arena.allocator(), tmp, "package.json");
-
-    try paths.writeFile(threaded.io(), package_path,
-        \\{"scripts":{"start":"next start"}}
-    );
-
-    const detected = try applyDetections(arena.allocator(), threaded.io(), base, try Options.parse(&.{"demo"}));
-
-    try std.testing.expectEqualStrings("npm run start", detected.opts.command.?);
-    try std.testing.expectEqualStrings("start", detected.package_script.?);
-}
-
-test "init.detect: selects compose files in priority order" {
+test "init.detect: infers compose file with explicit docker" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tmp = std.testing.tmpDir(.{});
@@ -457,12 +367,10 @@ test "init.detect: selects compose files in priority order" {
     var threaded = std.Io.Threaded.init_single_threaded;
     const base = try std.fs.path.join(arena.allocator(), &.{ ".zig-cache", "tmp", &tmp.sub_path });
     const compose_yaml = try testTmpPath(arena.allocator(), tmp, "compose.yaml");
-    const docker_compose = try testTmpPath(arena.allocator(), tmp, "docker-compose.yml");
 
-    try paths.writeFile(threaded.io(), docker_compose, "services: {}\n");
     try paths.writeFile(threaded.io(), compose_yaml, "services: {}\n");
 
-    const detected = try applyDetections(arena.allocator(), threaded.io(), base, try Options.parse(&.{"demo"}));
+    const detected = try applyDetections(arena.allocator(), threaded.io(), base, try Options.parse(&.{ "demo", "--docker" }));
 
     try std.testing.expect(detected.opts.docker);
     try std.testing.expectEqualStrings("compose.yaml", detected.opts.compose_file);
@@ -487,6 +395,24 @@ test "init.detect: omits default compose file after detection" {
     try std.testing.expect(detected.opts.docker);
     try std.testing.expectEqualStrings("docker-compose.yml", detected.opts.compose_file);
     try std.testing.expect(std.mem.indexOf(u8, json, "compose_file") == null);
+}
+
+test "init.detect: keeps explicit compose file" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const base = try std.fs.path.join(arena.allocator(), &.{ ".zig-cache", "tmp", &tmp.sub_path });
+    const compose_yaml = try testTmpPath(arena.allocator(), tmp, "compose.yaml");
+
+    try paths.writeFile(threaded.io(), compose_yaml, "services: {}\n");
+
+    const detected = try applyDetections(arena.allocator(), threaded.io(), base, try Options.parse(&.{ "demo", "--docker", "--compose-file", "custom.yml" }));
+
+    try std.testing.expect(detected.opts.docker);
+    try std.testing.expectEqualStrings("custom.yml", detected.opts.compose_file);
+    try std.testing.expect(detected.compose_file == null);
 }
 
 test "init.report: prints detected values and omitted defaults" {
@@ -524,6 +450,18 @@ test "init.root: validates project roots" {
             try std.testing.expectError(error.InvalidPath, validateRoot(case.root));
         }
     }
+}
+
+test "init.root: stabilizes default and explicit dot roots" {
+    const default_opts = try Options.parse(&.{});
+    const default_root = try resolveRootFromCwd(std.testing.allocator, "/work/demo", default_opts.root);
+    defer std.testing.allocator.free(default_root);
+    const dot_opts = try Options.parse(&.{ "demo", "--root", "." });
+    const dot_root = try resolveRootFromCwd(std.testing.allocator, "/work/demo", dot_opts.root);
+    defer std.testing.allocator.free(dot_root);
+
+    try std.testing.expectEqualStrings("/work/demo", default_root);
+    try std.testing.expectEqualStrings("/work/demo", dot_root);
 }
 
 test "init.run: rejects existing config without force" {
