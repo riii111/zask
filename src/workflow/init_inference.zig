@@ -3,7 +3,6 @@ const paths = @import("../platform/paths.zig");
 
 pub const Input = struct {
     service: ?[]const u8 = null,
-    docker: bool = false,
     compose_file_explicit: bool = false,
 };
 
@@ -156,7 +155,7 @@ test "initInference.detect: infers compose file with explicit docker" {
 
     try paths.writeFile(threaded.io(), compose_yaml, "services: {}\n");
 
-    const result = try detect(arena.allocator(), threaded.io(), base, .{ .docker = true });
+    const result = try detect(arena.allocator(), threaded.io(), base, .{});
 
     try std.testing.expectEqualStrings("compose.yaml", result.compose_file.?);
 }

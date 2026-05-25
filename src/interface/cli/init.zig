@@ -150,7 +150,6 @@ fn applyDetections(gpa: std.mem.Allocator, io: std.Io, cwd: []const u8, opts: Op
     var result = DetectedOptions{ .opts = opts };
     const detected = try init_inference.detect(gpa, io, cwd, .{
         .service = opts.service,
-        .docker = opts.docker,
         .compose_file_explicit = opts.compose_file_explicit,
     });
     if (detected.service) |service| {
@@ -505,5 +504,9 @@ test "init.run: overwrites existing config with force" {
     const config_path = try std.fs.path.join(arena.allocator(), &.{ config_home, "zask", "demo", "config.json" });
     const bytes = try std.Io.Dir.cwd().readFileAlloc(threaded.io(), config_path, arena.allocator(), .limited(4096));
     const cfg = try config.Config.parse(arena.allocator(), bytes, "/home/me");
+    const project_root = try cfg.projectRoot(arena.allocator());
+    const expected_root = try std.Io.Dir.cwd().realPathFileAlloc(threaded.io(), ".", arena.allocator());
+
+    try std.testing.expectEqualStrings(expected_root, project_root);
     try std.testing.expectEqual(@as(usize, 0), (try cfg.services()).len);
 }
