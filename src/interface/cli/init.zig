@@ -31,36 +31,7 @@ pub const Options = struct {
             i = 1;
         }
         while (i < args.len) {
-            const arg = args[i];
-            if (std.mem.eql(u8, arg, "--root")) {
-                opts.root = try takeValue(args, &i);
-            } else if (std.mem.eql(u8, arg, "--service")) {
-                opts.service = try takeValue(args, &i);
-            } else if (std.mem.eql(u8, arg, "--command")) {
-                opts.command = try takeValue(args, &i);
-            } else if (std.mem.eql(u8, arg, "--dir")) {
-                flags.dir = true;
-                opts.dir = try takeValue(args, &i);
-            } else if (std.mem.eql(u8, arg, "--port")) {
-                flags.port = true;
-                opts.port = std.fmt.parseInt(i64, try takeValue(args, &i), 10) catch return error.InvalidArguments;
-            } else if (std.mem.eql(u8, arg, "--group")) {
-                flags.group = true;
-                opts.group = try takeValue(args, &i);
-            } else if (std.mem.eql(u8, arg, "--docker")) {
-                opts.docker = true;
-            } else if (std.mem.eql(u8, arg, "--docker-dir")) {
-                flags.docker_dir = true;
-                opts.docker_dir = try takeValue(args, &i);
-            } else if (std.mem.eql(u8, arg, "--compose-file")) {
-                flags.compose_file = true;
-                opts.compose_file = try takeValue(args, &i);
-                opts.compose_file_explicit = true;
-            } else if (std.mem.eql(u8, arg, "--force")) {
-                opts.force = true;
-            } else {
-                return error.InvalidArguments;
-            }
+            try parseOption(args, &i, &opts, &flags);
             i += 1;
         }
         try validateOptions(opts, flags);
@@ -70,20 +41,6 @@ pub const Options = struct {
     pub fn deinit(self: Options) void {
         _ = self;
     }
-};
-
-const OptionFlags = struct {
-    dir: bool = false,
-    port: bool = false,
-    group: bool = false,
-    docker_dir: bool = false,
-    compose_file: bool = false,
-};
-
-const DetectedOptions = struct {
-    opts: Options,
-    package_script: ?[]const u8 = null,
-    compose_file: ?[]const u8 = null,
 };
 
 pub fn run(ctx: *Context, opts: Options) !void {
@@ -115,6 +72,20 @@ pub fn run(ctx: *Context, opts: Options) !void {
     try ctx.writer.print("Next: zask {s} open\n", .{project});
 }
 
+const OptionFlags = struct {
+    dir: bool = false,
+    port: bool = false,
+    group: bool = false,
+    docker_dir: bool = false,
+    compose_file: bool = false,
+};
+
+const DetectedOptions = struct {
+    opts: Options,
+    package_script: ?[]const u8 = null,
+    compose_file: ?[]const u8 = null,
+};
+
 fn validateOptions(opts: Options, flags: OptionFlags) !void {
     if (opts.project) |project| validate.identifier(project) catch return error.InvalidArguments;
     validateRoot(opts.root) catch return error.InvalidArguments;
@@ -133,6 +104,39 @@ fn validateOptions(opts: Options, flags: OptionFlags) !void {
 fn validateRoot(root: []const u8) !void {
     if (std.fs.path.isAbsolute(root) or std.mem.startsWith(u8, root, "~")) return;
     try validate.relativeSubPath(root);
+}
+
+fn parseOption(args: []const []const u8, index: *usize, opts: *Options, flags: *OptionFlags) !void {
+    const arg = args[index.*];
+    if (std.mem.eql(u8, arg, "--root")) {
+        opts.root = try takeValue(args, index);
+    } else if (std.mem.eql(u8, arg, "--service")) {
+        opts.service = try takeValue(args, index);
+    } else if (std.mem.eql(u8, arg, "--command")) {
+        opts.command = try takeValue(args, index);
+    } else if (std.mem.eql(u8, arg, "--dir")) {
+        flags.dir = true;
+        opts.dir = try takeValue(args, index);
+    } else if (std.mem.eql(u8, arg, "--port")) {
+        flags.port = true;
+        opts.port = std.fmt.parseInt(i64, try takeValue(args, index), 10) catch return error.InvalidArguments;
+    } else if (std.mem.eql(u8, arg, "--group")) {
+        flags.group = true;
+        opts.group = try takeValue(args, index);
+    } else if (std.mem.eql(u8, arg, "--docker")) {
+        opts.docker = true;
+    } else if (std.mem.eql(u8, arg, "--docker-dir")) {
+        flags.docker_dir = true;
+        opts.docker_dir = try takeValue(args, index);
+    } else if (std.mem.eql(u8, arg, "--compose-file")) {
+        flags.compose_file = true;
+        opts.compose_file = try takeValue(args, index);
+        opts.compose_file_explicit = true;
+    } else if (std.mem.eql(u8, arg, "--force")) {
+        opts.force = true;
+    } else {
+        return error.InvalidArguments;
+    }
 }
 
 fn takeValue(args: []const []const u8, index: *usize) ![]const u8 {
