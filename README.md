@@ -98,7 +98,9 @@ zask --config ./config.json close
 Or use a named project config from the zask config directory:
 
 ```bash
+zask init demo --root .
 zask demo open
+zask demo list
 zask demo status
 zask demo start backend
 zask demo stop --all
@@ -107,8 +109,10 @@ zask demo stop --all
 ## Commands
 
 ```text
+zask init <project> [options]
 zask <project> open [--docker|--<profile>]
 zask <project> attach
+zask <project> list
 zask <project> status
 zask <project> logs <service>
 zask <project> start <--all|svc|group|docker>
