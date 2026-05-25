@@ -8,23 +8,26 @@ const cli_context = @import("context.zig");
 const Context = cli_context.Context;
 
 pub const Options = struct {
-    project: []const u8,
-    root: ?[]const u8 = null,
+    project: ?[]const u8 = null,
+    root: []const u8 = ".",
     service: ?[]const u8 = null,
     command: ?[]const u8 = null,
     dir: []const u8 = ".",
     port: ?i64 = null,
-    group: []const u8 = "app",
+    group: []const u8 = "",
     docker: bool = false,
     docker_dir: []const u8 = "",
     compose_file: []const u8 = "docker-compose.yml",
     force: bool = false,
 
     pub fn parse(args: []const []const u8) !Options {
-        if (args.len == 0) return error.InvalidArguments;
-        var opts: Options = .{ .project = args[0] };
+        var opts: Options = .{};
         var flags: OptionFlags = .{};
-        var i: usize = 1;
+        var i: usize = 0;
+        if (args.len > 0 and !std.mem.startsWith(u8, args[0], "--")) {
+            opts.project = args[0];
+            i = 1;
+        }
         while (i < args.len) {
             const arg = args[i];
             if (std.mem.eql(u8, arg, "--root")) {
@@ -76,16 +79,18 @@ const OptionFlags = struct {
 
 pub fn run(ctx: *Context, opts: Options) !void {
     const io = ctx.base.io orelse return error.MissingIo;
-    const config_path = try cli_context.projectConfigPath(ctx.base.gpa, ctx.base.environ, opts.project);
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", ctx.base.gpa);
+    const project = opts.project orelse std.fs.path.basename(cwd);
+    try validate.identifier(project);
+
+    const config_path = try cli_context.projectConfigPath(ctx.base.gpa, ctx.base.environ, project);
     if (!opts.force and paths.exists(io, config_path)) {
         try ctx.writer.print("Config already exists: {s}\n", .{config_path});
         try ctx.writer.print("Re-run with --force to overwrite it.\n", .{});
         return error.ConfigAlreadyExists;
     }
 
-    const root = try resolveRoot(ctx.base.gpa, io, opts.root);
-    defer root.deinit(ctx.base.gpa);
-    const json = try renderConfig(ctx.base.gpa, opts, root.value);
+    const json = try renderConfig(ctx.base.gpa, project, opts);
     defer ctx.base.gpa.free(json);
     _ = try config.Config.parse(ctx.base.gpa, json, try paths.home(ctx.base.environ));
 
@@ -94,12 +99,16 @@ pub fn run(ctx: *Context, opts: Options) !void {
     try paths.writeFile(io, config_path, json);
 
     try ctx.writer.print("Created {s}\n", .{config_path});
-    try ctx.writer.print("Next: zask {s} list\n", .{opts.project});
-    try ctx.writer.print("Next: zask {s} open\n", .{opts.project});
+    try ctx.writer.print("Detected project.name: {s}\n", .{project});
+    try ctx.writer.print("Detected project.root: {s}\n", .{opts.root});
+    try ctx.writer.writeAll("Omitted defaults: project.session_name, service.dir, service.group\n");
+    try ctx.writer.print("Next: zask {s} list\n", .{project});
+    try ctx.writer.print("Next: zask {s} open\n", .{project});
 }
 
 fn validateOptions(opts: Options, flags: OptionFlags) !void {
-    validate.identifier(opts.project) catch return error.InvalidArguments;
+    if (opts.project) |project| validate.identifier(project) catch return error.InvalidArguments;
+    validateRoot(opts.root) catch return error.InvalidArguments;
     if (opts.service) |name| validate.identifier(name) catch return error.InvalidArguments;
     if (opts.service != null and opts.command == null) return error.InvalidArguments;
     if (opts.service == null and opts.command != null) return error.InvalidArguments;
@@ -112,54 +121,30 @@ fn validateOptions(opts: Options, flags: OptionFlags) !void {
     validate.relativeSubPath(opts.docker_dir) catch return error.InvalidArguments;
 }
 
+fn validateRoot(root: []const u8) !void {
+    if (std.fs.path.isAbsolute(root) or std.mem.startsWith(u8, root, "~")) return;
+    try validate.relativeSubPath(root);
+}
+
 fn takeValue(args: []const []const u8, index: *usize) ![]const u8 {
     index.* += 1;
     if (index.* >= args.len) return error.InvalidArguments;
     return args[index.*];
 }
 
-const ResolvedRoot = struct {
-    value: ?[]const u8,
-    allocated: bool = false,
-
-    fn deinit(self: ResolvedRoot, gpa: std.mem.Allocator) void {
-        if (self.allocated) gpa.free(self.value.?);
-    }
-};
-
-fn resolveRoot(gpa: std.mem.Allocator, io: std.Io, root: ?[]const u8) !ResolvedRoot {
-    const value = root orelse return .{ .value = null };
-    if (std.fs.path.isAbsolute(value) or std.mem.startsWith(u8, value, "~")) return .{ .value = value };
-
-    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", gpa);
-    defer gpa.free(cwd);
-    return resolveRootFromCwd(gpa, cwd, value);
-}
-
-fn resolveRootFromCwd(gpa: std.mem.Allocator, cwd: []const u8, root: []const u8) !ResolvedRoot {
-    if (std.fs.path.isAbsolute(root) or std.mem.startsWith(u8, root, "~")) return .{ .value = root };
-
-    const resolved = try std.fs.path.resolve(gpa, &.{ cwd, root });
-    return .{ .value = resolved, .allocated = true };
-}
-
-fn renderConfig(gpa: std.mem.Allocator, opts: Options, root: ?[]const u8) ![]u8 {
+fn renderConfig(gpa: std.mem.Allocator, project: []const u8, opts: Options) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
     var writer = &out.writer;
     var json: std.json.Stringify = .{ .writer = writer, .options = .{ .whitespace = .indent_2 } };
-    const default_root = try std.fmt.allocPrint(gpa, "~/projects/{s}", .{opts.project});
-    defer gpa.free(default_root);
 
     try json.beginObject();
     try json.objectField("project");
     try json.beginObject();
     try json.objectField("name");
-    try json.write(opts.project);
+    try json.write(project);
     try json.objectField("root");
-    try json.write(root orelse default_root);
-    try json.objectField("session_name");
-    try json.write(opts.project);
+    try json.write(opts.root);
     try json.endObject();
     if (opts.docker) {
         try json.objectField("docker");
@@ -170,8 +155,10 @@ fn renderConfig(gpa: std.mem.Allocator, opts: Options, root: ?[]const u8) ![]u8 
             try json.objectField("dir");
             try json.write(opts.docker_dir);
         }
-        try json.objectField("compose_file");
-        try json.write(opts.compose_file);
+        if (!std.mem.eql(u8, opts.compose_file, "docker-compose.yml")) {
+            try json.objectField("compose_file");
+            try json.write(opts.compose_file);
+        }
         try json.endObject();
     }
     try json.objectField("services");
@@ -180,16 +167,20 @@ fn renderConfig(gpa: std.mem.Allocator, opts: Options, root: ?[]const u8) ![]u8 
         try json.beginObject();
         try json.objectField("name");
         try json.write(service_name);
-        try json.objectField("dir");
-        try json.write(opts.dir);
+        if (!std.mem.eql(u8, opts.dir, ".")) {
+            try json.objectField("dir");
+            try json.write(opts.dir);
+        }
         try json.objectField("command");
         try json.write(opts.command.?);
         if (opts.port) |port| {
             try json.objectField("port");
             try json.write(port);
         }
-        try json.objectField("group");
-        try json.write(opts.group);
+        if (opts.group.len != 0) {
+            try json.objectField("group");
+            try json.write(opts.group);
+        }
         try json.endObject();
     }
     try json.endArray();
@@ -217,14 +208,22 @@ fn testPrintHelp(writer: *std.Io.Writer) !void {
 
 test "init.options: parses service and docker flags" {
     const opts = try Options.parse(&.{ "demo", "--root", ".", "--service", "web", "--command", "npm run dev", "--port", "3000", "--docker", "--docker-dir", "infra", "--compose-file", "compose.yaml" });
-    try std.testing.expectEqualStrings("demo", opts.project);
-    try std.testing.expectEqualStrings(".", opts.root.?);
+    try std.testing.expectEqualStrings("demo", opts.project.?);
+    try std.testing.expectEqualStrings(".", opts.root);
     try std.testing.expectEqualStrings("web", opts.service.?);
     try std.testing.expectEqualStrings("npm run dev", opts.command.?);
     try std.testing.expectEqual(@as(i64, 3000), opts.port.?);
     try std.testing.expect(opts.docker);
     try std.testing.expectEqualStrings("infra", opts.docker_dir);
     try std.testing.expectEqualStrings("compose.yaml", opts.compose_file);
+}
+
+test "init.options: accepts omitted project" {
+    const opts = try Options.parse(&.{ "--service", "web", "--command", "npm run dev" });
+
+    try std.testing.expect(opts.project == null);
+    try std.testing.expectEqualStrings(".", opts.root);
+    try std.testing.expectEqualStrings("web", opts.service.?);
 }
 
 test "init.options: normalizes invalid input to invalid arguments" {
@@ -257,50 +256,67 @@ test "init.config: renders parseable minimal config" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const opts = try Options.parse(&.{"demo"});
-    const json = try renderConfig(std.testing.allocator, opts, opts.root);
+    const json = try renderConfig(std.testing.allocator, "demo", opts);
     defer std.testing.allocator.free(json);
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
 
     try std.testing.expectEqualStrings("demo", try cfg.projectName());
     try std.testing.expectEqualStrings("demo", try cfg.sessionName());
     const project_root = try cfg.projectRoot(arena.allocator());
-    try std.testing.expectEqualStrings("/home/me/projects/demo", project_root);
+    try std.testing.expectEqualStrings(".", project_root);
     try std.testing.expectEqual(@as(usize, 0), (try cfg.services()).len);
+    try std.testing.expect(std.mem.indexOf(u8, json, "session_name") == null);
 }
 
 test "init.config: renders service and docker config" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const opts = try Options.parse(&.{ "demo", "--root", ".", "--service", "web", "--command", "npm run dev", "--port", "3000", "--docker", "--docker-dir", "infra", "--compose-file", "compose.yaml" });
-    const json = try renderConfig(std.testing.allocator, opts, opts.root);
+    const json = try renderConfig(std.testing.allocator, "demo", opts);
     defer std.testing.allocator.free(json);
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     const services = try cfg.services();
 
     try std.testing.expectEqual(@as(usize, 1), services.len);
     try std.testing.expectEqualStrings("web", try config.Config.serviceName(services[0]));
-    try std.testing.expectEqualStrings("app", config.Config.serviceGroup(services[0]));
+    try std.testing.expectEqualStrings("", config.Config.serviceGroup(services[0]));
     try std.testing.expectEqual(@as(?i64, 3000), config.Config.servicePort(services[0]));
     try std.testing.expect(cfg.dockerEnabled());
     try std.testing.expectEqualStrings("compose.yaml", cfg.dockerComposeFile());
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"dir\": \".\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"group\"") == null);
 }
 
-test "init.root: resolves relative root against init cwd" {
+test "init.config: omits default docker compose file" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const opts = try Options.parse(&.{ "demo", "--docker" });
+    const json = try renderConfig(std.testing.allocator, "demo", opts);
+    defer std.testing.allocator.free(json);
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+
+    try std.testing.expect(cfg.dockerEnabled());
+    try std.testing.expectEqualStrings("docker-compose.yml", cfg.dockerComposeFile());
+    try std.testing.expect(std.mem.indexOf(u8, json, "compose_file") == null);
+}
+
+test "init.root: validates project roots" {
     const cases = [_]struct {
-        root: ?[]const u8,
-        expected: ?[]const u8,
-        allocated: bool,
+        root: []const u8,
+        valid: bool,
     }{
-        .{ .root = ".", .expected = "/work/demo", .allocated = true },
-        .{ .root = "backend", .expected = "/work/demo/backend", .allocated = true },
-        .{ .root = "/srv/demo", .expected = "/srv/demo", .allocated = false },
-        .{ .root = "~/projects/demo", .expected = "~/projects/demo", .allocated = false },
+        .{ .root = ".", .valid = true },
+        .{ .root = "backend", .valid = true },
+        .{ .root = "/srv/demo", .valid = true },
+        .{ .root = "~/projects/demo", .valid = true },
+        .{ .root = "../escape", .valid = false },
     };
     for (cases) |case| {
-        const root = try resolveRootFromCwd(std.testing.allocator, "/work/demo", case.root.?);
-        defer root.deinit(std.testing.allocator);
-        try std.testing.expectEqual(case.allocated, root.allocated);
-        try std.testing.expectEqualStrings(case.expected.?, root.value.?);
+        if (case.valid) {
+            try validateRoot(case.root);
+        } else {
+            try std.testing.expectError(error.InvalidPath, validateRoot(case.root));
+        }
     }
 }
 

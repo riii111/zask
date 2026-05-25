@@ -86,7 +86,7 @@ const command_specs = [_]CommandSpec{
     .{ .command = .list, .names = &.{"list"}, .usage = "list", .description = "List configured services" },
     .{ .command = .status, .names = &.{"status"}, .usage = "status", .description = "Show service state" },
     .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window" },
-    .{ .command = .init, .names = &.{"init"}, .usage = "init <project> [options]", .description = "Create project config", .global = true },
+    .{ .command = .init, .names = &.{"init"}, .usage = "init [project] [options]", .description = "Create project config", .global = true },
     .{ .command = .version, .names = &.{"version"}, .usage = "version", .description = "Print zask version", .global = true },
     .{ .command = .help, .names = &.{ "help", "--help", "-h" }, .usage = "help", .description = "Print this help", .global = true },
     .{ .command = .dashboard, .names = &.{"dashboard"}, .internal = true, .show_in_help = false },
@@ -286,7 +286,7 @@ test "cli.help: prints public commands" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "start <--all|svc|group|docker>") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "stop <--all|svc|group|docker>") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "restart <svc|group|docker>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "init <project> [options]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "init [project] [options]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "attach | detach") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "open [--docker|--<profile>]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "hello") == null);
@@ -316,6 +316,13 @@ test "cli.parseArgs: accepts init as global command" {
     try std.testing.expect(parsed.project == null);
     try std.testing.expectEqualStrings("init", parsed.command);
     try std.testing.expectEqualStrings("demo", parsed.args[0]);
+}
+
+test "cli.parseArgs: accepts init without project" {
+    const parsed = try parseArgs(.{ .gpa = std.testing.allocator }, &.{"init"});
+    try std.testing.expect(parsed.project == null);
+    try std.testing.expectEqualStrings("init", parsed.command);
+    try std.testing.expectEqual(@as(usize, 0), parsed.args.len);
 }
 
 test "cli.parseArgs: accepts explicit config command form" {
