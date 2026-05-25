@@ -65,12 +65,10 @@ Create a project config:
 {
   "project": {
     "name": "demo",
-    "root": "~/src/demo",
-    "session_name": "demo"
+    "root": "."
   },
   "docker": {
     "enabled": true,
-    "dir": "infra",
     "compose_file": "compose.yaml"
   },
   "group_aliases": {
@@ -98,7 +96,7 @@ zask --config ./config.json close
 Or use a named project config from the zask config directory:
 
 ```bash
-zask init demo --root .
+zask init
 zask demo open
 zask demo list
 zask demo status
@@ -109,7 +107,7 @@ zask demo stop --all
 ## Commands
 
 ```text
-zask init <project> [options]
+zask init [project] [options]
 zask <project> open [--docker|--<profile>]
 zask <project> attach
 zask <project> list

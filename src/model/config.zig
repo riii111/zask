@@ -23,7 +23,7 @@ pub const Config = struct {
     }
 
     pub fn sessionName(self: Config) ![]const u8 {
-        const name = try self.requiredString(&.{ "project", "session_name" });
+        const name = self.optionalString(&.{ "project", "session_name" }, try self.projectName());
         try validate.identifier(name);
         return name;
     }
@@ -280,11 +280,26 @@ test "loads defaults and resolves paths" {
     defer arena.deinit();
     const cfg = try parseTestConfig(&arena, json);
     try std.testing.expectEqualStrings("demo", try cfg.projectName());
+    try std.testing.expectEqualStrings("demo", try cfg.sessionName());
     try std.testing.expectEqualStrings("/home/me/work/demo", try cfg.projectRoot(arena.allocator()));
     try std.testing.expectEqualStrings("/home/me/work/demo/backend", try cfg.serviceDir(arena.allocator(), try cfg.findService("api")));
     try std.testing.expectEqualStrings("npm run dev", try Config.serviceStartCommand(arena.allocator(), try cfg.findService("web")));
     const group = try cfg.resolveGroup(arena.allocator(), "all");
     try std.testing.expectEqualStrings("api", group[0]);
+}
+
+test "config.sessionName: defaults to project name" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "services": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try parseTestConfig(&arena, json);
+
+    try std.testing.expectEqualStrings("demo", try cfg.sessionName());
 }
 
 test "resolves profiles and phase group overrides" {
