@@ -149,8 +149,8 @@ fn resolveRootFromCwd(gpa: std.mem.Allocator, cwd: []const u8, root: []const u8)
 fn applyDetections(gpa: std.mem.Allocator, io: std.Io, cwd: []const u8, opts: Options) !DetectedOptions {
     var result = DetectedOptions{ .opts = opts };
     const detected = try init_inference.detect(gpa, io, cwd, .{
-        .service = opts.service,
-        .compose_file_explicit = opts.compose_file_explicit,
+        .infer_service = opts.service == null,
+        .infer_compose_file = !opts.compose_file_explicit,
     });
     if (detected.service) |service| {
         result.opts.service = service.name;

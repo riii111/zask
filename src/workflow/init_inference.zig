@@ -2,8 +2,8 @@ const std = @import("std");
 const paths = @import("../platform/paths.zig");
 
 pub const Input = struct {
-    service: ?[]const u8 = null,
-    compose_file_explicit: bool = false,
+    infer_service: bool = true,
+    infer_compose_file: bool = true,
 };
 
 pub const Result = struct {
@@ -19,8 +19,8 @@ pub const DetectedService = struct {
 
 pub fn detect(gpa: std.mem.Allocator, io: std.Io, cwd: []const u8, input: Input) !Result {
     var result: Result = .{};
-    if (input.service == null) result.service = try detectPackageService(gpa, io, cwd);
-    if (!input.compose_file_explicit) result.compose_file = try detectComposeFile(gpa, io, cwd);
+    if (input.infer_service) result.service = try detectPackageService(gpa, io, cwd);
+    if (input.infer_compose_file) result.compose_file = try detectComposeFile(gpa, io, cwd);
     return result;
 }
 
@@ -144,7 +144,7 @@ test "initInference.detect: selects compose files in priority order" {
     try std.testing.expectEqualStrings("compose.yaml", result.compose_file.?);
 }
 
-test "initInference.detect: infers compose file with explicit docker" {
+test "initInference.detect: infers compose file by default" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tmp = std.testing.tmpDir(.{});
@@ -171,7 +171,7 @@ test "initInference.detect: skips compose inference when compose file is explici
 
     try paths.writeFile(threaded.io(), compose_yaml, "services: {}\n");
 
-    const result = try detect(arena.allocator(), threaded.io(), base, .{ .compose_file_explicit = true });
+    const result = try detect(arena.allocator(), threaded.io(), base, .{ .infer_compose_file = false });
 
     try std.testing.expect(result.compose_file == null);
 }
