@@ -238,6 +238,11 @@ pub fn parseJsonBytes(gpa: std.mem.Allocator, bytes: []const u8) !Value {
 pub fn normalizeConfig(gpa: std.mem.Allocator, source: Value) !Value {
     if (source != .object) return error.InvalidConfig;
     if (source.object.get("services") != null or source.object.get("phases") != null) return error.InvalidConfig;
+    try validateObjectKeys(source, &.{ "project", "docker", "startup_order", "prechecks", "start_profiles", "group_aliases", "groups" });
+    try validateProject(source);
+    try validatePrechecks(source);
+    try validateStartProfiles(source);
+    try validateGroupAliases(source);
 
     var root: std.json.ObjectMap = .empty;
     try copyObjectField(gpa, &root, source, "project");
@@ -253,8 +258,10 @@ pub fn normalizeConfig(gpa: std.mem.Allocator, source: Value) !Value {
 fn normalizeDocker(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: Value) !void {
     const docker = source.object.get("docker") orelse return;
     if (docker != .object) return error.InvalidConfig;
+    try validateObjectKeys(docker, &.{ "compose", "wait_timeout_seconds" });
     const compose = docker.object.get("compose") orelse return error.InvalidConfig;
     if (compose != .string) return error.InvalidConfig;
+    if (compose.string.len == 0) return error.InvalidConfig;
 
     var object: std.json.ObjectMap = .empty;
     try object.put(gpa, "enabled", .{ .bool = true });
@@ -273,16 +280,27 @@ fn normalizeServices(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: 
     const groups = source.object.get("groups") orelse return error.InvalidConfig;
     if (groups != .array) return error.InvalidConfig;
 
+    var group_names = std.StringHashMap(void).init(gpa);
+    defer group_names.deinit();
+    var service_names = std.StringHashMap(void).init(gpa);
+    defer service_names.deinit();
     var services = std.json.Array.init(gpa);
     errdefer services.deinit();
     for (groups.array.items) |group| {
         if (group != .object) return error.InvalidConfig;
+        try validateObjectKeys(group, &.{ "name", "services" });
         const name = try config_value.requiredObjectString(group, "name");
         try validate.identifier(name);
+        if (group_names.contains(name)) return error.InvalidConfig;
+        try group_names.put(name, {});
         const group_services = group.object.get("services") orelse return error.InvalidConfig;
         if (group_services != .array) return error.InvalidConfig;
         for (group_services.array.items) |service| {
             if (service != .object) return error.InvalidConfig;
+            try validateService(service);
+            const service_name = try config_value.requiredObjectString(service, "name");
+            if (service_names.contains(service_name)) return error.InvalidConfig;
+            try service_names.put(service_name, {});
             const normalized = try cloneObjectWithField(gpa, service, "group", .{ .string = name });
             try services.append(.{ .object = normalized });
         }
@@ -299,28 +317,35 @@ fn normalizeStartupOrder(gpa: std.mem.Allocator, root: *std.json.ObjectMap, sour
     for (startup_order.array.items) |step| {
         if (step != .object) return error.InvalidConfig;
         var phase: std.json.ObjectMap = .empty;
-        if (config_value.optionalObjectBool(step, "docker", false)) {
-            try phase.put(gpa, "type", .{ .string = "docker" });
-        } else if (step.object.get("group")) |group| {
-            if (group != .string) return error.InvalidConfig;
-            var groups = std.json.Array.init(gpa);
-            try groups.append(group);
-            try phase.put(gpa, "groups", .{ .array = groups });
-            if (step.object.get("wait_ports")) |wait_ports| {
-                if (wait_ports != .array) return error.InvalidConfig;
-                for (wait_ports.array.items) |port| {
-                    if (port != .integer) return error.InvalidConfig;
+        const kind = try validateStartupStep(step);
+        switch (kind) {
+            .docker => {
+                try phase.put(gpa, "type", .{ .string = "docker" });
+            },
+            .group => {
+                const group = step.object.get("group").?;
+                if (group != .string) return error.InvalidConfig;
+                var groups = std.json.Array.init(gpa);
+                try groups.append(group);
+                try phase.put(gpa, "groups", .{ .array = groups });
+                if (step.object.get("wait_ports")) |wait_ports| {
+                    if (wait_ports != .array) return error.InvalidConfig;
+                    for (wait_ports.array.items) |port| {
+                        if (port != .integer) return error.InvalidConfig;
+                    }
+                    try phase.put(gpa, "wait_ports", wait_ports);
                 }
-                try phase.put(gpa, "wait_ports", wait_ports);
-            }
-        } else if (step.object.get("command")) |command| {
-            if (command != .string) return error.InvalidConfig;
-            try phase.put(gpa, "type", .{ .string = "command" });
-            try phase.put(gpa, "command", command);
-            try copyObjectField(gpa, &phase, step, "dir");
-            try copyObjectField(gpa, &phase, step, "on_fail");
-            try copyObjectField(gpa, &phase, step, "commands");
-        } else return error.InvalidConfig;
+            },
+            .command => {
+                const command = step.object.get("command").?;
+                if (command != .string) return error.InvalidConfig;
+                try phase.put(gpa, "type", .{ .string = "command" });
+                try phase.put(gpa, "command", command);
+                try copyObjectField(gpa, &phase, step, "dir");
+                try copyObjectField(gpa, &phase, step, "on_fail");
+                try copyObjectField(gpa, &phase, step, "commands");
+            },
+        }
         try copyObjectField(gpa, &phase, step, "name");
         try phases.append(.{ .object = phase });
     }
@@ -338,6 +363,140 @@ fn cloneObjectWithField(gpa: std.mem.Allocator, source: Value, key: []const u8, 
     while (it.next()) |entry| try object.put(gpa, entry.key_ptr.*, entry.value_ptr.*);
     try object.put(gpa, key, value);
     return object;
+}
+
+const StartupStepKind = enum {
+    docker,
+    group,
+    command,
+};
+
+fn validateStartupStep(step: Value) !StartupStepKind {
+    try validateOptionalString(step, "name");
+    const has_docker = step.object.get("docker") != null;
+    const has_group = step.object.get("group") != null;
+    const has_command = step.object.get("command") != null;
+    const kind_count: u8 = @as(u8, @intFromBool(has_docker)) + @as(u8, @intFromBool(has_group)) + @as(u8, @intFromBool(has_command));
+    if (kind_count != 1) return error.InvalidConfig;
+
+    if (has_docker) {
+        try validateObjectKeys(step, &.{ "name", "docker" });
+        const docker = step.object.get("docker").?;
+        if (docker != .bool or !docker.bool) return error.InvalidConfig;
+        return .docker;
+    }
+    if (has_group) {
+        try validateObjectKeys(step, &.{ "name", "group", "wait_ports" });
+        if (step.object.get("group").? != .string) return error.InvalidConfig;
+        if (step.object.get("wait_ports")) |wait_ports| {
+            if (wait_ports != .array) return error.InvalidConfig;
+            for (wait_ports.array.items) |port| {
+                if (port != .integer) return error.InvalidConfig;
+            }
+        }
+        return .group;
+    }
+
+    try validateObjectKeys(step, &.{ "name", "command", "dir", "on_fail", "commands" });
+    if (step.object.get("command").? != .string) return error.InvalidConfig;
+    try validateOptionalString(step, "dir");
+    try validateOptionalString(step, "on_fail");
+    if (step.object.get("commands")) |commands| try validateStringObject(commands);
+    return .command;
+}
+
+fn validateProject(source: Value) !void {
+    const project = source.object.get("project") orelse return error.InvalidConfig;
+    if (project != .object) return error.InvalidConfig;
+    try validateObjectKeys(project, &.{ "name", "root", "session_name" });
+    _ = try config_value.requiredObjectString(project, "name");
+    _ = try config_value.requiredObjectString(project, "root");
+    try validateOptionalString(project, "session_name");
+}
+
+fn validateService(service: Value) !void {
+    try validateObjectKeys(service, &.{ "name", "dir", "runtime", "command", "external", "port", "healthcheck" });
+    _ = try config_value.requiredObjectString(service, "name");
+    _ = try config_value.requiredObjectString(service, "command");
+    try validateOptionalString(service, "dir");
+    try validateOptionalString(service, "runtime");
+    if (service.object.get("external")) |external| if (external != .bool) return error.InvalidConfig;
+    if (service.object.get("port")) |port| if (port != .integer) return error.InvalidConfig;
+    if (service.object.get("healthcheck")) |healthcheck| {
+        if (healthcheck != .object) return error.InvalidConfig;
+        try validateObjectKeys(healthcheck, &.{ "type", "path" });
+        try validateOptionalString(healthcheck, "type");
+        try validateOptionalString(healthcheck, "path");
+    }
+}
+
+fn validatePrechecks(source: Value) !void {
+    const prechecks = source.object.get("prechecks") orelse return;
+    if (prechecks != .array) return error.InvalidConfig;
+    for (prechecks.array.items) |check| {
+        if (check != .object) return error.InvalidConfig;
+        try validateObjectKeys(check, &.{ "name", "command", "on_fail", "hint", "dir" });
+        _ = try config_value.requiredObjectString(check, "command");
+        try validateOptionalString(check, "name");
+        try validateOptionalString(check, "on_fail");
+        try validateOptionalString(check, "hint");
+        try validateOptionalString(check, "dir");
+    }
+}
+
+fn validateStartProfiles(source: Value) !void {
+    const profiles = source.object.get("start_profiles") orelse return;
+    if (profiles != .object) return error.InvalidConfig;
+    var it = profiles.object.iterator();
+    while (it.next()) |entry| {
+        const profile = entry.value_ptr.*;
+        if (profile != .object) return error.InvalidConfig;
+        try validateObjectKeys(profile, &.{ "profile", "label", "group_overrides" });
+        _ = try config_value.requiredObjectString(profile, "profile");
+        try validateOptionalString(profile, "label");
+        if (profile.object.get("group_overrides")) |overrides| try validateStringObject(overrides);
+    }
+}
+
+fn validateGroupAliases(source: Value) !void {
+    const aliases = source.object.get("group_aliases") orelse return;
+    if (aliases != .object) return error.InvalidConfig;
+    var it = aliases.object.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.* != .array) return error.InvalidConfig;
+        for (entry.value_ptr.array.items) |value| {
+            if (value != .string) return error.InvalidConfig;
+        }
+    }
+}
+
+fn validateStringObject(value: Value) !void {
+    if (value != .object) return error.InvalidConfig;
+    var it = value.object.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.* != .string) return error.InvalidConfig;
+    }
+}
+
+fn validateOptionalString(node: Value, key: []const u8) !void {
+    if (node.object.get(key)) |value| {
+        if (value != .string) return error.InvalidConfig;
+    }
+}
+
+fn validateObjectKeys(node: Value, allowed: []const []const u8) !void {
+    if (node != .object) return error.InvalidConfig;
+    var it = node.object.iterator();
+    while (it.next()) |entry| {
+        if (!isAllowedKey(entry.key_ptr.*, allowed)) return error.InvalidConfig;
+    }
+}
+
+fn isAllowedKey(key: []const u8, allowed: []const []const u8) bool {
+    for (allowed) |item| {
+        if (std.mem.eql(u8, key, item)) return true;
+    }
+    return false;
 }
 
 fn serviceHealthcheck(service: Value) ?Value {
@@ -491,9 +650,8 @@ test "rejects malformed group aliases" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const cfg = try parseTestConfig(&arena, json);
 
-    try std.testing.expectError(error.InvalidConfig, cfg.resolveGroup(arena.allocator(), "bad"));
+    try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
 }
 
 test "rejects legacy flat services" {
@@ -543,6 +701,12 @@ test "config.parse: rejects malformed docker config" {
         \\  "groups": []
         \\}
         ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"compose": ""},
+        \\  "groups": []
+        \\}
+        ,
     };
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -564,6 +728,113 @@ test "config.parse: rejects malformed startup order" {
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
         \\  "groups": [],
         \\  "startup_order": [{"group": "backend", "wait_ports": ["3000"]}]
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [],
+        \\  "startup_order": [{"command": "setup", "dir": 42}]
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [],
+        \\  "startup_order": [{"command": "setup", "on_fail": false}]
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [],
+        \\  "startup_order": [{"command": "setup", "commands": {"core": false}}]
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [],
+        \\  "startup_order": [{"name": 42, "command": "setup"}]
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [],
+        \\  "startup_order": [{"docker": false}]
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [],
+        \\  "startup_order": [{"group": "backend", "dir": "backend"}]
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [],
+        \\  "startup_order": [{"group": "backend", "command": "setup"}]
+        \\}
+        ,
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    for (cases) |json| {
+        try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
+    }
+}
+
+test "config.parse: rejects duplicate groups and services" {
+    const cases = [_][]const u8{
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [
+        \\    {"name":"backend","services":[]},
+        \\    {"name":"backend","services":[]}
+        \\  ]
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [
+        \\    {"name":"backend","services":[{"name":"api","command":"serve"}]},
+        \\    {"name":"worker","services":[{"name":"api","command":"work"}]}
+        \\  ]
+        \\}
+        ,
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    for (cases) |json| {
+        try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
+    }
+}
+
+test "config.parse: rejects unknown public schema fields" {
+    const cases = [_][]const u8{
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "unexpected": true,
+        \\  "groups": []
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo","unexpected":true},
+        \\  "groups": []
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"compose": "compose.yaml", "unexpected": true},
+        \\  "groups": []
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","unexpected":true,"services":[]}]
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","command":"serve","unexpected":true}]}]
         \\}
         ,
     };
