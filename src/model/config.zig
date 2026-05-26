@@ -240,35 +240,32 @@ pub fn normalizeConfig(gpa: std.mem.Allocator, source: Value) !Value {
     if (source.object.get("services") != null or source.object.get("phases") != null) return error.InvalidConfig;
 
     var root: std.json.ObjectMap = .empty;
-    try copyField(gpa, &root, source, "project");
+    try copyObjectField(gpa, &root, source, "project");
     try normalizeDocker(gpa, &root, source);
     try normalizeServices(gpa, &root, source);
     try normalizeStartupOrder(gpa, &root, source);
-    try copyField(gpa, &root, source, "prechecks");
-    try copyField(gpa, &root, source, "start_profiles");
-    try copyField(gpa, &root, source, "group_aliases");
+    try copyObjectField(gpa, &root, source, "prechecks");
+    try copyObjectField(gpa, &root, source, "start_profiles");
+    try copyObjectField(gpa, &root, source, "group_aliases");
     return .{ .object = root };
-}
-
-fn serviceHealthcheck(service: Value) ?Value {
-    if (service != .object) return null;
-    return service.object.get("healthcheck");
 }
 
 fn normalizeDocker(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: Value) !void {
     const docker = source.object.get("docker") orelse return;
     if (docker != .object) return error.InvalidConfig;
+    const compose = docker.object.get("compose") orelse return error.InvalidConfig;
+    if (compose != .string) return error.InvalidConfig;
 
     var object: std.json.ObjectMap = .empty;
     try object.put(gpa, "enabled", .{ .bool = true });
-    if (docker.object.get("compose")) |compose| {
-        if (compose != .string) return error.InvalidConfig;
-        const dir = std.fs.path.dirname(compose.string) orelse "";
-        const file = std.fs.path.basename(compose.string);
-        if (dir.len != 0) try object.put(gpa, "dir", .{ .string = dir });
-        try object.put(gpa, "compose_file", .{ .string = file });
-    } else return error.InvalidConfig;
-    if (docker.object.get("wait_timeout_seconds")) |timeout| try object.put(gpa, "wait_timeout", timeout);
+    const dir = std.fs.path.dirname(compose.string) orelse "";
+    const file = std.fs.path.basename(compose.string);
+    if (dir.len != 0) try object.put(gpa, "dir", .{ .string = dir });
+    try object.put(gpa, "compose_file", .{ .string = file });
+    if (docker.object.get("wait_timeout_seconds")) |timeout| {
+        if (timeout != .integer) return error.InvalidConfig;
+        try object.put(gpa, "wait_timeout", timeout);
+    }
     try root.put(gpa, "docker", .{ .object = object });
 }
 
@@ -311,6 +308,9 @@ fn normalizeStartupOrder(gpa: std.mem.Allocator, root: *std.json.ObjectMap, sour
             try phase.put(gpa, "groups", .{ .array = groups });
             if (step.object.get("wait_ports")) |wait_ports| {
                 if (wait_ports != .array) return error.InvalidConfig;
+                for (wait_ports.array.items) |port| {
+                    if (port != .integer) return error.InvalidConfig;
+                }
                 try phase.put(gpa, "wait_ports", wait_ports);
             }
         } else if (step.object.get("command")) |command| {
@@ -327,10 +327,6 @@ fn normalizeStartupOrder(gpa: std.mem.Allocator, root: *std.json.ObjectMap, sour
     try root.put(gpa, "phases", .{ .array = phases });
 }
 
-fn copyField(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: Value, key: []const u8) !void {
-    if (source.object.get(key)) |value| try root.put(gpa, key, value);
-}
-
 fn copyObjectField(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: Value, key: []const u8) !void {
     if (source.object.get(key)) |value| try root.put(gpa, key, value);
 }
@@ -342,6 +338,11 @@ fn cloneObjectWithField(gpa: std.mem.Allocator, source: Value, key: []const u8, 
     while (it.next()) |entry| try object.put(gpa, entry.key_ptr.*, entry.value_ptr.*);
     try object.put(gpa, key, value);
     return object;
+}
+
+fn serviceHealthcheck(service: Value) ?Value {
+    if (service != .object) return null;
+    return service.object.get("healthcheck");
 }
 
 fn readFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
@@ -520,6 +521,58 @@ test "rejects legacy phases" {
     defer arena.deinit();
 
     try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
+}
+
+test "config.parse: rejects malformed docker config" {
+    const cases = [_][]const u8{
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {},
+        \\  "groups": []
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": true,
+        \\  "groups": []
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"compose": "compose.yaml", "wait_timeout_seconds": "30"},
+        \\  "groups": []
+        \\}
+        ,
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    for (cases) |json| {
+        try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
+    }
+}
+
+test "config.parse: rejects malformed startup order" {
+    const cases = [_][]const u8{
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [],
+        \\  "startup_order": [{"unexpected": true}]
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [],
+        \\  "startup_order": [{"group": "backend", "wait_ports": ["3000"]}]
+        \\}
+        ,
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    for (cases) |json| {
+        try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
+    }
 }
 
 test "rejects invalid identifiers at config boundaries" {
