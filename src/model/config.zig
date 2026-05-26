@@ -10,8 +10,9 @@ pub const Config = struct {
     home: []const u8,
 
     pub fn parse(gpa: std.mem.Allocator, json: []const u8, home: []const u8) !Config {
+        const value = try parseJsonBytes(gpa, json);
         return .{
-            .value = try std.json.parseFromSliceLeaky(Value, gpa, json, .{ .ignore_unknown_fields = true }),
+            .value = try normalizeConfig(gpa, value),
             .home = home,
         };
     }
@@ -230,9 +231,117 @@ pub fn loadPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []co
     return Config.parse(gpa, bytes, home);
 }
 
+pub fn parseJsonBytes(gpa: std.mem.Allocator, bytes: []const u8) !Value {
+    return std.json.parseFromSliceLeaky(Value, gpa, bytes, .{ .ignore_unknown_fields = true });
+}
+
+pub fn normalizeConfig(gpa: std.mem.Allocator, source: Value) !Value {
+    if (source != .object) return error.InvalidConfig;
+    if (source.object.get("services") != null or source.object.get("phases") != null) return error.InvalidConfig;
+
+    var root: std.json.ObjectMap = .empty;
+    try copyField(gpa, &root, source, "project");
+    try normalizeDocker(gpa, &root, source);
+    try normalizeServices(gpa, &root, source);
+    try normalizeStartupOrder(gpa, &root, source);
+    try copyField(gpa, &root, source, "prechecks");
+    try copyField(gpa, &root, source, "start_profiles");
+    try copyField(gpa, &root, source, "group_aliases");
+    return .{ .object = root };
+}
+
 fn serviceHealthcheck(service: Value) ?Value {
     if (service != .object) return null;
     return service.object.get("healthcheck");
+}
+
+fn normalizeDocker(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: Value) !void {
+    const docker = source.object.get("docker") orelse return;
+    if (docker != .object) return error.InvalidConfig;
+
+    var object: std.json.ObjectMap = .empty;
+    try object.put(gpa, "enabled", .{ .bool = true });
+    if (docker.object.get("compose")) |compose| {
+        if (compose != .string) return error.InvalidConfig;
+        const dir = std.fs.path.dirname(compose.string) orelse "";
+        const file = std.fs.path.basename(compose.string);
+        if (dir.len != 0) try object.put(gpa, "dir", .{ .string = dir });
+        try object.put(gpa, "compose_file", .{ .string = file });
+    } else return error.InvalidConfig;
+    if (docker.object.get("wait_timeout_seconds")) |timeout| try object.put(gpa, "wait_timeout", timeout);
+    try root.put(gpa, "docker", .{ .object = object });
+}
+
+fn normalizeServices(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: Value) !void {
+    const groups = source.object.get("groups") orelse return error.InvalidConfig;
+    if (groups != .array) return error.InvalidConfig;
+
+    var services = std.json.Array.init(gpa);
+    errdefer services.deinit();
+    for (groups.array.items) |group| {
+        if (group != .object) return error.InvalidConfig;
+        const name = try config_value.requiredObjectString(group, "name");
+        try validate.identifier(name);
+        const group_services = group.object.get("services") orelse return error.InvalidConfig;
+        if (group_services != .array) return error.InvalidConfig;
+        for (group_services.array.items) |service| {
+            if (service != .object) return error.InvalidConfig;
+            const normalized = try cloneObjectWithField(gpa, service, "group", .{ .string = name });
+            try services.append(.{ .object = normalized });
+        }
+    }
+    try root.put(gpa, "services", .{ .array = services });
+}
+
+fn normalizeStartupOrder(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: Value) !void {
+    const startup_order = source.object.get("startup_order") orelse return;
+    if (startup_order != .array) return error.InvalidConfig;
+
+    var phases = std.json.Array.init(gpa);
+    errdefer phases.deinit();
+    for (startup_order.array.items) |step| {
+        if (step != .object) return error.InvalidConfig;
+        var phase: std.json.ObjectMap = .empty;
+        if (config_value.optionalObjectBool(step, "docker", false)) {
+            try phase.put(gpa, "type", .{ .string = "docker" });
+        } else if (step.object.get("group")) |group| {
+            if (group != .string) return error.InvalidConfig;
+            var groups = std.json.Array.init(gpa);
+            try groups.append(group);
+            try phase.put(gpa, "groups", .{ .array = groups });
+            if (step.object.get("wait_ports")) |wait_ports| {
+                if (wait_ports != .array) return error.InvalidConfig;
+                try phase.put(gpa, "wait_ports", wait_ports);
+            }
+        } else if (step.object.get("command")) |command| {
+            if (command != .string) return error.InvalidConfig;
+            try phase.put(gpa, "type", .{ .string = "command" });
+            try phase.put(gpa, "command", command);
+            try copyObjectField(gpa, &phase, step, "dir");
+            try copyObjectField(gpa, &phase, step, "on_fail");
+            try copyObjectField(gpa, &phase, step, "commands");
+        } else return error.InvalidConfig;
+        try copyObjectField(gpa, &phase, step, "name");
+        try phases.append(.{ .object = phase });
+    }
+    try root.put(gpa, "phases", .{ .array = phases });
+}
+
+fn copyField(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: Value, key: []const u8) !void {
+    if (source.object.get(key)) |value| try root.put(gpa, key, value);
+}
+
+fn copyObjectField(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: Value, key: []const u8) !void {
+    if (source.object.get(key)) |value| try root.put(gpa, key, value);
+}
+
+fn cloneObjectWithField(gpa: std.mem.Allocator, source: Value, key: []const u8, value: Value) !std.json.ObjectMap {
+    var object: std.json.ObjectMap = .empty;
+    errdefer object.deinit(gpa);
+    var it = source.object.iterator();
+    while (it.next()) |entry| try object.put(gpa, entry.key_ptr.*, entry.value_ptr.*);
+    try object.put(gpa, key, value);
+    return object;
 }
 
 fn readFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
@@ -269,9 +378,9 @@ test "loads defaults and resolves paths" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"~/work/demo","session_name":"demo"},
-        \\  "services": [
-        \\    {"name":"api","dir":"backend","command":"serve","group":"be"},
-        \\    {"name":"web","dir":"~/apps/web","runtime":"npm","command":"run dev","group":"fe","external":true}
+        \\  "groups": [
+        \\    {"name":"be","services":[{"name":"api","dir":"backend","command":"serve"}]},
+        \\    {"name":"fe","services":[{"name":"web","dir":"~/apps/web","runtime":"npm","command":"run dev","external":true}]}
         \\  ],
         \\  "group_aliases": {"all":["api","web"]}
         \\}
@@ -292,7 +401,7 @@ test "config.sessionName: defaults to project name" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo"},
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -306,9 +415,11 @@ test "resolves profiles and phase group overrides" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": [
-        \\    {"name":"api","dir":"backend","command":"serve","group":"backend"},
-        \\    {"name":"worker","dir":"backend","command":"work","group":"backend"}
+        \\  "groups": [
+        \\    {"name":"backend","services":[
+        \\      {"name":"api","dir":"backend","command":"serve"},
+        \\      {"name":"worker","dir":"backend","command":"work"}
+        \\    ]}
         \\  ],
         \\  "group_aliases": {"core-backend":["api"]},
         \\  "start_profiles": {
@@ -336,10 +447,10 @@ test "resolves command phase profile overrides and fallback" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": [],
-        \\  "phases": [
-        \\    {"type":"command","command":"default","commands":{"core":"override"}},
-        \\    {"type":"command","commands":{"core":"only-core"}}
+        \\  "groups": [],
+        \\  "startup_order": [
+        \\    {"command":"default","commands":{"core":"override"}},
+        \\    {"command":"fallback","commands":{"core":"only-core"}}
         \\  ]
         \\}
     ;
@@ -350,14 +461,14 @@ test "resolves command phase profile overrides and fallback" {
 
     try std.testing.expectEqualStrings("override", try Config.commandPhaseCommand(phases[0], "core"));
     try std.testing.expectEqualStrings("default", try Config.commandPhaseCommand(phases[0], "all"));
-    try std.testing.expectError(error.InvalidConfig, Config.commandPhaseCommand(phases[1], "all"));
+    try std.testing.expectEqualStrings("fallback", try Config.commandPhaseCommand(phases[1], "all"));
 }
 
 test "rejects unknown runtimes and missing services" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": [{"name":"api","dir":"backend","runtime":"unknown","command":"serve","group":"backend"}]
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","runtime":"unknown","command":"serve"}]}]
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -373,7 +484,7 @@ test "rejects malformed group aliases" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": [],
+        \\  "groups": [],
         \\  "group_aliases": {"bad":["api", 42]}
         \\}
     ;
@@ -384,25 +495,38 @@ test "rejects malformed group aliases" {
     try std.testing.expectError(error.InvalidConfig, cfg.resolveGroup(arena.allocator(), "bad"));
 }
 
-test "rejects malformed service collection" {
+test "rejects legacy flat services" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": {"api": {"command":"serve"}}
+        \\  "services": [{"name":"api","command":"serve"}]
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const cfg = try parseTestConfig(&arena, json);
 
-    try std.testing.expectError(error.InvalidConfig, cfg.services());
+    try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
+}
+
+test "rejects legacy phases" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [],
+        \\  "phases": [{"type":"docker"}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
 }
 
 test "rejects invalid identifiers at config boundaries" {
     const json =
         \\{
         \\  "project": {"name":"bad name","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": [{"name":"api.bad","dir":"backend","command":"serve","group":"backend"}]
+        \\  "groups": [{"name":"backend","services":[{"name":"api.bad","dir":"backend","command":"serve"}]}]
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -417,7 +541,7 @@ test "rejects project-relative service paths that escape root" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": [{"name":"api","dir":"../escape","command":"serve","group":"backend"}]
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"../escape","command":"serve"}]}]
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -431,7 +555,7 @@ test "allows external service paths outside project root" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": [{"name":"api","dir":"../external","external":true,"command":"serve","group":"backend"}]
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"../external","external":true,"command":"serve"}]}]
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -445,8 +569,8 @@ test "rejects docker paths that escape project root" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true, "dir": "../escape"},
-        \\  "services": []
+        \\  "docker": {"compose": "../escape/compose.yaml"},
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -468,4 +592,8 @@ test "parses synthetic fixture" {
     try std.testing.expectEqual(@as(usize, 3), cfg.phases().len);
     try std.testing.expectEqualStrings("core-backend", cfg.resolvePhaseGroup("core", "backend"));
     try std.testing.expectEqual(@as(?i64, 18080), Config.servicePort(try cfg.findService("api")));
+    try std.testing.expect(cfg.dockerEnabled());
+    try std.testing.expectEqualStrings("/tmp/zask-demo/infra", try cfg.dockerDir(arena.allocator()));
+    try std.testing.expectEqualStrings("compose.yaml", cfg.dockerComposeFile());
+    try std.testing.expectEqual(@as(i64, 5), cfg.dockerWaitTimeout());
 }
