@@ -318,7 +318,7 @@ test "runtime.close: kills session after service stop wait failure" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": [{"name":"api","dir":"backend","command":"serve","group":"backend"}]
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -347,8 +347,8 @@ test "runtime.close: kills session after resource stop" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true},
-        \\  "services": [{"name":"api","dir":"backend","command":"serve","group":"backend"}]
+        \\  "docker": {"compose": "compose.yaml"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -388,7 +388,7 @@ test "runtime.attach: refreshes size hooks before switching client" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -418,7 +418,7 @@ test "runtime.attach: reports missing session" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -443,8 +443,8 @@ test "runtime.openSession: creates dashboard service and docker windows" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true, "dir": "infra", "compose_file": "compose.yaml"},
-        \\  "services": [{"name":"api","dir":"backend","command":"serve","group":"backend"}]
+        \\  "docker": {"compose": "infra/compose.yaml"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -482,8 +482,8 @@ test "runtime.openSession: places docker after dashboard" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true, "dir": "infra", "compose_file": "compose.yaml"},
-        \\  "services": []
+        \\  "docker": {"compose": "infra/compose.yaml"},
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -510,7 +510,7 @@ test "runtime.open: kills partial session on setup failure" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -537,7 +537,7 @@ test "runtime.open: creates session without tmuxp" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -578,7 +578,7 @@ test "runtime.open: refreshes bindings for existing session" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -609,7 +609,7 @@ test "runtime.previewList: resizes windows before choose-tree" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -647,7 +647,7 @@ test "runtime.previewList: rejects resized window mismatch" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -678,7 +678,7 @@ test "syncWindowSizes resizes windows without opening tree mode" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -707,7 +707,7 @@ test "runtime.open: attaches when lock is busy" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -750,7 +750,7 @@ test "runtime.open: preserves lock busy before session exists" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -792,7 +792,7 @@ test "runtime.re: delegates to single attached client when lock is busy" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -839,7 +839,7 @@ test "runtime.re: rejects lock busy delegation with multiple attached clients" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

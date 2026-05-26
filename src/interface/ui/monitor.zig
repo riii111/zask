@@ -256,7 +256,7 @@ test "service monitor skips health checks unless pane is busy" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": [{"name":"api","dir":"api","command":"serve","port":3000}]
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve","port":3000}]}]
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -280,8 +280,8 @@ test "docker monitor skips compose observation unless pane is busy" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true},
-        \\  "services": []
+        \\  "docker": {"compose": "compose.yaml"},
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

@@ -314,7 +314,7 @@ test "precheck abort stops startup and warn continues" {
         \\    {"name":"warn-check","command":"false","on_fail":"warn"},
         \\    {"name":"abort-check","command":"false","on_fail":"abort"}
         \\  ],
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -338,8 +338,8 @@ test "startAll starts idle docker before service command" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true},
-        \\  "services": [{"name":"api","dir":"backend","command":"serve","group":"backend"}]
+        \\  "docker": {"compose": "compose.yaml"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -374,8 +374,8 @@ test "command phase runs interactively" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "phases": [{"type":"command","command":"echo setup"}],
-        \\  "services": []
+        \\  "startup_order": [{"command":"echo setup"}],
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -399,7 +399,7 @@ test "wait helpers report timeouts" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -430,7 +430,7 @@ test "window readiness distinguishes missing windows from unavailable tmux" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -450,7 +450,7 @@ test "window readiness retries missing windows until timeout" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -470,7 +470,7 @@ test "service start reports missing window as failure" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": [{"name":"api","dir":"backend","command":"serve","group":"backend"}]
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -492,7 +492,7 @@ test "stop and restart targets require an active session" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": [{"name":"api","dir":"backend","command":"serve","group":"backend"}]
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -518,8 +518,8 @@ test "docker stop reaches compose down without tmux session" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true},
-        \\  "services": [{"name":"api","dir":"backend","command":"serve","group":"backend"}]
+        \\  "docker": {"compose": "compose.yaml"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -545,8 +545,8 @@ test "docker stop reaches compose down when tmux send fails" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true},
-        \\  "services": []
+        \\  "docker": {"compose": "compose.yaml"},
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -573,8 +573,8 @@ test "docker start is a no-op when docker pane is running" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true},
-        \\  "services": []
+        \\  "docker": {"compose": "compose.yaml"},
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -606,8 +606,8 @@ test "docker start sends compose up after transient busy pane" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true},
-        \\  "services": []
+        \\  "docker": {"compose": "compose.yaml"},
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -644,8 +644,8 @@ test "docker start disables compose menu and waits when started" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true},
-        \\  "services": []
+        \\  "docker": {"compose": "compose.yaml"},
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -676,8 +676,8 @@ test "docker restart stops compose before reporting missing session" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true},
-        \\  "services": []
+        \\  "docker": {"compose": "compose.yaml"},
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -703,8 +703,8 @@ test "docker restart runs compose down before compose up" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true},
-        \\  "services": []
+        \\  "docker": {"compose": "compose.yaml"},
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -739,7 +739,7 @@ test "startAll dispatches quoted service command to tmux" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo app","session_name":"demo"},
-        \\  "services": [{"name":"api","dir":"backend","command":"serve","group":"backend"}]
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

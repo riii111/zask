@@ -43,7 +43,7 @@ test "open.Options: resolves profile aliases" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": [],
+        \\  "groups": [],
         \\  "start_profiles": {"api": {"profile": "backend"}}
         \\}
     ;

@@ -45,10 +45,12 @@ test "list.run: prints services and docker section" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true, "dir": "infra", "compose_file": "compose.yaml"},
-        \\  "services": [
-        \\    {"name":"api","dir":"backend","command":"serve","port":18080,"group":"backend"},
-        \\    {"name":"worker","dir":"backend","command":"work","group":"backend"}
+        \\  "docker": {"compose": "infra/compose.yaml"},
+        \\  "groups": [
+        \\    {"name":"backend","services":[
+        \\      {"name":"api","dir":"backend","command":"serve","port":18080},
+        \\      {"name":"worker","dir":"backend","command":"work"}
+        \\    ]}
         \\  ]
         \\}
     ;

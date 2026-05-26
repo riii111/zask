@@ -117,7 +117,7 @@ test "precheck failure prints hint and preserves abort semantics" {
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
         \\  "prechecks": [{"name":"tool","command":"missing-tool","on_fail":"abort","hint":"install tool"}],
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -139,11 +139,11 @@ test "command phase warn continues and abort fails startup" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "phases": [
-        \\    {"type":"command","command":"warn setup","on_fail":"warn"},
-        \\    {"type":"command","command":"abort setup","on_fail":"abort"}
+        \\  "startup_order": [
+        \\    {"command":"warn setup","on_fail":"warn"},
+        \\    {"command":"abort setup","on_fail":"abort"}
         \\  ],
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -173,7 +173,7 @@ test "phase cwd rejects path traversal" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "services": []
+        \\  "groups": []
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

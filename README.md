@@ -14,7 +14,7 @@ It creates a persistent tmux workspace from local project configuration. Each se
 
 zask focuses on the running local environment: open it once, observe what is alive, restart one service, jump to logs, and close everything cleanly when you are done.
 
-Unlike plain tmux session managers, zask knows about service groups, startup phases, Docker Compose, ports, and running pane state. It is a local dev process manager that uses tmux as the runtime UI.
+Unlike plain tmux session managers, zask knows about service groups, startup order, Docker Compose, ports, and running pane state. It is a local dev process manager that uses tmux as the runtime UI.
 
 ## Features
 
@@ -35,7 +35,7 @@ Unlike plain tmux session managers, zask knows about service groups, startup pha
 ### Project configuration
 
 - **Service groups** - Address related services together, like backend or frontend
-- **Startup phases** - Run Docker, command, and service phases in a predictable order
+- **Startup order** - Run Docker, commands, and service groups in a predictable order
 - **Docker Compose integration** - Start and stop Compose from the project directory
 - **Health inputs** - Track service ports and healthcheck metadata in the same config
 - **Runtime commands** - Prefix service commands with runtimes like `npm`, `pnpm`, `bun`, or `cargo`
@@ -68,17 +68,27 @@ Create a project config:
     "root": "."
   },
   "docker": {
-    "enabled": true,
-    "compose_file": "compose.yaml"
+    "compose": "compose.yaml"
   },
-  "group_aliases": {
-    "backend": ["api", "worker"],
-    "frontend": ["web"]
-  },
-  "services": [
-    {"name": "api", "dir": "backend", "command": "serve", "port": 18080, "group": "backend"},
-    {"name": "worker", "dir": "backend", "command": "work", "group": "backend"},
-    {"name": "web", "dir": "frontend", "runtime": "npm", "command": "run dev", "port": 5173, "group": "frontend"}
+  "groups": [
+    {
+      "name": "backend",
+      "services": [
+        {"name": "api", "dir": "backend", "command": "serve", "port": 18080},
+        {"name": "worker", "dir": "backend", "command": "work"}
+      ]
+    },
+    {
+      "name": "frontend",
+      "services": [
+        {"name": "web", "dir": "frontend", "runtime": "npm", "command": "run dev", "port": 5173}
+      ]
+    }
+  ],
+  "startup_order": [
+    {"docker": true},
+    {"group": "backend", "wait_ports": [18080]},
+    {"group": "frontend"}
   ]
 }
 ```
@@ -107,7 +117,7 @@ zask demo stop --all
 ## Commands
 
 ```text
-zask init [project] [options]
+zask init [project] [--root <path>] [--force]
 zask <project> open [--docker|--<profile>]
 zask <project> attach
 zask <project> list
@@ -126,7 +136,7 @@ Use `zask --config <file> <command>` to run against an explicit config file.
 
 - tmux
 - Zig 0.16.0 to build from source
-- Docker with Docker Compose, when `docker.enabled` is true
+- Docker with Docker Compose, when the config has a `docker` section
 
 ## Development
 
