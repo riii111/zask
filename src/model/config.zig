@@ -323,24 +323,16 @@ fn normalizeStartupOrder(gpa: std.mem.Allocator, root: *std.json.ObjectMap, sour
                 try phase.put(gpa, "type", .{ .string = "docker" });
             },
             .group => {
-                const group = step.object.get("group").?;
-                if (group != .string) return error.InvalidConfig;
                 var groups = std.json.Array.init(gpa);
-                try groups.append(group);
+                try groups.append(step.object.get("group").?);
                 try phase.put(gpa, "groups", .{ .array = groups });
                 if (step.object.get("wait_ports")) |wait_ports| {
-                    if (wait_ports != .array) return error.InvalidConfig;
-                    for (wait_ports.array.items) |port| {
-                        if (port != .integer) return error.InvalidConfig;
-                    }
                     try phase.put(gpa, "wait_ports", wait_ports);
                 }
             },
             .command => {
-                const command = step.object.get("command").?;
-                if (command != .string) return error.InvalidConfig;
                 try phase.put(gpa, "type", .{ .string = "command" });
-                try phase.put(gpa, "command", command);
+                try phase.put(gpa, "command", step.object.get("command").?);
                 try copyObjectField(gpa, &phase, step, "dir");
                 try copyObjectField(gpa, &phase, step, "on_fail");
                 try copyObjectField(gpa, &phase, step, "commands");
@@ -363,6 +355,11 @@ fn cloneObjectWithField(gpa: std.mem.Allocator, source: Value, key: []const u8, 
     while (it.next()) |entry| try object.put(gpa, entry.key_ptr.*, entry.value_ptr.*);
     try object.put(gpa, key, value);
     return object;
+}
+
+fn serviceHealthcheck(service: Value) ?Value {
+    if (service != .object) return null;
+    return service.object.get("healthcheck");
 }
 
 const StartupStepKind = enum {
@@ -497,11 +494,6 @@ fn isAllowedKey(key: []const u8, allowed: []const []const u8) bool {
         if (std.mem.eql(u8, key, item)) return true;
     }
     return false;
-}
-
-fn serviceHealthcheck(service: Value) ?Value {
-    if (service != .object) return null;
-    return service.object.get("healthcheck");
 }
 
 fn readFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
