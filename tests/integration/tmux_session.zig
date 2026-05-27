@@ -66,7 +66,7 @@ test "preview list resizes stale detached windows before tree mode" {
     const cfg = try zask.config.Config.parse(arena.allocator(),
         \\{
         \\  "project": {"name":"demo","root":"/tmp","session_name":"demo"},
-        \\  "services": []
+        \\  "groups": []
         \\}
     , "/tmp");
     const run_impl: zask.runner.Runner = .{ .gpa = arena.allocator(), .io = io };

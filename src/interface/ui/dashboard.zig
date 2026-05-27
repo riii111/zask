@@ -177,10 +177,14 @@ test "renders launcher frame with grouped services" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "docker": {"enabled": true},
-        \\  "services": [
-        \\    {"name":"api","dir":"backend","command":"serve","group":"backend","port":18080},
-        \\    {"name":"web","dir":"frontend","runtime":"npm","command":"run dev","group":"frontend"}
+        \\  "docker": {"compose": "compose.yaml"},
+        \\  "groups": [
+        \\    {"name":"backend","services":[
+        \\      {"name":"api","dir":"backend","command":"serve","port":18080}
+        \\    ]},
+        \\    {"name":"frontend","services":[
+        \\      {"name":"web","dir":"frontend","runtime":"npm","command":"run dev"}
+        \\    ]}
         \\  ]
         \\}
     ;

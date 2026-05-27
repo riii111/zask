@@ -11,30 +11,20 @@ const Context = cli_context.Context;
 pub const Options = struct {
     project: ?[]const u8 = null,
     root: []const u8 = ".",
-    service: ?[]const u8 = null,
-    command: ?[]const u8 = null,
-    dir: []const u8 = ".",
-    port: ?i64 = null,
-    group: []const u8 = "",
-    docker: bool = false,
-    docker_dir: []const u8 = "",
-    compose_file: []const u8 = "docker-compose.yml",
-    compose_file_explicit: bool = false,
     force: bool = false,
 
     pub fn parse(args: []const []const u8) !Options {
         var opts: Options = .{};
-        var flags: OptionFlags = .{};
         var i: usize = 0;
         if (args.len > 0 and !std.mem.startsWith(u8, args[0], "--")) {
             opts.project = args[0];
             i = 1;
         }
         while (i < args.len) {
-            try parseOption(args, &i, &opts, &flags);
+            try parseOption(args, &i, &opts);
             i += 1;
         }
-        try validateOptions(opts, flags);
+        try validateOptions(opts);
         return opts;
     }
 
@@ -58,7 +48,7 @@ pub fn run(ctx: *Context, opts: Options) !void {
 
     var detected = try applyDetections(ctx.base.gpa, io, cwd, opts);
     detected.opts.root = try resolveRootFromCwd(ctx.base.gpa, cwd, detected.opts.root);
-    const json = try renderConfig(ctx.base.gpa, project, detected.opts);
+    const json = try renderConfig(ctx.base.gpa, project, detected);
     defer ctx.base.gpa.free(json);
     _ = try config.Config.parse(ctx.base.gpa, json, try paths.home(ctx.base.environ));
 
@@ -72,33 +62,15 @@ pub fn run(ctx: *Context, opts: Options) !void {
     try ctx.writer.print("Next: zask {s} open\n", .{project});
 }
 
-const OptionFlags = struct {
-    dir: bool = false,
-    port: bool = false,
-    group: bool = false,
-    docker_dir: bool = false,
-    compose_file: bool = false,
-};
-
 const DetectedOptions = struct {
     opts: Options,
-    package_script: ?[]const u8 = null,
+    service: ?init_inference.DetectedService = null,
     compose_file: ?[]const u8 = null,
 };
 
-fn validateOptions(opts: Options, flags: OptionFlags) !void {
+fn validateOptions(opts: Options) !void {
     if (opts.project) |project| validate.identifier(project) catch return error.InvalidArguments;
     validateRoot(opts.root) catch return error.InvalidArguments;
-    if (opts.service) |name| validate.identifier(name) catch return error.InvalidArguments;
-    if (opts.service != null and opts.command == null) return error.InvalidArguments;
-    if (opts.service == null and opts.command != null) return error.InvalidArguments;
-    if (opts.service == null and (flags.dir or flags.port or flags.group)) return error.InvalidArguments;
-    if (!opts.docker and (flags.docker_dir or flags.compose_file)) return error.InvalidArguments;
-    if (opts.port) |port| {
-        if (port <= 0 or port > 65535) return error.InvalidArguments;
-    }
-    validate.relativeSubPath(opts.dir) catch return error.InvalidArguments;
-    validate.relativeSubPath(opts.docker_dir) catch return error.InvalidArguments;
 }
 
 fn validateRoot(root: []const u8) !void {
@@ -106,32 +78,10 @@ fn validateRoot(root: []const u8) !void {
     try validate.relativeSubPath(root);
 }
 
-fn parseOption(args: []const []const u8, index: *usize, opts: *Options, flags: *OptionFlags) !void {
+fn parseOption(args: []const []const u8, index: *usize, opts: *Options) !void {
     const arg = args[index.*];
     if (std.mem.eql(u8, arg, "--root")) {
         opts.root = try takeValue(args, index);
-    } else if (std.mem.eql(u8, arg, "--service")) {
-        opts.service = try takeValue(args, index);
-    } else if (std.mem.eql(u8, arg, "--command")) {
-        opts.command = try takeValue(args, index);
-    } else if (std.mem.eql(u8, arg, "--dir")) {
-        flags.dir = true;
-        opts.dir = try takeValue(args, index);
-    } else if (std.mem.eql(u8, arg, "--port")) {
-        flags.port = true;
-        opts.port = std.fmt.parseInt(i64, try takeValue(args, index), 10) catch return error.InvalidArguments;
-    } else if (std.mem.eql(u8, arg, "--group")) {
-        flags.group = true;
-        opts.group = try takeValue(args, index);
-    } else if (std.mem.eql(u8, arg, "--docker")) {
-        opts.docker = true;
-    } else if (std.mem.eql(u8, arg, "--docker-dir")) {
-        flags.docker_dir = true;
-        opts.docker_dir = try takeValue(args, index);
-    } else if (std.mem.eql(u8, arg, "--compose-file")) {
-        flags.compose_file = true;
-        opts.compose_file = try takeValue(args, index);
-        opts.compose_file_explicit = true;
     } else if (std.mem.eql(u8, arg, "--force")) {
         opts.force = true;
     } else {
@@ -153,23 +103,15 @@ fn resolveRootFromCwd(gpa: std.mem.Allocator, cwd: []const u8, root: []const u8)
 fn applyDetections(gpa: std.mem.Allocator, io: std.Io, cwd: []const u8, opts: Options) !DetectedOptions {
     var result = DetectedOptions{ .opts = opts };
     const detected = try init_inference.detect(gpa, io, cwd, .{
-        .infer_service = opts.service == null,
-        .infer_compose_file = !opts.compose_file_explicit,
+        .infer_service = true,
+        .infer_compose_file = true,
     });
-    if (detected.service) |service| {
-        result.opts.service = service.name;
-        result.opts.command = service.command;
-        result.package_script = service.script;
-    }
-    if (detected.compose_file) |compose_file| {
-        result.opts.docker = true;
-        result.opts.compose_file = compose_file;
-        result.compose_file = compose_file;
-    }
+    result.service = detected.service;
+    result.compose_file = detected.compose_file;
     return result;
 }
 
-fn renderConfig(gpa: std.mem.Allocator, project: []const u8, opts: Options) ![]u8 {
+fn renderConfig(gpa: std.mem.Allocator, project: []const u8, detected: DetectedOptions) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
     var writer = &out.writer;
@@ -181,43 +123,30 @@ fn renderConfig(gpa: std.mem.Allocator, project: []const u8, opts: Options) ![]u
     try json.objectField("name");
     try json.write(project);
     try json.objectField("root");
-    try json.write(opts.root);
+    try json.write(detected.opts.root);
     try json.endObject();
-    if (opts.docker) {
+    if (detected.compose_file) |compose_file| {
         try json.objectField("docker");
         try json.beginObject();
-        try json.objectField("enabled");
-        try json.write(true);
-        if (opts.docker_dir.len != 0) {
-            try json.objectField("dir");
-            try json.write(opts.docker_dir);
-        }
-        if (!std.mem.eql(u8, opts.compose_file, "docker-compose.yml")) {
-            try json.objectField("compose_file");
-            try json.write(opts.compose_file);
-        }
+        try json.objectField("compose");
+        try json.write(compose_file);
         try json.endObject();
     }
-    try json.objectField("services");
+    try json.objectField("groups");
     try json.beginArray();
-    if (opts.service) |service_name| {
+    if (detected.service) |service| {
         try json.beginObject();
         try json.objectField("name");
-        try json.write(service_name);
-        if (!std.mem.eql(u8, opts.dir, ".")) {
-            try json.objectField("dir");
-            try json.write(opts.dir);
-        }
+        try json.write("frontend");
+        try json.objectField("services");
+        try json.beginArray();
+        try json.beginObject();
+        try json.objectField("name");
+        try json.write(service.name);
         try json.objectField("command");
-        try json.write(opts.command.?);
-        if (opts.port) |port| {
-            try json.objectField("port");
-            try json.write(port);
-        }
-        if (opts.group.len != 0) {
-            try json.objectField("group");
-            try json.write(opts.group);
-        }
+        try json.write(service.command);
+        try json.endObject();
+        try json.endArray();
         try json.endObject();
     }
     try json.endArray();
@@ -229,21 +158,16 @@ fn renderConfig(gpa: std.mem.Allocator, project: []const u8, opts: Options) ![]u
 fn writeReport(writer: *std.Io.Writer, project: []const u8, detected: DetectedOptions) !void {
     try writer.print("Detected project.name: {s}\n", .{project});
     try writer.print("Detected project.root: {s}\n", .{detected.opts.root});
-    if (detected.package_script) |script| {
+    if (detected.service) |service| {
+        const script = service.script;
         try writer.print("Detected package script: {s}\n", .{script});
     }
     if (detected.compose_file) |compose_file| {
         try writer.print("Detected Docker Compose file: {s}\n", .{compose_file});
     }
     try writer.writeAll("Omitted defaults: project.session_name");
-    if (detected.opts.service != null) {
-        if (std.mem.eql(u8, detected.opts.dir, ".")) try writer.writeAll(", service.dir");
-        if (detected.opts.group.len == 0) try writer.writeAll(", service.group");
-    }
-    if (detected.opts.docker) {
-        if (detected.opts.docker_dir.len == 0) try writer.writeAll(", docker.dir");
-        if (std.mem.eql(u8, detected.opts.compose_file, "docker-compose.yml")) try writer.writeAll(", docker.compose_file");
-    }
+    if (detected.service != null) try writer.writeAll(", service.dir");
+    if (detected.compose_file != null) try writer.writeAll(", docker.wait_timeout_seconds");
     try writer.writeByte('\n');
 }
 
@@ -268,44 +192,41 @@ fn testTmpPath(gpa: std.mem.Allocator, tmp: std.testing.TmpDir, name: []const u8
     return std.fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path, name });
 }
 
-test "init.options: parses service and docker flags" {
-    const opts = try Options.parse(&.{ "demo", "--root", ".", "--service", "web", "--command", "npm run dev", "--port", "3000", "--docker", "--docker-dir", "infra", "--compose-file", "compose.yaml" });
+test "init.options: parses scaffold flags" {
+    const opts = try Options.parse(&.{ "demo", "--root", ".", "--force" });
+
     try std.testing.expectEqualStrings("demo", opts.project.?);
     try std.testing.expectEqualStrings(".", opts.root);
-    try std.testing.expectEqualStrings("web", opts.service.?);
-    try std.testing.expectEqualStrings("npm run dev", opts.command.?);
-    try std.testing.expectEqual(@as(i64, 3000), opts.port.?);
-    try std.testing.expect(opts.docker);
-    try std.testing.expectEqualStrings("infra", opts.docker_dir);
-    try std.testing.expectEqualStrings("compose.yaml", opts.compose_file);
+    try std.testing.expect(opts.force);
 }
 
 test "init.options: accepts omitted project" {
-    const opts = try Options.parse(&.{ "--service", "web", "--command", "npm run dev" });
+    const opts = try Options.parse(&.{"--force"});
 
     try std.testing.expect(opts.project == null);
     try std.testing.expectEqualStrings(".", opts.root);
-    try std.testing.expectEqualStrings("web", opts.service.?);
+    try std.testing.expect(opts.force);
 }
 
 test "init.options: normalizes invalid input to invalid arguments" {
     const cases = [_][]const []const u8{
         &.{"bad/name"},
-        &.{ "demo", "--service", "bad/name", "--command", "npm run dev" },
-        &.{ "demo", "--service", "web", "--command", "npm run dev", "--dir", "../x" },
-        &.{ "demo", "--service", "web", "--command", "npm run dev", "--port", "abc" },
-        &.{ "demo", "--service", "web", "--command", "npm run dev", "--port", "70000" },
+        &.{ "demo", "--root", "../x" },
+        &.{ "demo", "--root" },
     };
     for (cases) |case| {
         try std.testing.expectError(error.InvalidArguments, Options.parse(case));
     }
 }
 
-test "init.options: rejects options without their parent section" {
+test "init.options: rejects removed service and docker flags" {
     const cases = [_][]const []const u8{
+        &.{ "demo", "--service", "web" },
+        &.{ "demo", "--command", "npm run dev" },
         &.{ "demo", "--dir", "backend" },
         &.{ "demo", "--port", "3000" },
         &.{ "demo", "--group", "app" },
+        &.{ "demo", "--docker" },
         &.{ "demo", "--docker-dir", "infra" },
         &.{ "demo", "--compose-file", "compose.yaml" },
     };
@@ -318,7 +239,7 @@ test "init.config: renders parseable minimal config" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const opts = try Options.parse(&.{"demo"});
-    const json = try renderConfig(std.testing.allocator, "demo", opts);
+    const json = try renderConfig(std.testing.allocator, "demo", .{ .opts = opts });
     defer std.testing.allocator.free(json);
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
 
@@ -333,36 +254,40 @@ test "init.config: renders parseable minimal config" {
 test "init.config: renders service and docker config" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const opts = try Options.parse(&.{ "demo", "--root", ".", "--service", "web", "--command", "npm run dev", "--port", "3000", "--docker", "--docker-dir", "infra", "--compose-file", "compose.yaml" });
-    const json = try renderConfig(std.testing.allocator, "demo", opts);
+    const detected = DetectedOptions{
+        .opts = try Options.parse(&.{ "demo", "--root", "." }),
+        .service = .{ .name = "web", .command = "pnpm run dev", .script = "dev" },
+        .compose_file = "infra/compose.yaml",
+    };
+    const json = try renderConfig(std.testing.allocator, "demo", detected);
     defer std.testing.allocator.free(json);
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     const services = try cfg.services();
 
     try std.testing.expectEqual(@as(usize, 1), services.len);
     try std.testing.expectEqualStrings("web", try config.Config.serviceName(services[0]));
-    try std.testing.expectEqualStrings("", config.Config.serviceGroup(services[0]));
-    try std.testing.expectEqual(@as(?i64, 3000), config.Config.servicePort(services[0]));
+    try std.testing.expectEqualStrings("frontend", config.Config.serviceGroup(services[0]));
+    try std.testing.expectEqualStrings("pnpm run dev", try config.Config.serviceStartCommand(arena.allocator(), services[0]));
     try std.testing.expect(cfg.dockerEnabled());
     try std.testing.expectEqualStrings("compose.yaml", cfg.dockerComposeFile());
+    try std.testing.expectEqualStrings("./infra", try cfg.dockerDir(arena.allocator()));
     try std.testing.expect(std.mem.indexOf(u8, json, "\"dir\": \".\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"group\"") == null);
 }
 
-test "init.config: omits default docker compose file" {
+test "init.config: omits docker when compose is not detected" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const opts = try Options.parse(&.{ "demo", "--docker" });
-    const json = try renderConfig(std.testing.allocator, "demo", opts);
+    const opts = try Options.parse(&.{"demo"});
+    const json = try renderConfig(std.testing.allocator, "demo", .{ .opts = opts });
     defer std.testing.allocator.free(json);
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
 
-    try std.testing.expect(cfg.dockerEnabled());
-    try std.testing.expectEqualStrings("docker-compose.yml", cfg.dockerComposeFile());
-    try std.testing.expect(std.mem.indexOf(u8, json, "compose_file") == null);
+    try std.testing.expect(!cfg.dockerEnabled());
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"docker\"") == null);
 }
 
-test "init.detect: infers compose file with explicit docker" {
+test "init.detect: infers compose file" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tmp = std.testing.tmpDir(.{});
@@ -373,14 +298,12 @@ test "init.detect: infers compose file with explicit docker" {
 
     try paths.writeFile(threaded.io(), compose_yaml, "services: {}\n");
 
-    const detected = try applyDetections(arena.allocator(), threaded.io(), base, try Options.parse(&.{ "demo", "--docker" }));
+    const detected = try applyDetections(arena.allocator(), threaded.io(), base, try Options.parse(&.{"demo"}));
 
-    try std.testing.expect(detected.opts.docker);
-    try std.testing.expectEqualStrings("compose.yaml", detected.opts.compose_file);
     try std.testing.expectEqualStrings("compose.yaml", detected.compose_file.?);
 }
 
-test "init.detect: omits default compose file after detection" {
+test "init.detect: renders detected default compose file" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tmp = std.testing.tmpDir(.{});
@@ -392,38 +315,38 @@ test "init.detect: omits default compose file after detection" {
     try paths.writeFile(threaded.io(), docker_compose, "services: {}\n");
 
     const detected = try applyDetections(arena.allocator(), threaded.io(), base, try Options.parse(&.{"demo"}));
-    const json = try renderConfig(std.testing.allocator, "demo", detected.opts);
+    const json = try renderConfig(std.testing.allocator, "demo", detected);
     defer std.testing.allocator.free(json);
 
-    try std.testing.expect(detected.opts.docker);
-    try std.testing.expectEqualStrings("docker-compose.yml", detected.opts.compose_file);
+    try std.testing.expectEqualStrings("docker-compose.yml", detected.compose_file.?);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"compose\": \"docker-compose.yml\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "compose_file") == null);
 }
 
-test "init.detect: keeps explicit compose file" {
+test "init.detect: infers package script" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var threaded = std.Io.Threaded.init_single_threaded;
     const base = try std.fs.path.join(arena.allocator(), &.{ ".zig-cache", "tmp", &tmp.sub_path });
-    const compose_yaml = try testTmpPath(arena.allocator(), tmp, "compose.yaml");
+    const package_json = try testTmpPath(arena.allocator(), tmp, "package.json");
 
-    try paths.writeFile(threaded.io(), compose_yaml, "services: {}\n");
+    try paths.writeFile(threaded.io(), package_json, "{\"scripts\":{\"dev\":\"vite\"}}\n");
 
-    const detected = try applyDetections(arena.allocator(), threaded.io(), base, try Options.parse(&.{ "demo", "--docker", "--compose-file", "custom.yml" }));
+    const detected = try applyDetections(arena.allocator(), threaded.io(), base, try Options.parse(&.{"demo"}));
 
-    try std.testing.expect(detected.opts.docker);
-    try std.testing.expectEqualStrings("custom.yml", detected.opts.compose_file);
-    try std.testing.expect(detected.compose_file == null);
+    try std.testing.expectEqualStrings("web", detected.service.?.name);
+    try std.testing.expectEqualStrings("npm run dev", detected.service.?.command);
+    try std.testing.expectEqualStrings("dev", detected.service.?.script);
 }
 
 test "init.report: prints detected values and omitted defaults" {
     var buffer: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     const detected = DetectedOptions{
-        .opts = .{ .service = "web", .command = "npm run dev", .docker = true, .compose_file = "docker-compose.yml" },
-        .package_script = "dev",
+        .opts = .{},
+        .service = .{ .name = "web", .command = "npm run dev", .script = "dev" },
         .compose_file = "docker-compose.yml",
     };
 
@@ -432,7 +355,7 @@ test "init.report: prints detected values and omitted defaults" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Detected project.name: demo") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Detected package script: dev") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Detected Docker Compose file: docker-compose.yml") != null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "project.session_name, service.dir, service.group, docker.dir, docker.compose_file") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "project.session_name, service.dir, docker.wait_timeout_seconds") != null);
 }
 
 test "init.root: validates project roots" {
@@ -502,7 +425,7 @@ test "init.run: overwrites existing config with force" {
     var writer: std.Io.Writer = .fixed(&buffer);
     var ctx = testContext(arena.allocator(), threaded.io(), &environ, &writer);
 
-    try run(&ctx, try Options.parse(&.{ "demo", "--service", "web", "--command", "npm run dev" }));
+    try run(&ctx, try Options.parse(&.{"demo"}));
     try run(&ctx, try Options.parse(&.{ "demo", "--force" }));
 
     const config_path = try std.fs.path.join(arena.allocator(), &.{ config_home, "zask", "demo", "config.json" });
