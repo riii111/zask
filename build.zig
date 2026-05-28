@@ -73,4 +73,23 @@ pub fn build(b: *std.Build) void {
     });
     const tmux_integration_step = b.step("test-tmux", "Run tmux integration tests");
     tmux_integration_step.dependOn(&b.addRunArtifact(tmux_integration_tests).step);
+
+    const e2e_options = b.addOptions();
+    e2e_options.addOption([]const u8, "zask_path", b.getInstallPath(.bin, "zask"));
+    const e2e_mod = b.createModule(.{
+        .root_source_file = b.path("tests/e2e/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    e2e_mod.addOptions("e2e_options", e2e_options);
+    const e2e_tests = b.addTest(.{
+        .root_module = e2e_mod,
+        .filters = test_filters,
+    });
+    const run_e2e_tests = b.addRunArtifact(e2e_tests);
+    run_e2e_tests.step.dependOn(b.getInstallStep());
+
+    const e2e_step = b.step("test-e2e", "Run subprocess CLI E2E tests");
+    e2e_step.dependOn(&run_e2e_tests.step);
+    test_step.dependOn(&run_e2e_tests.step);
 }
