@@ -218,8 +218,7 @@ test "open status close: tmux workspace is built, reported, then removed" {
     try runtime.status(&status_writer);
     const status_out = status_writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, status_out, "demo Service Status") != null);
-    try std.testing.expect(std.mem.indexOf(u8, status_out, "api") != null);
-    try std.testing.expect(std.mem.indexOf(u8, status_out, "backend") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_out, "api stopped [backend]") != null);
 
     var close_buffer: [512]u8 = undefined;
     var close_writer: std.Io.Writer = .fixed(&close_buffer);
