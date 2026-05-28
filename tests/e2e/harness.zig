@@ -40,19 +40,19 @@ pub fn spawnZask(
     try env_map.put("HOME", opts.home);
     try env_map.put("XDG_CONFIG_HOME", opts.xdg_config_home);
 
+    const output_limit = 1024 * 1024;
     const result = try std.process.run(gpa, io, .{
         .argv = argv,
         .cwd = .{ .path = opts.cwd },
         .environ_map = &env_map,
-        .stdout_limit = .limited(1024 * 1024),
-        .stderr_limit = .limited(1024 * 1024),
+        .stdout_limit = .limited(output_limit),
+        .stderr_limit = .limited(output_limit),
     });
     return .{ .term = result.term, .stdout = result.stdout, .stderr = result.stderr };
 }
 
 pub const Workspace = struct {
     tmp: std.testing.TmpDir,
-    base: [:0]u8,
     project: []u8,
     xdg: []u8,
     elsewhere: []u8,
@@ -68,7 +68,7 @@ pub const Workspace = struct {
         try tmp.dir.createDirPath(io, "home");
 
         const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-        errdefer gpa.free(base);
+        defer gpa.free(base);
         const project = try std.fs.path.join(gpa, &.{ base, "project" });
         errdefer gpa.free(project);
         const xdg = try std.fs.path.join(gpa, &.{ base, "xdg" });
@@ -79,7 +79,6 @@ pub const Workspace = struct {
 
         return .{
             .tmp = tmp,
-            .base = base,
             .project = project,
             .xdg = xdg,
             .elsewhere = elsewhere,
@@ -88,7 +87,6 @@ pub const Workspace = struct {
     }
 
     pub fn deinit(self: *Workspace, gpa: std.mem.Allocator) void {
-        gpa.free(self.base);
         gpa.free(self.project);
         gpa.free(self.xdg);
         gpa.free(self.elsewhere);
