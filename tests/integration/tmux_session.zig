@@ -151,6 +151,83 @@ test "session setup keeps global attach hook while refreshing size hook" {
     try std.testing.expect(std.mem.indexOf(u8, hooks.stdout, "#{client_height}") != null);
 }
 
+test "open status close: tmux workspace is built, reported, then removed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(a, "zask-test-{d}-workspace", .{std.c.getpid()});
+    const client = tmuxClient(a, io, session);
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", "/tmp", "sleep 300");
+    defer client.killSession() catch {};
+    try zask.tmux_setup.applySessionOptions(a, client, .{
+        .project = "demo",
+        .zask_path = "/bin/zask",
+        .config_path = "/tmp/config.json",
+    });
+    try client.splitWindow("dashboard", "/tmp", "sleep 300");
+    try client.newWindowAfter("dashboard", "api", "/tmp", try zask.zask_command.waitingPlaceholder(a, "api"));
+    try client.selectWindow("dashboard");
+
+    const windows = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "list-windows", "-t", session, "-F", "#{window_name}:#{window_active}" });
+    defer std.testing.allocator.free(windows.stdout);
+    defer std.testing.allocator.free(windows.stderr);
+    try std.testing.expect(std.mem.indexOf(u8, windows.stdout, "dashboard:1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, windows.stdout, "api:0") != null);
+
+    const dashboard_target = try std.fmt.allocPrint(a, "{s}:dashboard", .{session});
+    const panes = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "list-panes", "-t", dashboard_target, "-F", "#{pane_id}" });
+    defer std.testing.allocator.free(panes.stdout);
+    defer std.testing.allocator.free(panes.stderr);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, panes.stdout, "%"));
+
+    const dash_mode = (try client.showOption("@zask_dash_mode")) orelse return error.SessionOptionMissing;
+    try std.testing.expectEqualStrings("all", dash_mode);
+
+    const cfg_json = try std.fmt.allocPrint(a,
+        \\{{
+        \\  "project": {{ "name": "demo", "root": "/tmp", "session_name": "{s}" }},
+        \\  "groups": [{{ "name": "backend", "services": [{{ "name": "api", "dir": ".", "command": "sleep 300" }}] }}]
+        \\}}
+    , .{session});
+    const cfg = try zask.config.Config.parse(a, cfg_json, "/tmp");
+    const run_impl: zask.runner.Runner = .{ .gpa = a, .io = io };
+    const runtime_base = try std.fmt.allocPrint(a, "/tmp/zask-test-{d}-runtime", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteTree(io, runtime_base) catch {};
+    var environ = std.process.Environ.Map.init(a);
+    defer environ.deinit();
+    try environ.put("XDG_RUNTIME_DIR", runtime_base);
+    const runtime = zask.runtime.Runtime{
+        .gpa = a,
+        .io = io,
+        .environ = &environ,
+        .cfg = cfg,
+        .config_path = "/tmp/config.json",
+        .zask_path = "/bin/zask",
+        .runner_impl = run_impl,
+        .tmux_impl = client,
+        .docker_impl = .{ .gpa = a, .runner = run_impl, .dir = "/tmp", .file = "compose.yaml" },
+    };
+
+    var status_buffer: [512]u8 = undefined;
+    var status_writer: std.Io.Writer = .fixed(&status_buffer);
+    try runtime.status(&status_writer);
+    const status_out = status_writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, status_out, "demo Service Status") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_out, "api") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status_out, "backend") != null);
+
+    var close_buffer: [512]u8 = undefined;
+    var close_writer: std.Io.Writer = .fixed(&close_buffer);
+    try runtime.close(&close_writer);
+
+    try std.testing.expect(!client.hasSession());
+}
+
 fn tmuxClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) zask.tmux.Client {
     return .{
         .gpa = gpa,
