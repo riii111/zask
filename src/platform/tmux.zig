@@ -252,7 +252,8 @@ pub const Client = struct {
 /// the normal not-yet-opened state. Only treat it as unavailable when the socket
 /// exists but cannot be used (permission denied), which is a genuine fault.
 fn serverUnavailable(stderr: []const u8) bool {
-    return std.ascii.indexOfIgnoreCase(stderr, "permission denied") != null;
+    return std.ascii.indexOfIgnoreCase(stderr, "permission denied") != null or
+        std.ascii.indexOfIgnoreCase(stderr, "operation not permitted") != null;
 }
 
 pub const WindowSize = struct {
@@ -343,6 +344,7 @@ test "observeSession distinguishes active missing and unavailable" {
         .{ .term = .{ .exited = 1 }, .stderr = "can't find session: demo", .expected = .missing },
         .{ .term = .{ .exited = 1 }, .stderr = "no server running on /tmp/tmux-501/default", .expected = .missing },
         .{ .term = .{ .exited = 1 }, .stderr = "error connecting to /tmp/tmux-501/default (Permission denied)", .expected = .unavailable },
+        .{ .term = .{ .exited = 1 }, .stderr = "error connecting to /tmp/tmux-501/default (Operation not permitted)", .expected = .unavailable },
         .{ .term = null, .spawn_error = error.FileNotFound, .expected = .unavailable },
     };
 
