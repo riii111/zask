@@ -232,6 +232,7 @@ pub const Config = struct {
 pub fn loadPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []const u8) !Config {
     const bytes = readFile(gpa, io, path) catch |err| switch (err) {
         error.FileNotFound => return error.ConfigNotFound,
+        error.StreamTooLong => return error.ConfigTooLarge,
         else => return err,
     };
     return Config.parse(gpa, bytes, home);
