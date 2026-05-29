@@ -17,7 +17,7 @@ pub const Client = struct {
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
         if (result.term == .exited and result.term.exited == 0) return .active;
-        if (result.term == .exited) return .missing;
+        if (result.term == .exited) return if (serverUnavailable(result.stderr)) .unavailable else .missing;
         return .unavailable;
     }
 
@@ -78,7 +78,7 @@ pub const Client = struct {
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
         if (result.term == .exited and result.term.exited == 0) return .present;
-        if (result.term == .exited) return .missing;
+        if (result.term == .exited) return if (serverUnavailable(result.stderr)) .unavailable else .missing;
         return .unavailable;
     }
 
@@ -248,6 +248,14 @@ pub const Client = struct {
     }
 };
 
+/// A non-zero tmux exit is "missing" only when the server answered. When stderr
+/// shows the server itself is unreachable, the state is unknown, not absent.
+fn serverUnavailable(stderr: []const u8) bool {
+    return std.mem.indexOf(u8, stderr, "no server running") != null or
+        std.mem.indexOf(u8, stderr, "error connecting") != null or
+        std.mem.indexOf(u8, stderr, "failed to connect") != null;
+}
+
 pub const WindowSize = struct {
     id: []const u8,
     width: u16,
@@ -328,18 +336,20 @@ fn testClient(recorder: *runner.Recorder) Client {
 test "observeSession distinguishes active missing and unavailable" {
     const cases = [_]struct {
         term: ?std.process.Child.Term,
-        spawn_error: ?anyerror,
+        stderr: []const u8 = "",
+        spawn_error: ?anyerror = null,
         expected: observations.SessionObservation,
     }{
-        .{ .term = .{ .exited = 0 }, .spawn_error = null, .expected = .active },
-        .{ .term = .{ .exited = 1 }, .spawn_error = null, .expected = .missing },
+        .{ .term = .{ .exited = 0 }, .expected = .active },
+        .{ .term = .{ .exited = 1 }, .stderr = "can't find session: demo", .expected = .missing },
+        .{ .term = .{ .exited = 1 }, .stderr = "no server running on /tmp/tmux-501/default", .expected = .unavailable },
         .{ .term = null, .spawn_error = error.FileNotFound, .expected = .unavailable },
     };
 
     for (cases) |case| {
         var recorder = runner.Recorder.init(std.testing.allocator);
         defer recorder.deinit();
-        if (case.spawn_error) |err| try recorder.enqueueError(err) else try recorder.enqueue("", "", case.term.?);
+        if (case.spawn_error) |err| try recorder.enqueueError(err) else try recorder.enqueue("", case.stderr, case.term.?);
         const client = testClient(&recorder);
 
         try std.testing.expectEqual(case.expected, client.observeSession());
