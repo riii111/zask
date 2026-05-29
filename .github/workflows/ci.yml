@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quick:
+    name: fmt and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.16.0
+      - run: zig fmt --check .
+      - run: zig build test
+
+  e2e:
+    name: subprocess E2E
+    runs-on: ubuntu-latest
+    needs: quick
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.16.0
+      - run: zig build test-e2e
+
+  tmux:
+    name: tmux integration
+    runs-on: ubuntu-latest
+    needs: quick
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.16.0
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y tmux
+      - run: zig build test-tmux
