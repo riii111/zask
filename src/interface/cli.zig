@@ -129,7 +129,17 @@ pub fn run(init: std.process.Init) !void {
             try stdout.flush();
             std.process.exit(2);
         },
+        error.ConfigTooLarge => {
+            try stdout.writeAll("Error: config file too large\n");
+            try stdout.flush();
+            std.process.exit(2);
+        },
         error.SessionNotRunning, error.TmuxUnavailable => {
+            try stdout.flush();
+            std.process.exit(1);
+        },
+        error.LockBusy => {
+            try stdout.writeAll("Another zask command is already running\n");
             try stdout.flush();
             std.process.exit(1);
         },

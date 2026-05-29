@@ -79,8 +79,8 @@ pub const Lifecycle = struct {
 
     pub fn restartTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
         if (std.mem.eql(u8, target, "docker")) {
-            try self.stopDocker(writer);
             try self.ensureSessionActive(writer);
+            try self.stopDocker(writer);
             try self.ensureDockerStarted(writer);
             return waits.ensureDockerReady(self, writer);
         }
@@ -164,7 +164,10 @@ pub const Lifecycle = struct {
             },
             .send_start => {},
             .window_not_ready => return error.WindowNotReady,
-            .tmux_unavailable => return error.TmuxUnavailable,
+            .tmux_unavailable => {
+                try writeProgress(writer, "Warning: tmux unavailable for {s}\n", .{service});
+                return error.TmuxUnavailable;
+            },
         }
         const service_dir = try shell.quote(self.gpa, try self.cfg.serviceDir(self.gpa, value));
         const start_command = try config.Config.serviceStartCommand(self.gpa, value);
@@ -183,7 +186,10 @@ pub const Lifecycle = struct {
                 try writeProgress(writer, "  {s} ... already stopped\n", .{service});
                 return;
             },
-            .tmux_unavailable => return error.TmuxUnavailable,
+            .tmux_unavailable => {
+                try writeProgress(writer, "Warning: tmux unavailable for {s}\n", .{service});
+                return error.TmuxUnavailable;
+            },
         }
         try self.tmux.sendKeys(service, &.{"C-c"});
         try waits.waitForStopped(self, service, writer);
@@ -675,6 +681,54 @@ test "start reports tmux unavailable distinctly from missing session" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "tmux unavailable") != null);
 }
 
+test "service start surfaces diagnostic when pane observation becomes unavailable" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|123|node\n", "", .{ .exited = 0 });
+    try recorder.enqueueError(error.FileNotFound);
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.TmuxUnavailable, lifecycle.startTarget("api", &writer));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: tmux unavailable for api") != null);
+}
+
+test "docker restart reports tmux unavailable without stopping compose" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"compose": "compose.yaml"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "error connecting to /tmp/tmux-501/default (Permission denied)", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.TmuxUnavailable, lifecycle.restartTarget("docker", &writer));
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "down") == null);
+}
+
 test "stop and restart report tmux unavailable distinctly from missing session" {
     const json =
         \\{
@@ -831,7 +885,7 @@ test "docker start disables compose menu and waits when started" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }
 
-test "docker restart stops compose before reporting missing session" {
+test "docker restart checks session before stopping compose" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -852,9 +906,7 @@ test "docker restart stops compose before reporting missing session" {
 
     try std.testing.expectError(error.SessionNotRunning, lifecycle.restartTarget("docker", &writer));
 
-    const down = proc_runner.findCommandContaining(&recorder, "down") orelse return error.CommandNotFound;
-    try proc_runner.expectCommandArg(down, 0, "docker");
-    try proc_runner.expectCommandArg(down, 4, "down");
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "down") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Session not running") != null);
 }
 
