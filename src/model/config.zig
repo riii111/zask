@@ -10,7 +10,10 @@ pub const Config = struct {
     home: []const u8,
 
     pub fn parse(gpa: std.mem.Allocator, json: []const u8, home: []const u8) !Config {
-        const value = parseJsonBytes(gpa, json) catch return error.InvalidConfigSyntax;
+        const value = parseJsonBytes(gpa, json) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return error.InvalidConfigSyntax,
+        };
         return .{
             .value = try normalizeConfig(gpa, value),
             .home = home,
