@@ -120,10 +120,19 @@ pub const Lifecycle = struct {
     }
 
     fn ensureSessionActive(self: Lifecycle, writer: *std.Io.Writer) !void {
-        if (self.tmux.observeSession() == .active) return;
-        try writer.writeAll("Session not running. Run 'open' first.\n");
-        try writer.flush();
-        return error.SessionNotRunning;
+        switch (self.tmux.observeSession()) {
+            .active => return,
+            .missing => {
+                try writer.writeAll("Session not running. Run 'open' first.\n");
+                try writer.flush();
+                return error.SessionNotRunning;
+            },
+            .unavailable => {
+                try writer.writeAll("tmux unavailable\n");
+                try writer.flush();
+                return error.TmuxUnavailable;
+            },
+        }
     }
 
     fn ensureServiceRunning(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
@@ -634,6 +643,28 @@ test "docker stop reaches compose down when tmux send fails" {
     const down = proc_runner.findCommandContaining(&recorder, "down") orelse return error.CommandNotFound;
     try proc_runner.expectCommandArg(down, 0, "docker");
     try proc_runner.expectCommandArg(down, 4, "down");
+}
+
+test "start reports tmux unavailable distinctly from missing session" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueueError(error.FileNotFound);
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.TmuxUnavailable, lifecycle.startTarget("api", &writer));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "tmux unavailable") != null);
 }
 
 test "docker stop warns when compose down fails" {
