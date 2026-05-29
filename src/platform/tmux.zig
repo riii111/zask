@@ -188,7 +188,7 @@ pub const Client = struct {
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
         if (result.term != .exited) return error.TmuxUnavailable;
-        if (result.term.exited != 0) return error.WindowMissing;
+        if (result.term.exited != 0) return if (serverUnavailable(result.stderr)) error.TmuxUnavailable else error.WindowMissing;
 
         var lines = std.mem.splitScalar(u8, result.stdout, '\n');
         const line = lines.next() orelse "";
@@ -248,12 +248,11 @@ pub const Client = struct {
     }
 };
 
-/// A non-zero tmux exit is "missing" only when the server answered. When stderr
-/// shows the server itself is unreachable, the state is unknown, not absent.
+/// A non-zero tmux exit means "missing" by default: no server / no session is
+/// the normal not-yet-opened state. Only treat it as unavailable when the socket
+/// exists but cannot be used (permission denied), which is a genuine fault.
 fn serverUnavailable(stderr: []const u8) bool {
-    return std.mem.indexOf(u8, stderr, "no server running") != null or
-        std.mem.indexOf(u8, stderr, "error connecting") != null or
-        std.mem.indexOf(u8, stderr, "failed to connect") != null;
+    return std.ascii.indexOfIgnoreCase(stderr, "permission denied") != null;
 }
 
 pub const WindowSize = struct {
@@ -342,7 +341,8 @@ test "observeSession distinguishes active missing and unavailable" {
     }{
         .{ .term = .{ .exited = 0 }, .expected = .active },
         .{ .term = .{ .exited = 1 }, .stderr = "can't find session: demo", .expected = .missing },
-        .{ .term = .{ .exited = 1 }, .stderr = "no server running on /tmp/tmux-501/default", .expected = .unavailable },
+        .{ .term = .{ .exited = 1 }, .stderr = "no server running on /tmp/tmux-501/default", .expected = .missing },
+        .{ .term = .{ .exited = 1 }, .stderr = "error connecting to /tmp/tmux-501/default (Permission denied)", .expected = .unavailable },
         .{ .term = null, .spawn_error = error.FileNotFound, .expected = .unavailable },
     };
 
@@ -528,6 +528,18 @@ test "observePane returns window missing when pane info command fails" {
     try std.testing.expectEqualStrings("", observation.exit_code);
     try std.testing.expectEqualStrings("", observation.pid);
     try std.testing.expectEqualStrings("", observation.command);
+}
+
+test "observePane returns tmux unavailable when pane info hits permission denied" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("", "error connecting to /tmp/tmux-501/default (Permission denied)", .{ .exited = 1 });
+    const client = testClient(&recorder);
+
+    const observation = client.observePane("api");
+    defer observation.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(observations.PaneState.tmux_unavailable, observation.state);
 }
 
 test "observePane returns tmux unavailable when pane info cannot be captured" {
