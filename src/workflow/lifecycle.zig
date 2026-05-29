@@ -471,6 +471,28 @@ test "wait helpers report timeouts" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api ... warning: may not have stopped") != null);
 }
 
+test "docker readiness times out when compose never reports running" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"compose": "compose.yaml", "wait_timeout_seconds": 2},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.DockerNotReady, waits.ensureDockerReady(lifecycle, &writer));
+    try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items.len);
+}
+
 test "window readiness distinguishes missing windows from unavailable tmux" {
     const json =
         \\{
