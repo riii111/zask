@@ -1,4 +1,4 @@
 test {
     _ = @import("init_list.zig");
-    _ = @import("degraded.zig");
+    _ = @import("config_failure.zig");
 }
