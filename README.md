@@ -145,7 +145,7 @@ With Nix:
 ```bash
 direnv allow
 zig build test
-zig build test-tmux
+zig build test-all
 ```
 
 Without direnv:
