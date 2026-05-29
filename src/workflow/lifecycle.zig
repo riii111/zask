@@ -687,7 +687,7 @@ test "stop and restart report tmux unavailable distinctly from missing session" 
         defer arena.deinit();
         var recorder = proc_runner.Recorder.init(arena.allocator());
         defer recorder.deinit();
-        try recorder.enqueue("", "no server running on /tmp/tmux-501/default", .{ .exited = 1 });
+        try recorder.enqueue("", "error connecting to /tmp/tmux-501/default (Permission denied)", .{ .exited = 1 });
         const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
         const cfg = try parseTestConfig(arena.allocator(), json);
         const lifecycle = testLifecycle(arena.allocator(), run, cfg);

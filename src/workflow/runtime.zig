@@ -140,16 +140,24 @@ pub const Runtime = struct {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const scratch = arena.allocator();
-        if (try self.sessionExists()) {
-            try writer.writeAll("Workspace already open. Starting resources...\n");
-            try writer.flush();
-            try self.installSessionOptions(scratch);
-            try tmux_setup.bindControlKeys(scratch, self.tmux());
-            try self.lifecycle().startAll(profile, writer);
-            try writer.writeAll("Attaching to workspace...\n");
-            try writer.flush();
-            try self.attachExisting();
-            return;
+        switch (self.tmux().observeSession()) {
+            .active => {
+                try writer.writeAll("Workspace already open. Starting resources...\n");
+                try writer.flush();
+                try self.installSessionOptions(scratch);
+                try tmux_setup.bindControlKeys(scratch, self.tmux());
+                try self.lifecycle().startAll(profile, writer);
+                try writer.writeAll("Attaching to workspace...\n");
+                try writer.flush();
+                try self.attachExisting();
+                return;
+            },
+            .missing => {},
+            .unavailable => {
+                try writer.writeAll("tmux unavailable\n");
+                try writer.flush();
+                return error.TmuxUnavailable;
+            },
         }
         try writer.writeAll("Opening workspace...\n");
         try writer.flush();
@@ -174,9 +182,17 @@ pub const Runtime = struct {
     }
 
     fn closeUnlocked(self: Runtime, writer: *std.Io.Writer) !void {
-        if (!try self.sessionExists()) {
-            try writer.writeAll("Session not running\n");
-            return;
+        switch (self.tmux().observeSession()) {
+            .active => {},
+            .missing => {
+                try writer.writeAll("Session not running\n");
+                return;
+            },
+            .unavailable => {
+                try writer.writeAll("tmux unavailable\n");
+                try writer.flush();
+                return error.TmuxUnavailable;
+            },
         }
         try self.lifecycle().stopAll(writer);
         self.runner().sleep(close_kill_settle);
@@ -448,7 +464,7 @@ test "runtime.logs: reports tmux unavailable distinctly from missing session" {
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
-    try recorder.enqueue("", "no server running on /tmp/tmux-501/default", .{ .exited = 1 });
+    try recorder.enqueue("", "error connecting to /tmp/tmux-501/default (Permission denied)", .{ .exited = 1 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     const runtime = testRuntime(arena.allocator(), run, cfg);
