@@ -133,6 +133,11 @@ pub fn run(init: std.process.Init) !void {
             try stdout.flush();
             std.process.exit(1);
         },
+        error.OutputTooLarge => {
+            try stdout.writeAll("Error: command output too large\n");
+            try stdout.flush();
+            std.process.exit(1);
+        },
         else => return err,
     };
     try stdout.flush();

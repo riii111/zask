@@ -20,19 +20,22 @@ pub const Runner = struct {
             if (options.check) try checkTerm(term);
             return .{ .term = term };
         }
-        const result = if (options.cwd) |cwd|
-            try std.process.run(self.gpa, self.io, .{
+        const result = (if (options.cwd) |cwd|
+            std.process.run(self.gpa, self.io, .{
                 .argv = argv,
                 .cwd = .{ .path = cwd },
                 .stdout_limit = .limited(captured_output_limit),
                 .stderr_limit = .limited(captured_output_limit),
             })
         else
-            try std.process.run(self.gpa, self.io, .{
+            std.process.run(self.gpa, self.io, .{
                 .argv = argv,
                 .stdout_limit = .limited(captured_output_limit),
                 .stderr_limit = .limited(captured_output_limit),
-            });
+            })) catch |err| switch (err) {
+            error.StreamTooLong => return error.OutputTooLarge,
+            else => return err,
+        };
         errdefer self.gpa.free(result.stdout);
         errdefer self.gpa.free(result.stderr);
         if (options.check) try checkTerm(result.term);
@@ -53,7 +56,10 @@ pub const Runner = struct {
     }
 
     fn recordedRun(self: Runner, recorder: *Recorder, argv: []const []const u8, options: RunOptions) !RunOutput {
-        const result = try recorder.record(argv, options.cwd, options.interactive);
+        const result = recorder.record(argv, options.cwd, options.interactive) catch |err| switch (err) {
+            error.StreamTooLong => return error.OutputTooLarge,
+            else => return err,
+        };
         errdefer self.gpa.free(result.stdout);
         errdefer self.gpa.free(result.stderr);
         if (options.check) try checkTerm(result.term);
@@ -334,6 +340,15 @@ test "recorder returns queued responses before queued errors" {
     try std.testing.expectError(error.FileNotFound, run.run(&.{"two"}, .{}));
     try std.testing.expectEqual(@as(usize, 2), recorder.commands.items.len);
     try expectNoRemainingResponses(&recorder);
+}
+
+test "run maps stream-too-long to output-too-large" {
+    var recorder = Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueueError(error.StreamTooLong);
+    const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+
+    try std.testing.expectError(error.OutputTooLarge, run.run(&.{"docker"}, .{}));
 }
 
 test "checked runner rejects non-zero exits" {
