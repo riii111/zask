@@ -37,7 +37,8 @@ pub const Runtime = struct {
             },
             .unavailable => {
                 try writer.writeAll("tmux unavailable\n");
-                return;
+                try writer.flush();
+                return error.TmuxUnavailable;
             },
         }
         try writer.print("{s} Service Status\n", .{try self.cfg.projectName()});
@@ -407,7 +408,7 @@ test "runtime.status: distinguishes tmux unavailable from session missing" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.status(&writer);
+    try std.testing.expectError(error.TmuxUnavailable, runtime.status(&writer));
 
     const out = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "tmux unavailable") != null);
@@ -433,6 +434,28 @@ test "runtime.attach: reports tmux unavailable distinctly from missing session" 
     var writer: std.Io.Writer = .fixed(&buffer);
 
     try std.testing.expectError(error.TmuxUnavailable, runtime.attach(&writer));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "tmux unavailable") != null);
+}
+
+test "runtime.logs: reports tmux unavailable distinctly from missing session" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "no server running on /tmp/tmux-501/default", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.TmuxUnavailable, runtime.logs("api", &writer));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "tmux unavailable") != null);
 }
 
