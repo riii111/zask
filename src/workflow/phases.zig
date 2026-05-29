@@ -169,6 +169,29 @@ test "command phase warn continues and abort fails startup" {
     try runner_mod.expectNoRemainingResponses(&recorder);
 }
 
+test "service phase propagates window-not-ready as startup failure" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}],
+        \\  "startup_order": [{"group":"backend"}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = runner_mod.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    recorder.term = .{ .exited = 1 };
+    const run = runner_mod.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.WindowNotReady, runServicePhase(lifecycle, cfg.phases()[0], "all", &writer));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "window for api not ready") != null);
+}
+
 test "phase cwd rejects path traversal" {
     const json =
         \\{
