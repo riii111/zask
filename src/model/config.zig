@@ -10,7 +10,7 @@ pub const Config = struct {
     home: []const u8,
 
     pub fn parse(gpa: std.mem.Allocator, json: []const u8, home: []const u8) !Config {
-        const value = try parseJsonBytes(gpa, json);
+        const value = parseJsonBytes(gpa, json) catch return error.InvalidConfigSyntax;
         return .{
             .value = try normalizeConfig(gpa, value),
             .home = home,
@@ -227,7 +227,10 @@ pub const Config = struct {
 };
 
 pub fn loadPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []const u8) !Config {
-    const bytes = try readFile(gpa, io, path);
+    const bytes = readFile(gpa, io, path) catch |err| switch (err) {
+        error.FileNotFound => return error.ConfigNotFound,
+        else => return err,
+    };
     return Config.parse(gpa, bytes, home);
 }
 

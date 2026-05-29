@@ -325,6 +325,27 @@ fn testClient(recorder: *runner.Recorder) Client {
     };
 }
 
+test "observeSession distinguishes active missing and unavailable" {
+    const cases = [_]struct {
+        term: ?std.process.Child.Term,
+        spawn_error: ?anyerror,
+        expected: observations.SessionObservation,
+    }{
+        .{ .term = .{ .exited = 0 }, .spawn_error = null, .expected = .active },
+        .{ .term = .{ .exited = 1 }, .spawn_error = null, .expected = .missing },
+        .{ .term = null, .spawn_error = error.FileNotFound, .expected = .unavailable },
+    };
+
+    for (cases) |case| {
+        var recorder = runner.Recorder.init(std.testing.allocator);
+        defer recorder.deinit();
+        if (case.spawn_error) |err| try recorder.enqueueError(err) else try recorder.enqueue("", "", case.term.?);
+        const client = testClient(&recorder);
+
+        try std.testing.expectEqual(case.expected, client.observeSession());
+    }
+}
+
 test "newSession records tmux session argv" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();

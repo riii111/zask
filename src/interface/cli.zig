@@ -114,6 +114,21 @@ pub fn run(init: std.process.Init) !void {
             try stdout.flush();
             std.process.exit(2);
         },
+        error.ConfigNotFound => {
+            try stdout.writeAll("Error: config not found\n");
+            try stdout.flush();
+            std.process.exit(2);
+        },
+        error.InvalidConfigSyntax => {
+            try stdout.writeAll("Error: config is not valid JSON\n");
+            try stdout.flush();
+            std.process.exit(2);
+        },
+        error.InvalidConfig => {
+            try stdout.writeAll("Error: invalid config\n");
+            try stdout.flush();
+            std.process.exit(2);
+        },
         error.SessionNotRunning => {
             try stdout.flush();
             std.process.exit(1);

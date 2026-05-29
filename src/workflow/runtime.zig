@@ -314,6 +314,57 @@ test "runtime.status: maps observations to text" {
     try std.testing.expectEqualStrings("unknown", composeStatusText(.unavailable));
 }
 
+test "runtime.status: reports session not running when missing" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.status(&writer);
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "is not running") != null);
+}
+
+test "runtime.status: renders dead pane and unavailable docker as degraded text" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"compose":"compose.yaml"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "no daemon", .{ .exited = 1 });
+    try recorder.enqueue("1|130|12345|node\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.status(&writer);
+
+    const out = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "docker-compose: unknown") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "api stopped [backend]") != null);
+}
+
 test "runtime.close: kills session after service stop wait failure" {
     const json =
         \\{
