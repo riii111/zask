@@ -630,3 +630,17 @@ test "paneInfo defaults missing fields" {
     try std.testing.expectEqualStrings("0", info.pid);
     try std.testing.expectEqualStrings("", info.command);
 }
+
+test "paneInfo ignores extra trailing fields" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("0|0|12345|node|unexpected\n", "", .{ .exited = 0 });
+    const client = testClient(&recorder);
+
+    const info = try client.paneInfo("api");
+    defer info.deinit(std.testing.allocator);
+
+    try std.testing.expect(!info.dead);
+    try std.testing.expectEqualStrings("12345", info.pid);
+    try std.testing.expectEqualStrings("node", info.command);
+}
