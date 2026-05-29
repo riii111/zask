@@ -439,6 +439,82 @@ test "runtime.attach: reports missing session" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Run 'open' first") != null);
 }
 
+test "runtime.attach: attaches session when outside tmux" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.attach(&writer);
+
+    try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
+    try proc_runner.expectCommandContaining(&recorder, "set-hook");
+    const attach_cmd = proc_runner.findCommandContaining(&recorder, "attach-session") orelse return error.MissingAttachSession;
+    try std.testing.expect(attach_cmd.interactive);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "switch-client") == null);
+}
+
+test "runtime.logs: switches client then selects window inside tmux" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    try environ.put("TMUX", "/tmp/tmux");
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    var runtime = testRuntime(arena.allocator(), run, cfg);
+    runtime.environ = &environ;
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.logs("api", &writer);
+
+    try proc_runner.expectCommandOrder(&recorder, "switch-client", "select-window");
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "attach-session") == null);
+}
+
+test "runtime.logs: selects window then attaches outside tmux" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.logs("api", &writer);
+
+    try proc_runner.expectCommandOrder(&recorder, "select-window", "attach-session");
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "switch-client") == null);
+}
+
 test "runtime.openSession: creates dashboard service and docker windows" {
     const json =
         \\{
@@ -876,6 +952,37 @@ test "runtime.re: rejects lock busy delegation with multiple attached clients" {
     try std.testing.expectEqual(@as(usize, 2), recorder.commands.items.len);
     try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
     try proc_runner.expectCommandArg(recorder.commands.items[1], 1, "list-clients");
+}
+
+test "runtime.re: detaches client exec inside tmux" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    try environ.put("TMUX", "/tmp/tmux");
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    var runtime = testRuntime(arena.allocator(), run, cfg);
+    runtime.environ = &environ;
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.re(&writer);
+
+    try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
+    const cmd = recorder.commands.items[0];
+    try proc_runner.expectCommandArg(cmd, 1, "detach-client");
+    try proc_runner.expectCommandArg(cmd, 2, "-E");
+    try proc_runner.expectCommandArgContains(cmd, 3, " re");
+    try proc_runner.expectCommandArgContains(cmd, 3, "--config");
 }
 
 fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.Config) Runtime {
