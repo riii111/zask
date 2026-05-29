@@ -55,6 +55,20 @@ pub const Runner = struct {
         std.Io.sleep(self.io, duration, .awake) catch {};
     }
 
+    pub fn currentPid(self: Runner) std.posix.pid_t {
+        if (self.recorder) |recorder| return recorder.pid;
+        return std.c.getpid();
+    }
+
+    pub fn processAlive(self: Runner, pid: std.posix.pid_t) bool {
+        if (self.recorder) |recorder| return recorder.process_alive;
+        std.posix.kill(pid, @enumFromInt(0)) catch |err| switch (err) {
+            error.ProcessNotFound => return false,
+            else => return true,
+        };
+        return true;
+    }
+
     fn recordedRun(self: Runner, recorder: *Recorder, argv: []const []const u8, options: RunOptions) !RunOutput {
         const result = recorder.record(argv, options.cwd, options.interactive) catch |err| switch (err) {
             error.StreamTooLong => return error.OutputTooLarge,
@@ -115,6 +129,8 @@ pub const Recorder = struct {
     stdout: []const u8 = "",
     stderr: []const u8 = "",
     term: std.process.Child.Term = .{ .exited = 0 },
+    pid: std.posix.pid_t = 1,
+    process_alive: bool = false,
 
     pub fn init(gpa: std.mem.Allocator) Recorder {
         return .{ .gpa = gpa, .commands = .empty, .responses = .empty, .errors = .empty, .sleeps = .empty };

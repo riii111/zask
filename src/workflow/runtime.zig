@@ -854,6 +854,7 @@ test "runtime.open: attaches when lock is busy" {
     try environ.put("TMUX", "/tmp/tmux");
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
+    recorder.process_alive = true;
     try recorder.enqueue("", "", .{ .exited = 0 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
@@ -897,6 +898,7 @@ test "runtime.open: preserves lock busy before session exists" {
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
     recorder.term = .{ .exited = 1 };
+    recorder.process_alive = true;
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     var runtime = testRuntime(arena.allocator(), run, cfg);
@@ -938,6 +940,7 @@ test "runtime.re: delegates to single attached client when lock is busy" {
     try environ.put("XDG_RUNTIME_DIR", base);
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
+    recorder.process_alive = true;
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("/dev/ttys001\n", "", .{ .exited = 0 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
@@ -985,6 +988,7 @@ test "runtime.re: rejects lock busy delegation with multiple attached clients" {
     try environ.put("XDG_RUNTIME_DIR", base);
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
+    recorder.process_alive = true;
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("/dev/ttys001\n/dev/ttys002\n", "", .{ .exited = 0 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
