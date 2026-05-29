@@ -26,11 +26,20 @@ pub const Runtime = struct {
     runner_impl: proc_runner.Runner,
     tmux_impl: tmux_client.Client,
     docker_impl: docker_client.Compose,
+    lock_probe: lock.Probe = .system,
 
     pub fn status(self: Runtime, writer: *std.Io.Writer) !void {
-        if (!try self.sessionExists()) {
-            try writer.print("Session '{s}' is not running\n", .{try self.cfg.sessionName()});
-            return;
+        switch (self.tmux().observeSession()) {
+            .active => {},
+            .missing => {
+                try writer.print("Session '{s}' is not running\n", .{try self.cfg.sessionName()});
+                return;
+            },
+            .unavailable => {
+                try writer.writeAll("tmux unavailable\n");
+                try writer.flush();
+                return error.TmuxUnavailable;
+            },
         }
         try writer.print("{s} Service Status\n", .{try self.cfg.projectName()});
         if (self.cfg.dockerEnabled()) {
@@ -47,20 +56,36 @@ pub const Runtime = struct {
     }
 
     pub fn attach(self: Runtime, writer: *std.Io.Writer) !void {
-        if (!try self.sessionExists()) {
-            try writer.writeAll("Session not running. Run 'open' first.\n");
-            try writer.flush();
-            return error.SessionNotRunning;
+        switch (self.tmux().observeSession()) {
+            .active => {},
+            .missing => {
+                try writer.writeAll("Session not running. Run 'open' first.\n");
+                try writer.flush();
+                return error.SessionNotRunning;
+            },
+            .unavailable => {
+                try writer.writeAll("tmux unavailable\n");
+                try writer.flush();
+                return error.TmuxUnavailable;
+            },
         }
         try self.attachExistingWithRefreshedHooks();
     }
 
     pub fn logs(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
         _ = try self.cfg.findService(service);
-        if (!try self.sessionExists()) {
-            try writer.writeAll("Session not running\n");
-            try writer.flush();
-            return error.SessionNotRunning;
+        switch (self.tmux().observeSession()) {
+            .active => {},
+            .missing => {
+                try writer.writeAll("Session not running\n");
+                try writer.flush();
+                return error.SessionNotRunning;
+            },
+            .unavailable => {
+                try writer.writeAll("tmux unavailable\n");
+                try writer.flush();
+                return error.TmuxUnavailable;
+            },
         }
         const tx = self.tmux();
         if (try self.inTmux()) {
@@ -101,9 +126,14 @@ pub const Runtime = struct {
 
     pub fn open(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
         const guard = self.acquireLock() catch |err| switch (err) {
-            error.LockBusy => {
-                if (try self.sessionExists()) return self.attachExistingWithRefreshedHooks();
-                return err;
+            error.LockBusy => switch (self.tmux().observeSession()) {
+                .active => return self.attachExistingWithRefreshedHooks(),
+                .missing => return err,
+                .unavailable => {
+                    try writer.writeAll("tmux unavailable\n");
+                    try writer.flush();
+                    return error.TmuxUnavailable;
+                },
             },
             else => return err,
         };
@@ -115,16 +145,24 @@ pub const Runtime = struct {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const scratch = arena.allocator();
-        if (try self.sessionExists()) {
-            try writer.writeAll("Workspace already open. Starting resources...\n");
-            try writer.flush();
-            try self.installSessionOptions(scratch);
-            try tmux_setup.bindControlKeys(scratch, self.tmux());
-            try self.lifecycle().startAll(profile, writer);
-            try writer.writeAll("Attaching to workspace...\n");
-            try writer.flush();
-            try self.attachExisting();
-            return;
+        switch (self.tmux().observeSession()) {
+            .active => {
+                try writer.writeAll("Workspace already open. Starting resources...\n");
+                try writer.flush();
+                try self.installSessionOptions(scratch);
+                try tmux_setup.bindControlKeys(scratch, self.tmux());
+                try self.lifecycle().startAll(profile, writer);
+                try writer.writeAll("Attaching to workspace...\n");
+                try writer.flush();
+                try self.attachExisting();
+                return;
+            },
+            .missing => {},
+            .unavailable => {
+                try writer.writeAll("tmux unavailable\n");
+                try writer.flush();
+                return error.TmuxUnavailable;
+            },
         }
         try writer.writeAll("Opening workspace...\n");
         try writer.flush();
@@ -143,15 +181,33 @@ pub const Runtime = struct {
     }
 
     pub fn close(self: Runtime, writer: *std.Io.Writer) !void {
-        const guard = try self.acquireLock();
+        const guard = self.acquireLock() catch |err| switch (err) {
+            error.LockBusy => switch (self.tmux().observeSession()) {
+                .unavailable => {
+                    try writer.writeAll("tmux unavailable\n");
+                    try writer.flush();
+                    return error.TmuxUnavailable;
+                },
+                else => return err,
+            },
+            else => return err,
+        };
         defer guard.release();
         try self.closeUnlocked(writer);
     }
 
     fn closeUnlocked(self: Runtime, writer: *std.Io.Writer) !void {
-        if (!try self.sessionExists()) {
-            try writer.writeAll("Session not running\n");
-            return;
+        switch (self.tmux().observeSession()) {
+            .active => {},
+            .missing => {
+                try writer.writeAll("Session not running\n");
+                return;
+            },
+            .unavailable => {
+                try writer.writeAll("tmux unavailable\n");
+                try writer.flush();
+                return error.TmuxUnavailable;
+            },
         }
         try self.lifecycle().stopAll(writer);
         self.runner().sleep(close_kill_settle);
@@ -168,9 +224,14 @@ pub const Runtime = struct {
             return;
         }
         const guard = self.acquireLock() catch |err| switch (err) {
-            error.LockBusy => {
-                if (try self.sessionExists()) return self.detachSingleClientForRe();
-                return err;
+            error.LockBusy => switch (self.tmux().observeSession()) {
+                .active => return self.detachSingleClientForRe(),
+                .missing => return err,
+                .unavailable => {
+                    try writer.writeAll("tmux unavailable\n");
+                    try writer.flush();
+                    return error.TmuxUnavailable;
+                },
             },
             else => return err,
         };
@@ -214,7 +275,7 @@ pub const Runtime = struct {
     }
 
     fn acquireLock(self: Runtime) !lock.Lock {
-        return lock.Lock.acquire(self.gpa, self.runner(), try self.cfg.projectName(), try paths.runtimeBase(self.gpa, self.environ));
+        return lock.Lock.acquire(self.gpa, self.io, try self.cfg.projectName(), try paths.runtimeBase(self.gpa, self.environ), self.lock_probe);
     }
 
     fn openSessionWithDashboardWindow(self: Runtime, scratch: std.mem.Allocator) !void {
@@ -283,10 +344,6 @@ pub const Runtime = struct {
         try tx.detachTargetClientExec(clients[0].name, command);
     }
 
-    fn sessionExists(self: Runtime) !bool {
-        return self.tmux().hasSession();
-    }
-
     fn inTmux(self: Runtime) !bool {
         return env.exists(self.environ, "TMUX");
     }
@@ -312,6 +369,126 @@ test "runtime.status: maps observations to text" {
     try std.testing.expectEqualStrings("running", paneStatusText(.busy));
     try std.testing.expectEqualStrings("stopped", paneStatusText(.idle));
     try std.testing.expectEqualStrings("unknown", composeStatusText(.unavailable));
+}
+
+test "runtime.status: reports session not running when missing" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.status(&writer);
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "is not running") != null);
+}
+
+test "runtime.status: renders dead pane and unavailable docker as degraded text" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"compose":"compose.yaml"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "no daemon", .{ .exited = 1 });
+    try recorder.enqueue("1|130|12345|node\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.status(&writer);
+
+    const out = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "docker-compose: unknown") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "api stopped [backend]") != null);
+}
+
+test "runtime.status: distinguishes tmux unavailable from session missing" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueueError(error.FileNotFound);
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.TmuxUnavailable, runtime.status(&writer));
+
+    const out = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "tmux unavailable") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "is not running") == null);
+}
+
+test "runtime.attach: reports tmux unavailable distinctly from missing session" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueueError(error.FileNotFound);
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.TmuxUnavailable, runtime.attach(&writer));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "tmux unavailable") != null);
+}
+
+test "runtime.logs: reports tmux unavailable distinctly from missing session" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "error connecting to /tmp/tmux-501/default (Permission denied)", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.TmuxUnavailable, runtime.logs("api", &writer));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "tmux unavailable") != null);
 }
 
 test "runtime.close: kills session after service stop wait failure" {
@@ -807,6 +984,7 @@ test "runtime.open: attaches when lock is busy" {
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     var runtime = testRuntime(arena.allocator(), run, cfg);
+    runtime.lock_probe = .{ .fake = .{ .pid = std.c.getpid(), .alive = true } };
     runtime.io = io;
     runtime.environ = &environ;
     runtime.runner_impl = run;
@@ -849,6 +1027,7 @@ test "runtime.open: preserves lock busy before session exists" {
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     var runtime = testRuntime(arena.allocator(), run, cfg);
+    runtime.lock_probe = .{ .fake = .{ .pid = std.c.getpid(), .alive = true } };
     runtime.io = io;
     runtime.environ = &environ;
     runtime.runner_impl = run;
@@ -862,6 +1041,86 @@ test "runtime.open: preserves lock busy before session exists" {
     try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
     try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
     try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+}
+
+test "runtime.open: reports tmux unavailable when lock busy and tmux unreachable" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    const base = try std.fmt.allocPrint(arena.allocator(), "/private/tmp/zask-test-runtime-busy-unavail-{d}", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    const lock_dir = try std.fs.path.join(arena.allocator(), &.{ base, "zask", "demo.lock" });
+    _ = try std.Io.Dir.cwd().createDirPathStatus(io, lock_dir, @enumFromInt(0o700));
+    const pid_path = try std.fs.path.join(arena.allocator(), &.{ lock_dir, "pid" });
+    try paths.writeFileMode(io, pid_path, try std.fmt.allocPrint(arena.allocator(), "{d}", .{std.c.getpid()}), @enumFromInt(0o600));
+
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    try environ.put("XDG_RUNTIME_DIR", base);
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "error connecting to /tmp/tmux-501/default (Permission denied)", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    var runtime = testRuntime(arena.allocator(), run, cfg);
+    runtime.lock_probe = .{ .fake = .{ .pid = std.c.getpid(), .alive = true } };
+    runtime.io = io;
+    runtime.environ = &environ;
+    runtime.runner_impl = run;
+    runtime.tmux_impl.runner = run;
+    runtime.docker_impl.runner = run;
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.TmuxUnavailable, runtime.open("all", &writer));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "tmux unavailable") != null);
+}
+
+test "runtime.close: reports tmux unavailable when lock busy and tmux unreachable" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    const base = try std.fmt.allocPrint(arena.allocator(), "/private/tmp/zask-test-runtime-close-busy-{d}", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    const lock_dir = try std.fs.path.join(arena.allocator(), &.{ base, "zask", "demo.lock" });
+    _ = try std.Io.Dir.cwd().createDirPathStatus(io, lock_dir, @enumFromInt(0o700));
+    const pid_path = try std.fs.path.join(arena.allocator(), &.{ lock_dir, "pid" });
+    try paths.writeFileMode(io, pid_path, try std.fmt.allocPrint(arena.allocator(), "{d}", .{std.c.getpid()}), @enumFromInt(0o600));
+
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    try environ.put("XDG_RUNTIME_DIR", base);
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "error connecting to /tmp/tmux-501/default (Permission denied)", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    var runtime = testRuntime(arena.allocator(), run, cfg);
+    runtime.lock_probe = .{ .fake = .{ .pid = std.c.getpid(), .alive = true } };
+    runtime.io = io;
+    runtime.environ = &environ;
+    runtime.runner_impl = run;
+    runtime.tmux_impl.runner = run;
+    runtime.docker_impl.runner = run;
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.TmuxUnavailable, runtime.close(&writer));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "tmux unavailable") != null);
 }
 
 test "runtime.re: delegates to single attached client when lock is busy" {
@@ -892,6 +1151,7 @@ test "runtime.re: delegates to single attached client when lock is busy" {
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     var runtime = testRuntime(arena.allocator(), run, cfg);
+    runtime.lock_probe = .{ .fake = .{ .pid = std.c.getpid(), .alive = true } };
     runtime.io = io;
     runtime.environ = &environ;
     runtime.runner_impl = run;
@@ -939,6 +1199,7 @@ test "runtime.re: rejects lock busy delegation with multiple attached clients" {
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     var runtime = testRuntime(arena.allocator(), run, cfg);
+    runtime.lock_probe = .{ .fake = .{ .pid = std.c.getpid(), .alive = true } };
     runtime.io = io;
     runtime.environ = &environ;
     runtime.runner_impl = run;

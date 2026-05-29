@@ -72,7 +72,10 @@ pub fn projectConfigPath(gpa: std.mem.Allocator, environ: ?*const env.Map, proje
 
 fn absoluteConfigPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
     if (std.fs.path.isAbsolute(path)) return path;
-    return std.Io.Dir.cwd().realPathFileAlloc(io, path, gpa);
+    return std.Io.Dir.cwd().realPathFileAlloc(io, path, gpa) catch |err| switch (err) {
+        error.FileNotFound => return error.ConfigNotFound,
+        else => return err,
+    };
 }
 
 fn absoluteExePath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {

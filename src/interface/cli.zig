@@ -114,7 +114,37 @@ pub fn run(init: std.process.Init) !void {
             try stdout.flush();
             std.process.exit(2);
         },
-        error.SessionNotRunning => {
+        error.ConfigNotFound => {
+            try stdout.writeAll("Error: config not found\n");
+            try stdout.flush();
+            std.process.exit(2);
+        },
+        error.InvalidConfigSyntax => {
+            try stdout.writeAll("Error: config is not valid JSON\n");
+            try stdout.flush();
+            std.process.exit(2);
+        },
+        error.InvalidConfig => {
+            try stdout.writeAll("Error: invalid config\n");
+            try stdout.flush();
+            std.process.exit(2);
+        },
+        error.ConfigTooLarge => {
+            try stdout.writeAll("Error: config file too large\n");
+            try stdout.flush();
+            std.process.exit(2);
+        },
+        error.SessionNotRunning, error.TmuxUnavailable => {
+            try stdout.flush();
+            std.process.exit(1);
+        },
+        error.LockBusy => {
+            try stdout.writeAll("Another zask command is already running\n");
+            try stdout.flush();
+            std.process.exit(1);
+        },
+        error.OutputTooLarge => {
+            try stdout.writeAll("Error: command output too large\n");
             try stdout.flush();
             std.process.exit(1);
         },

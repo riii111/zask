@@ -17,7 +17,7 @@ pub const Client = struct {
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
         if (result.term == .exited and result.term.exited == 0) return .active;
-        if (result.term == .exited) return .missing;
+        if (result.term == .exited) return if (serverUnavailable(result.stderr)) .unavailable else .missing;
         return .unavailable;
     }
 
@@ -78,7 +78,7 @@ pub const Client = struct {
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
         if (result.term == .exited and result.term.exited == 0) return .present;
-        if (result.term == .exited) return .missing;
+        if (result.term == .exited) return if (serverUnavailable(result.stderr)) .unavailable else .missing;
         return .unavailable;
     }
 
@@ -188,7 +188,7 @@ pub const Client = struct {
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
         if (result.term != .exited) return error.TmuxUnavailable;
-        if (result.term.exited != 0) return error.WindowMissing;
+        if (result.term.exited != 0) return if (serverUnavailable(result.stderr)) error.TmuxUnavailable else error.WindowMissing;
 
         var lines = std.mem.splitScalar(u8, result.stdout, '\n');
         const line = lines.next() orelse "";
@@ -247,6 +247,14 @@ pub const Client = struct {
         return std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ self.session, window });
     }
 };
+
+/// A non-zero tmux exit means "missing" by default: no server / no session is
+/// the normal not-yet-opened state. Only treat it as unavailable when the socket
+/// exists but cannot be used (permission denied), which is a genuine fault.
+fn serverUnavailable(stderr: []const u8) bool {
+    return std.ascii.indexOfIgnoreCase(stderr, "permission denied") != null or
+        std.ascii.indexOfIgnoreCase(stderr, "operation not permitted") != null;
+}
 
 pub const WindowSize = struct {
     id: []const u8,
@@ -323,6 +331,31 @@ fn testClient(recorder: *runner.Recorder) Client {
         .runner = .{ .gpa = std.testing.allocator, .io = undefined, .recorder = recorder },
         .session = "demo",
     };
+}
+
+test "observeSession distinguishes active missing and unavailable" {
+    const cases = [_]struct {
+        term: ?std.process.Child.Term,
+        stderr: []const u8 = "",
+        spawn_error: ?anyerror = null,
+        expected: observations.SessionObservation,
+    }{
+        .{ .term = .{ .exited = 0 }, .expected = .active },
+        .{ .term = .{ .exited = 1 }, .stderr = "can't find session: demo", .expected = .missing },
+        .{ .term = .{ .exited = 1 }, .stderr = "no server running on /tmp/tmux-501/default", .expected = .missing },
+        .{ .term = .{ .exited = 1 }, .stderr = "error connecting to /tmp/tmux-501/default (Permission denied)", .expected = .unavailable },
+        .{ .term = .{ .exited = 1 }, .stderr = "error connecting to /tmp/tmux-501/default (Operation not permitted)", .expected = .unavailable },
+        .{ .term = null, .spawn_error = error.FileNotFound, .expected = .unavailable },
+    };
+
+    for (cases) |case| {
+        var recorder = runner.Recorder.init(std.testing.allocator);
+        defer recorder.deinit();
+        if (case.spawn_error) |err| try recorder.enqueueError(err) else try recorder.enqueue("", case.stderr, case.term.?);
+        const client = testClient(&recorder);
+
+        try std.testing.expectEqual(case.expected, client.observeSession());
+    }
 }
 
 test "newSession records tmux session argv" {
@@ -499,6 +532,18 @@ test "observePane returns window missing when pane info command fails" {
     try std.testing.expectEqualStrings("", observation.command);
 }
 
+test "observePane returns tmux unavailable when pane info hits permission denied" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("", "error connecting to /tmp/tmux-501/default (Permission denied)", .{ .exited = 1 });
+    const client = testClient(&recorder);
+
+    const observation = client.observePane("api");
+    defer observation.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(observations.PaneState.tmux_unavailable, observation.state);
+}
+
 test "observePane returns tmux unavailable when pane info cannot be captured" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
@@ -608,4 +653,18 @@ test "paneInfo defaults missing fields" {
     try std.testing.expectEqualStrings("0", info.exit_code);
     try std.testing.expectEqualStrings("0", info.pid);
     try std.testing.expectEqualStrings("", info.command);
+}
+
+test "paneInfo ignores extra trailing fields" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("0|0|12345|node|unexpected\n", "", .{ .exited = 0 });
+    const client = testClient(&recorder);
+
+    const info = try client.paneInfo("api");
+    defer info.deinit(std.testing.allocator);
+
+    try std.testing.expect(!info.dead);
+    try std.testing.expectEqualStrings("12345", info.pid);
+    try std.testing.expectEqualStrings("node", info.command);
 }
