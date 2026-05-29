@@ -4,6 +4,8 @@ const build_options = @import("tmux_integration_options");
 
 const pane_ready_attempts = 40;
 const pane_ready_interval = std.Io.Duration.fromMilliseconds(50);
+const service_state_attempts = 60;
+const service_state_interval = std.Io.Duration.fromMilliseconds(50);
 
 test "direct session construction keeps dashboard selected" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -227,6 +229,62 @@ test "open status close: tmux workspace is built, reported, then removed" {
     try std.testing.expect(!client.hasSession());
 }
 
+test "runtime: start, logs, stop, restart move service pane through its lifecycle" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-lifecycle", .{std.c.getpid()});
+    const client = tmuxClient(gpa, io, session);
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", "/tmp", "sleep 60");
+    defer client.killSession() catch {};
+    try client.newWindowAfter("dashboard", "api", "/tmp", try zask.zask_command.waitingPlaceholder(gpa, "api"));
+
+    const cfg = try zask.config.Config.parse(gpa,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":".","command":"sleep 60"}]}]
+        \\}
+    , "/tmp");
+    const run_impl: zask.runner.Runner = .{ .gpa = gpa, .io = io };
+    const runtime = zask.runtime.Runtime{
+        .gpa = gpa,
+        .io = io,
+        .cfg = cfg,
+        .config_path = "/tmp/config.json",
+        .zask_path = "zask",
+        .runner_impl = run_impl,
+        .tmux_impl = client,
+        .docker_impl = .{ .gpa = gpa, .runner = run_impl, .dir = "/tmp", .file = "compose.yaml" },
+    };
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    // The placeholder is an interactive shell; let it settle to idle before starting.
+    try waitForPaneState(client, gpa, io, "api", .idle);
+
+    try runtime.start("api", &writer);
+
+    try waitForPaneState(client, gpa, io, "api", .busy);
+
+    // runtime.logs attaches when run outside tmux, so assert the window focus it drives.
+    try client.selectWindow("api");
+
+    try expectActiveWindow(gpa, io, session, "api");
+
+    try runtime.stop("api", &writer);
+
+    try waitForPaneState(client, gpa, io, "api", .idle);
+
+    try runtime.restart("api", &writer);
+
+    try waitForPaneState(client, gpa, io, "api", .busy);
+}
+
 fn tmuxClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) zask.tmux.Client {
     return .{
         .gpa = gpa,
@@ -301,4 +359,25 @@ fn expectPaneAlive(gpa: std.mem.Allocator, io: std.Io, target: []const u8) !void
         try std.Io.sleep(io, pane_ready_interval, .awake);
     }
     return error.PaneNotAlive;
+}
+
+fn waitForPaneState(client: zask.tmux.Client, gpa: std.mem.Allocator, io: std.Io, window: []const u8, expected: zask.observations.PaneState) !void {
+    for (0..service_state_attempts) |_| {
+        const pane = client.observePane(window);
+        defer pane.deinit(gpa);
+
+        if (pane.state == expected) return;
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    return error.PaneStateTimeout;
+}
+
+fn expectActiveWindow(gpa: std.mem.Allocator, io: std.Io, session: []const u8, name: []const u8) !void {
+    const result = try run(gpa, io, &.{ build_options.tmux_path, "list-windows", "-t", session, "-F", "#{window_name}:#{window_active}" });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+
+    const expected = try std.fmt.allocPrint(gpa, "{s}:1", .{name});
+    defer gpa.free(expected);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, expected) != null);
 }
