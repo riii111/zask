@@ -92,6 +92,7 @@ fn lockAlive(gpa: std.mem.Allocator, io: std.Io, probe: Probe, dir: []const u8) 
     const pid_text = std.mem.trim(u8, bytes, " \t\r\n");
     if (pid_text.len == 0) return false;
     const pid = std.fmt.parseInt(std.posix.pid_t, pid_text, 10) catch return false;
+    if (pid <= 0) return false;
     return probe.alive(pid);
 }
 
@@ -152,7 +153,7 @@ test "lock.acquire: treats live holder as busy" {
 }
 
 test "lock.acquire: recovers when holder is dead empty or unparseable" {
-    const cases = [_][]const u8{ "4242", "", "not-a-pid" };
+    const cases = [_][]const u8{ "4242", "", "not-a-pid", "0" };
     for (cases, 0..) |pid_contents, index| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();

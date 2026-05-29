@@ -120,3 +120,16 @@ test "observe returns empty state and frees parsed services" {
     try std.testing.expectEqual(observations.ComposeState.empty, observation.state);
     try std.testing.expectEqual(@as(usize, 0), observation.services.len);
 }
+
+test "observe folds oversized output into unavailable" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueueError(error.StreamTooLong);
+    const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+    const compose = Compose{ .gpa = std.testing.allocator, .runner = run, .dir = "/tmp/demo/docker", .file = "compose.yaml" };
+
+    const observation = compose.observe();
+    defer observation.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(observations.ComposeState.unavailable, observation.state);
+}
