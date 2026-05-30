@@ -97,7 +97,7 @@ fn testLifecycle(gpa: std.mem.Allocator, run: runner_mod.Runner, cfg: config.Con
     };
 }
 
-test "classifies lifecycle phase kinds" {
+test "phases.phaseKind: classifies lifecycle phase kinds" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const cases = [_]struct {
@@ -115,7 +115,7 @@ test "classifies lifecycle phase kinds" {
     }
 }
 
-test "precheck failure prints hint and preserves abort semantics" {
+test "phases.runPrechecks: failure prints hint and preserves abort semantics" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -138,7 +138,7 @@ test "precheck failure prints hint and preserves abort semantics" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Hint: install tool") != null);
 }
 
-test "command phase warn continues and abort fails startup" {
+test "phases.runCommandPhase: warn continues and abort fails startup" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -172,7 +172,7 @@ test "command phase warn continues and abort fails startup" {
     try runner_mod.expectNoRemainingResponses(&recorder);
 }
 
-test "service phase propagates window-not-ready as startup failure" {
+test "phases.runServicePhase: propagates window-not-ready as startup failure" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -195,7 +195,7 @@ test "service phase propagates window-not-ready as startup failure" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "window for api not ready") != null);
 }
 
-test "phase cwd rejects path traversal" {
+test "phases.phaseCwd: rejects path traversal" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},

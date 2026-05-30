@@ -326,7 +326,7 @@ fn testLifecycleWithDockerDir(gpa: std.mem.Allocator, run: proc_runner.Runner, c
     return lifecycle;
 }
 
-test "maps pane observations to lifecycle start and stop decisions" {
+test "lifecycle.decision: maps pane observations to start and stop decisions" {
     const cases = [_]struct {
         state: observations.PaneState,
         start: StartDecision,
@@ -346,19 +346,19 @@ test "maps pane observations to lifecycle start and stop decisions" {
     }
 }
 
-test "service start treats shell pane as startable" {
+test "lifecycle.serviceStartDecision: treats shell pane as startable" {
     const pane = observations.PaneObservation.fromOwned(.busy, "0", "12345", "zsh");
 
     try std.testing.expectEqual(StartDecision.send_start, serviceStartDecision(pane));
 }
 
-test "docker start treats shell pane as startable" {
+test "lifecycle.dockerStartDecision: treats shell pane as startable" {
     const pane = observations.PaneObservation.fromOwned(.busy, "0", "12345", "zsh");
 
     try std.testing.expectEqual(StartDecision.send_start, dockerStartDecision(pane));
 }
 
-test "precheck abort stops startup and warn continues" {
+test "lifecycle.startAll: precheck abort stops startup and warn continues" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -386,7 +386,7 @@ test "precheck abort stops startup and warn continues" {
     try proc_runner.expectCommandContaining(&recorder, "false");
 }
 
-test "startAll starts idle docker before service command" {
+test "lifecycle.startAll: starts idle docker before service command" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -422,7 +422,7 @@ test "startAll starts idle docker before service command" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }
 
-test "startAll honors docker startup order step" {
+test "lifecycle.startAll: honors docker startup order step" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -462,7 +462,7 @@ test "startAll honors docker startup order step" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "command phase runs interactively" {
+test "lifecycle.startAll: command phase runs interactively" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -487,7 +487,7 @@ test "command phase runs interactively" {
     try proc_runner.expectCommandArgv(command, &.{ "bash", "-c", "echo setup" });
 }
 
-test "wait helpers report timeouts" {
+test "waits: report port and stop timeouts" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -518,7 +518,7 @@ test "wait helpers report timeouts" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api ... warning: may not have stopped") != null);
 }
 
-test "docker readiness times out when compose never reports running" {
+test "waits.ensureDockerReady: times out when compose never reports running" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -540,7 +540,7 @@ test "docker readiness times out when compose never reports running" {
     try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items.len);
 }
 
-test "window readiness distinguishes missing windows from unavailable tmux" {
+test "waits.ensureWindowReady: distinguishes missing windows from unavailable tmux" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -560,7 +560,7 @@ test "window readiness distinguishes missing windows from unavailable tmux" {
     try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
 }
 
-test "window readiness retries missing windows until timeout" {
+test "waits.ensureWindowReady: retries missing windows until timeout" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -580,7 +580,7 @@ test "window readiness retries missing windows until timeout" {
     try std.testing.expectEqual(@as(usize, waits.windowReadyAttempts()), recorder.commands.items.len);
 }
 
-test "service start reports missing window as failure" {
+test "lifecycle.startAll: reports missing window as failure" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -602,7 +602,7 @@ test "service start reports missing window as failure" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: window for api not ready") != null);
 }
 
-test "stop and restart targets require an active session" {
+test "lifecycle.stopTarget: stop and restart require an active session" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -628,7 +628,7 @@ test "stop and restart targets require an active session" {
     try std.testing.expectEqual(@as(usize, 2), recorder.commands.items.len);
 }
 
-test "docker stop reaches compose down without tmux session" {
+test "lifecycle.stopTarget: docker stop reaches compose down without tmux session" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -655,7 +655,7 @@ test "docker stop reaches compose down without tmux session" {
     try proc_runner.expectCommandCwd(down, "/tmp/demo");
 }
 
-test "docker stop reaches compose down when tmux send fails" {
+test "lifecycle.stopTarget: docker stop reaches compose down when tmux send fails" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -683,7 +683,7 @@ test "docker stop reaches compose down when tmux send fails" {
     try proc_runner.expectCommandArg(down, 4, "down");
 }
 
-test "start reports tmux unavailable distinctly from missing session" {
+test "lifecycle.startTarget: reports tmux unavailable distinctly from missing session" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -705,7 +705,7 @@ test "start reports tmux unavailable distinctly from missing session" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "tmux unavailable") != null);
 }
 
-test "service start surfaces diagnostic when pane observation becomes unavailable" {
+test "lifecycle.startTarget: surfaces diagnostic when pane observation becomes unavailable" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -729,7 +729,7 @@ test "service start surfaces diagnostic when pane observation becomes unavailabl
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: tmux unavailable for api") != null);
 }
 
-test "docker restart reports tmux unavailable without stopping compose" {
+test "lifecycle.restartTarget: docker restart reports tmux unavailable without stopping compose" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -752,7 +752,7 @@ test "docker restart reports tmux unavailable without stopping compose" {
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "down") == null);
 }
 
-test "stop and restart report tmux unavailable distinctly from missing session" {
+test "lifecycle.stopTarget: stop and restart report tmux unavailable distinctly from missing session" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -780,7 +780,7 @@ test "stop and restart report tmux unavailable distinctly from missing session" 
     }
 }
 
-test "docker stop runs compose down even when tmux is unavailable" {
+test "lifecycle.stopTarget: docker stop runs compose down even when tmux is unavailable" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -807,7 +807,7 @@ test "docker stop runs compose down even when tmux is unavailable" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "tmux unavailable") == null);
 }
 
-test "docker stop warns when compose down fails" {
+test "lifecycle.stopTarget: docker stop warns when compose down fails" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -832,7 +832,7 @@ test "docker stop warns when compose down fails" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: docker compose down failed") != null);
 }
 
-test "docker start is a no-op when docker pane is running" {
+test "lifecycle.startTarget: docker start is a no-op when docker pane is running" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -863,7 +863,7 @@ test "docker start is a no-op when docker pane is running" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }
 
-test "docker start sends compose up after transient busy pane" {
+test "lifecycle.startTarget: docker start sends compose up after transient busy pane" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -901,7 +901,7 @@ test "docker start sends compose up after transient busy pane" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }
 
-test "docker start respawns shell pane without compose probe" {
+test "lifecycle.startTarget: docker start respawns shell pane without compose probe" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -934,7 +934,7 @@ test "docker start respawns shell pane without compose probe" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker already starting") == null);
 }
 
-test "docker start disables compose menu and waits when started" {
+test "lifecycle.startTarget: docker start disables compose menu and waits when started" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -966,7 +966,7 @@ test "docker start disables compose menu and waits when started" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }
 
-test "docker restart checks session before stopping compose" {
+test "lifecycle.restartTarget: docker restart checks session before stopping compose" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -991,7 +991,7 @@ test "docker restart checks session before stopping compose" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Session not running") != null);
 }
 
-test "docker restart runs compose down before compose up" {
+test "lifecycle.restartTarget: docker restart runs compose down before compose up" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -1027,7 +1027,7 @@ test "docker restart runs compose down before compose up" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "startAll respawns service pane without sending command to shell history" {
+test "lifecycle.startAll: respawns service pane without sending command to shell history" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo app","session_name":"demo"},
@@ -1055,7 +1055,7 @@ test "startAll respawns service pane without sending command to shell history" {
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "send-keys") == null);
 }
 
-test "startAll resolves relative service cwd before sending command" {
+test "lifecycle.startAll: resolves relative service cwd before sending command" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"testdata/showcase/receipt-lab","session_name":"demo"},

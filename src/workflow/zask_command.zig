@@ -34,14 +34,14 @@ pub fn waitingPlaceholder(gpa: std.mem.Allocator, label: []const u8) ![]const u8
 // Tests
 // -----------------------------------------------------------------------------
 
-test "invoke quotes zask and config paths" {
+test "zask_command.invoke: quotes zask and config paths" {
     const command = try invoke(std.testing.allocator, "/tmp/zask path", "/tmp/demo config.json", "dashboard");
     defer std.testing.allocator.free(command);
 
     try std.testing.expectEqualStrings("'/tmp/zask path' --config '/tmp/demo config.json' dashboard", command);
 }
 
-test "waiting placeholder formats and quotes display label" {
+test "zask_command.waitingPlaceholder: formats and quotes display label" {
     const cases = [_]struct {
         label: []const u8,
         expected: []const u8,
