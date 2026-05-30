@@ -173,6 +173,7 @@ pub const Client = struct {
             else => return observations.PaneObservation.empty(.tmux_unavailable),
         };
         if (info.dead) return info.consumeIntoObservation(.dead);
+        if (!isShellCommand(info.command)) return info.consumeIntoObservation(.busy);
         const run_result = self.runner.run(&.{ "pgrep", "-P", info.pid }, .{}) catch return info.consumeIntoObservation(.tmux_unavailable);
         const result = runner.captured(run_result);
         defer self.gpa.free(result.stdout);
@@ -505,18 +506,17 @@ test "window sizing helpers record and parse tmux argv" {
     try runner.expectCommandArgv(recorder.commands.items[3], &.{ "tmux", "choose-tree", "-Zw", "-t", "%1" });
 }
 
-test "paneRunning checks pane child processes" {
+test "paneRunning accepts direct non-shell process" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
-    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
     const client = testClient(&recorder);
 
     try std.testing.expect(client.paneRunning("api"));
-    try runner.expectCommandArgv(recorder.commands.items[1], &.{ "pgrep", "-P", "12345" });
+    try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
 }
 
-test "paneRunning rejects dead panes and panes without children" {
+test "paneRunning rejects dead panes and idle shell panes" {
     var dead_recorder = runner.Recorder.init(std.testing.allocator);
     defer dead_recorder.deinit();
     try dead_recorder.enqueue("1|130|12345|node\n", "", .{ .exited = 0 });
@@ -527,7 +527,7 @@ test "paneRunning rejects dead panes and panes without children" {
 
     var idle_recorder = runner.Recorder.init(std.testing.allocator);
     defer idle_recorder.deinit();
-    try idle_recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
+    try idle_recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try idle_recorder.enqueue("\n", "", .{ .exited = 1 });
     const idle_client = testClient(&idle_recorder);
 
@@ -579,7 +579,7 @@ test "observePane returns tmux unavailable when pane info cannot be captured" {
 test "observePane returns tmux unavailable with pane fields when pgrep cannot spawn" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
-    try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueueError(error.FileNotFound);
     const client = testClient(&recorder);
 
@@ -589,7 +589,7 @@ test "observePane returns tmux unavailable with pane fields when pgrep cannot sp
     try std.testing.expectEqual(observations.PaneState.tmux_unavailable, observation.state);
     try std.testing.expectEqualStrings("0", observation.exit_code);
     try std.testing.expectEqualStrings("12345", observation.pid);
-    try std.testing.expectEqualStrings("node", observation.command);
+    try std.testing.expectEqualStrings("zsh", observation.command);
     try runner.expectCommandArg(recorder.commands.items[1], 0, "pgrep");
 }
 
