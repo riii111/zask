@@ -33,6 +33,7 @@ start Docker explicitly only when the local machine already has the images.
 Useful commands:
 
 ```sh
+cd /path/to/zask
 zig build run -- --config testdata/showcase/receipt-lab/zask.json list
 zig build run -- --config testdata/showcase/receipt-lab/zask.json open --dashboard
 zig build run -- --config testdata/showcase/receipt-lab/zask.json status

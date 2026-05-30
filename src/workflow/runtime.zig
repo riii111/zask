@@ -6,6 +6,7 @@ const lifecycle_mod = @import("lifecycle.zig");
 const lock = @import("../platform/lock.zig");
 const observations = @import("../model/observations.zig");
 const paths = @import("../platform/paths.zig");
+const pathing = @import("pathing.zig");
 const proc_runner = @import("../platform/runner.zig");
 const session_layout = @import("session_layout.zig");
 const tmux_client = @import("../platform/tmux.zig");
@@ -280,7 +281,7 @@ pub const Runtime = struct {
 
     fn openSessionWithDashboardWindow(self: Runtime, scratch: std.mem.Allocator) !void {
         const tx = self.tmux();
-        const root = try self.cfg.projectRoot(scratch);
+        const root = try pathing.absolute(scratch, self.io, try self.cfg.projectRoot(scratch));
         try tx.newSession(session_layout.dashboard_window, root, try zask_command.invokeDashboard(scratch, self.zask_path, self.config_path));
     }
 
@@ -294,7 +295,7 @@ pub const Runtime = struct {
 
     fn configureDashboardWindow(self: Runtime, scratch: std.mem.Allocator) !void {
         const tx = self.tmux();
-        const root = try self.cfg.projectRoot(scratch);
+        const root = try pathing.absolute(scratch, self.io, try self.cfg.projectRoot(scratch));
         try tx.splitWindow(session_layout.dashboard_window, root, try zask_command.invokeMonitor(scratch, self.zask_path, self.config_path));
         try tx.setWindowOption(session_layout.dashboard_window, session_layout.dashboard_pane_width_option, session_layout.dashboard_pane_width_value);
         try tx.selectLayout(session_layout.dashboard_window, session_layout.dashboard_layout);
@@ -305,11 +306,11 @@ pub const Runtime = struct {
         var previous_window: []const u8 = session_layout.dashboard_window;
         for (try self.cfg.services()) |service| {
             const name = try config.Config.serviceName(service);
-            try tx.newWindowAfter(previous_window, name, try self.cfg.serviceDir(scratch, service), try zask_command.waitingPlaceholder(scratch, name));
+            try tx.newWindowAfter(previous_window, name, try pathing.absolute(scratch, self.io, try self.cfg.serviceDir(scratch, service)), try zask_command.waitingPlaceholder(scratch, name));
             previous_window = name;
         }
         if (self.cfg.dockerEnabled()) {
-            try tx.newWindowAfter(previous_window, session_layout.docker_window, try self.cfg.dockerDir(scratch), try zask_command.waitingPlaceholder(scratch, session_layout.docker_placeholder_title));
+            try tx.newWindowAfter(previous_window, session_layout.docker_window, try pathing.absolute(scratch, self.io, try self.cfg.dockerDir(scratch)), try zask_command.waitingPlaceholder(scratch, session_layout.docker_placeholder_title));
         }
     }
 

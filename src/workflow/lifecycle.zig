@@ -3,6 +3,7 @@ const config = @import("../model/config.zig");
 const docker_client = @import("../platform/docker.zig");
 const observations = @import("../model/observations.zig");
 const phases = @import("phases.zig");
+const pathing = @import("pathing.zig");
 const proc_runner = @import("../platform/runner.zig");
 const shell = @import("../platform/shell.zig");
 const tmux_client = @import("../platform/tmux.zig");
@@ -157,7 +158,7 @@ pub const Lifecycle = struct {
         };
         const pane = self.tmux.observePane(service);
         defer pane.deinit(self.gpa);
-        switch (serviceStartDecision(pane.state)) {
+        switch (serviceStartDecision(pane)) {
             .no_op => {
                 try writeProgress(writer, "{s} already running\n", .{service});
                 return;
@@ -169,7 +170,7 @@ pub const Lifecycle = struct {
                 return error.TmuxUnavailable;
             },
         }
-        const service_dir = try shell.quote(self.gpa, try self.cfg.serviceDir(self.gpa, value));
+        const service_dir = try shell.quote(self.gpa, try pathing.absolute(self.gpa, self.runner.io, try self.cfg.serviceDir(self.gpa, value)));
         const start_command = try config.Config.serviceStartCommand(self.gpa, value);
         const cmd = try std.fmt.allocPrint(self.gpa, "cd {s} && {s}", .{ service_dir, start_command });
         try writeProgress(writer, "Starting {s}...\n", .{service});
@@ -200,7 +201,7 @@ pub const Lifecycle = struct {
         try waits.ensureWindowReady(self, "docker");
         if (try self.dockerStartAlreadyHandled(writer)) return;
         try writeProgress(writer, "Starting Docker...\n", .{});
-        const docker_dir = try shell.quote(self.gpa, try self.cfg.dockerDir(self.gpa));
+        const docker_dir = try shell.quote(self.gpa, try pathing.absolute(self.gpa, self.runner.io, try self.cfg.dockerDir(self.gpa)));
         const compose_file = try shell.quote(self.gpa, self.cfg.dockerComposeFile());
         const cmd = try std.fmt.allocPrint(self.gpa, "cd {s} && COMPOSE_MENU=false docker compose -f {s} up", .{ docker_dir, compose_file });
         try self.tmux.sendKeys("docker", &.{ cmd, "Enter" });
@@ -269,7 +270,12 @@ const StopDecision = enum {
     tmux_unavailable,
 };
 
-fn serviceStartDecision(state: observations.PaneState) StartDecision {
+fn serviceStartDecision(pane: observations.PaneObservation) StartDecision {
+    if (pane.command.len > 0 and tmux_client.isShellCommand(pane.command)) return .send_start;
+    return startDecisionForState(pane.state);
+}
+
+fn startDecisionForState(state: observations.PaneState) StartDecision {
     return switch (state) {
         .busy => .no_op,
         .idle, .dead => .send_start,
@@ -287,7 +293,7 @@ fn serviceStopDecision(state: observations.PaneState) StopDecision {
 }
 
 fn dockerStartDecision(state: observations.PaneState) StartDecision {
-    return serviceStartDecision(state);
+    return startDecisionForState(state);
 }
 
 // -----------------------------------------------------------------------------
@@ -328,10 +334,16 @@ test "maps pane observations to lifecycle start and stop decisions" {
     };
 
     for (cases) |case| {
-        try std.testing.expectEqual(case.start, serviceStartDecision(case.state));
+        try std.testing.expectEqual(case.start, serviceStartDecision(observations.PaneObservation.empty(case.state)));
         try std.testing.expectEqual(case.start, dockerStartDecision(case.state));
         try std.testing.expectEqual(case.stop, serviceStopDecision(case.state));
     }
+}
+
+test "service start treats shell pane as startable" {
+    const pane = observations.PaneObservation.fromOwned(.busy, "0", "12345", "zsh");
+
+    try std.testing.expectEqual(StartDecision.send_start, serviceStartDecision(pane));
 }
 
 test "precheck abort stops startup and warn continues" {
@@ -994,4 +1006,31 @@ test "startAll dispatches quoted service command to tmux" {
 
     const send_keys = proc_runner.findCommandContaining(&recorder, "cd '/tmp/demo app/backend' && serve") orelse return error.CommandNotFound;
     try proc_runner.expectCommandArgv(send_keys, &.{ "tmux", "send-keys", "-t", "demo:api", "cd '/tmp/demo app/backend' && serve", "Enter" });
+}
+
+test "startAll resolves relative service cwd before sending command" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"testdata/showcase/receipt-lab","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":".","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = threaded.io(), .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(threaded.io(), "testdata/showcase/receipt-lab", arena.allocator());
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startAll("all", &writer);
+
+    const expected = try std.fmt.allocPrint(arena.allocator(), "cd '{s}' && serve", .{cwd});
+    const send_keys = proc_runner.findCommandContaining(&recorder, expected) orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArg(send_keys, 4, expected);
 }

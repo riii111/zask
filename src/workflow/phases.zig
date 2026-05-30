@@ -3,6 +3,7 @@ const std = @import("std");
 const config = @import("../model/config.zig");
 const config_value = @import("../model/config_value.zig");
 const lifecycle_mod = @import("lifecycle.zig");
+const pathing = @import("pathing.zig");
 const runner_mod = @import("../platform/runner.zig");
 const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
@@ -71,9 +72,9 @@ pub fn runServicePhase(ctx: anytype, phase: std.json.Value, profile: []const u8,
 }
 
 fn phaseCwd(ctx: anytype, dir: []const u8) ![]const u8 {
-    if (dir.len == 0) return ctx.cfg.projectRoot(ctx.gpa);
+    if (dir.len == 0) return pathing.absolute(ctx.gpa, ctx.runner.io, try ctx.cfg.projectRoot(ctx.gpa));
     try validate.relativeSubPath(dir);
-    return std.fs.path.join(ctx.gpa, &.{ try ctx.cfg.projectRoot(ctx.gpa), dir });
+    return pathing.absolute(ctx.gpa, ctx.runner.io, try std.fs.path.join(ctx.gpa, &.{ try ctx.cfg.projectRoot(ctx.gpa), dir }));
 }
 
 // -----------------------------------------------------------------------------
