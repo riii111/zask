@@ -20,6 +20,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     const options = b.addOptions();
     options.addOption([]const u8, "version", manifest.version);
@@ -31,6 +32,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
             .imports = &.{
                 .{ .name = "zask", .module = zask_mod },
             },
@@ -65,6 +67,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tests/integration/tmux_session.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
         .imports = &.{
             .{ .name = "zask", .module = zask_mod },
         },
