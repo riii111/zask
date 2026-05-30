@@ -200,10 +200,10 @@ pub const Lifecycle = struct {
         try waits.ensureWindowReady(self, "docker");
         if (try self.dockerStartAlreadyHandled(writer)) return;
         try writeProgress(writer, "Starting Docker...\n", .{});
-        const docker_dir = try shell.quote(self.gpa, try pathing.absolute(self.gpa, self.runner.io, try self.cfg.dockerDir(self.gpa)));
+        const docker_dir = try pathing.absolute(self.gpa, self.runner.io, try self.cfg.dockerDir(self.gpa));
         const compose_file = try shell.quote(self.gpa, self.cfg.dockerComposeFile());
-        const cmd = try std.fmt.allocPrint(self.gpa, "cd {s} && COMPOSE_MENU=false docker compose -f {s} up", .{ docker_dir, compose_file });
-        try self.tmux.sendKeys("docker", &.{ cmd, "Enter" });
+        const cmd = try std.fmt.allocPrint(self.gpa, "COMPOSE_MENU=false docker compose -f {s} up", .{compose_file});
+        try self.tmux.respawnPane("docker", docker_dir, cmd);
     }
 
     fn dockerStartAlreadyHandled(self: Lifecycle, writer: *std.Io.Writer) !bool {
@@ -884,9 +884,9 @@ test "docker start sends compose up after transient busy pane" {
 
     try lifecycle.startTarget("docker", &writer);
 
-    const send_keys = proc_runner.findCommandContaining(&recorder, "docker compose") orelse return error.CommandNotFound;
-    try proc_runner.expectCommandArg(send_keys, 1, "send-keys");
-    try proc_runner.expectCommandArgContains(send_keys, 4, "docker compose");
+    const respawn = proc_runner.findCommandContaining(&recorder, "docker compose") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArg(respawn, 1, "respawn-pane");
+    try proc_runner.expectCommandArgContains(respawn, 9, "docker compose");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting Docker...") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }
@@ -917,9 +917,9 @@ test "docker start disables compose menu and waits when started" {
 
     try lifecycle.startTarget("docker", &writer);
 
-    const send_keys = proc_runner.findCommandContaining(&recorder, "COMPOSE_MENU=false") orelse return error.CommandNotFound;
-    try proc_runner.expectCommandArg(send_keys, 1, "send-keys");
-    try proc_runner.expectCommandArgContains(send_keys, 4, "COMPOSE_MENU=false");
+    const respawn = proc_runner.findCommandContaining(&recorder, "COMPOSE_MENU=false") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArg(respawn, 1, "respawn-pane");
+    try proc_runner.expectCommandArgContains(respawn, 9, "COMPOSE_MENU=false");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }
 
