@@ -4,7 +4,6 @@ const config = @import("../../model/config.zig");
 const docker_client = @import("../../platform/docker.zig");
 const observations = @import("../../model/observations.zig");
 const proc_runner = @import("../../platform/runner.zig");
-const tmux_client = @import("../../platform/tmux.zig");
 const tmux_options = @import("../../model/tmux_options.zig");
 const Context = @import("context.zig").Context;
 

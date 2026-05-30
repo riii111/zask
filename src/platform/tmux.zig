@@ -262,6 +262,7 @@ pub const Client = struct {
             \\trap '__zask_interrupted=1' INT
             \\{s}
             \\__zask_status=$?
+            \\# SIGINT may surface only as exit status 130 when the trap is not run.
             \\if [ "$__zask_interrupted" = 1 ] || [ "$__zask_status" = 130 ]; then
             \\  exec "${{SHELL:-sh}}"
             \\fi
@@ -509,7 +510,7 @@ test "respawnPane wrapper preserves command exit status" {
         .runner = undefined,
         .session = "demo",
     };
-    const wrapped_command = try client.respawnShellCommand("exit 7");
+    const wrapped_command = try client.respawnShellCommand("sh -c 'exit 7'");
     defer std.testing.allocator.free(wrapped_command);
 
     const result = try std.process.run(std.testing.allocator, threaded.io(), .{
