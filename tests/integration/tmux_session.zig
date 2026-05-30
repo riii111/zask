@@ -7,7 +7,7 @@ const pane_ready_interval = std.Io.Duration.fromMilliseconds(50);
 const service_state_attempts = 60;
 const service_state_interval = std.Io.Duration.fromMilliseconds(50);
 
-test "direct session construction keeps dashboard selected" {
+test "tmux.newSession: direct construction keeps dashboard selected" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
@@ -32,7 +32,7 @@ test "direct session construction keeps dashboard selected" {
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "worker:0") != null);
 }
 
-test "placeholder windows stay alive for later commands" {
+test "zask_command.waitingPlaceholder: keeps placeholder windows alive for later commands" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
@@ -49,7 +49,7 @@ test "placeholder windows stay alive for later commands" {
     try expectPaneAlive(std.testing.allocator, io, try std.fmt.allocPrint(arena.allocator(), "{s}:api", .{session}));
 }
 
-test "preview list resizes stale detached windows before tree mode" {
+test "runtime.previewList: resizes stale detached windows before tree mode" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
@@ -94,7 +94,7 @@ test "preview list resizes stale detached windows before tree mode" {
     try std.testing.expect(std.mem.indexOf(u8, mode.stdout, "1|tree-mode") != null);
 }
 
-test "session setup refreshes stale list binding in existing session" {
+test "tmux_setup.bindControlKeys: refreshes stale list binding in existing session" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
@@ -119,7 +119,7 @@ test "session setup refreshes stale list binding in existing session" {
     try std.testing.expect(std.mem.indexOf(u8, binding.stdout, "#{client_height}") != null);
 }
 
-test "session setup keeps global attach hook while refreshing size hook" {
+test "tmux_setup.applySessionOptions: keeps global attach hook while refreshing size hook" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
@@ -153,7 +153,7 @@ test "session setup keeps global attach hook while refreshing size hook" {
     try std.testing.expect(std.mem.indexOf(u8, hooks.stdout, "#{client_height}") != null);
 }
 
-test "open status close: tmux workspace is built, reported, then removed" {
+test "runtime: open, status, close build, report, then remove workspace" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
