@@ -27,9 +27,9 @@ receipts.pending   inbox.new        jobs.delayed
 ```
 
 The Docker Compose file models shared infrastructure and log-heavy background
-containers. The default startup order leaves Docker stopped. Use the normal
-zask workspace for screenshots, and start Docker explicitly when the local
-machine can build or pull the images.
+containers. The startup order brings Docker up first, so `open` starts the
+Compose stack before the service groups. Run it on a machine that can build or
+pull the images.
 
 Useful commands:
 
