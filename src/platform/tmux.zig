@@ -501,6 +501,26 @@ test "respawnPane records shell command through runner" {
     try runner.expectCommandArgContains(command, 9, "exec \"${SHELL:-sh}\"");
 }
 
+test "respawnPane wrapper preserves command exit status" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const client = Client{
+        .gpa = std.testing.allocator,
+        .runner = undefined,
+        .session = "demo",
+    };
+    const wrapped_command = try client.respawnShellCommand("exit 7");
+    defer std.testing.allocator.free(wrapped_command);
+
+    const result = try std.process.run(std.testing.allocator, threaded.io(), .{
+        .argv = &.{ "sh", "-c", wrapped_command },
+    });
+    defer std.testing.allocator.free(result.stdout);
+    defer std.testing.allocator.free(result.stderr);
+
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 7 }, result.term);
+}
+
 test "window sizing helpers record and parse tmux argv" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
