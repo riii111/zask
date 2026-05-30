@@ -797,7 +797,7 @@ test "runtime.open: creates session without tmuxp" {
     defer arena.deinit();
     var threaded = std.Io.Threaded.init_single_threaded;
     const io = threaded.io();
-    const home_dir = try std.fmt.allocPrint(arena.allocator(), "/private/tmp/zask-test-home-{d}", .{std.c.getpid()});
+    const home_dir = try std.fmt.allocPrint(arena.allocator(), "/tmp/zask-test-home-{d}", .{std.c.getpid()});
     defer std.Io.Dir.cwd().deleteTree(io, home_dir) catch {};
     var environ = env.Map.init(arena.allocator());
     defer environ.deinit();
@@ -967,7 +967,7 @@ test "runtime.open: attaches when lock is busy" {
     defer arena.deinit();
     var threaded = std.Io.Threaded.init_single_threaded;
     const io = threaded.io();
-    const base = try std.fmt.allocPrint(arena.allocator(), "/private/tmp/zask-test-runtime-{d}", .{std.c.getpid()});
+    const base = try std.fmt.allocPrint(arena.allocator(), "/tmp/zask-test-runtime-{d}", .{std.c.getpid()});
     defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
     const lock_dir = try std.fs.path.join(arena.allocator(), &.{ base, "zask", "demo.lock" });
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, lock_dir, @enumFromInt(0o700));
@@ -1011,7 +1011,7 @@ test "runtime.open: preserves lock busy before session exists" {
     defer arena.deinit();
     var threaded = std.Io.Threaded.init_single_threaded;
     const io = threaded.io();
-    const base = try std.fmt.allocPrint(arena.allocator(), "/private/tmp/zask-test-runtime-missing-{d}", .{std.c.getpid()});
+    const base = try std.fmt.allocPrint(arena.allocator(), "/tmp/zask-test-runtime-missing-{d}", .{std.c.getpid()});
     defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
     const lock_dir = try std.fs.path.join(arena.allocator(), &.{ base, "zask", "demo.lock" });
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, lock_dir, @enumFromInt(0o700));
@@ -1054,7 +1054,7 @@ test "runtime.open: reports tmux unavailable when lock busy and tmux unreachable
     defer arena.deinit();
     var threaded = std.Io.Threaded.init_single_threaded;
     const io = threaded.io();
-    const base = try std.fmt.allocPrint(arena.allocator(), "/private/tmp/zask-test-runtime-busy-unavail-{d}", .{std.c.getpid()});
+    const base = try std.fmt.allocPrint(arena.allocator(), "/tmp/zask-test-runtime-busy-unavail-{d}", .{std.c.getpid()});
     defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
     const lock_dir = try std.fs.path.join(arena.allocator(), &.{ base, "zask", "demo.lock" });
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, lock_dir, @enumFromInt(0o700));
@@ -1094,7 +1094,7 @@ test "runtime.close: reports tmux unavailable when lock busy and tmux unreachabl
     defer arena.deinit();
     var threaded = std.Io.Threaded.init_single_threaded;
     const io = threaded.io();
-    const base = try std.fmt.allocPrint(arena.allocator(), "/private/tmp/zask-test-runtime-close-busy-{d}", .{std.c.getpid()});
+    const base = try std.fmt.allocPrint(arena.allocator(), "/tmp/zask-test-runtime-close-busy-{d}", .{std.c.getpid()});
     defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
     const lock_dir = try std.fs.path.join(arena.allocator(), &.{ base, "zask", "demo.lock" });
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, lock_dir, @enumFromInt(0o700));
@@ -1134,7 +1134,7 @@ test "runtime.re: delegates to single attached client when lock is busy" {
     defer arena.deinit();
     var threaded = std.Io.Threaded.init_single_threaded;
     const io = threaded.io();
-    const base = try std.fmt.allocPrint(arena.allocator(), "/private/tmp/zask-test-runtime-re-{d}", .{std.c.getpid()});
+    const base = try std.fmt.allocPrint(arena.allocator(), "/tmp/zask-test-runtime-re-{d}", .{std.c.getpid()});
     defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
     const lock_dir = try std.fs.path.join(arena.allocator(), &.{ base, "zask", "demo.lock" });
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, lock_dir, @enumFromInt(0o700));
@@ -1182,7 +1182,7 @@ test "runtime.re: rejects lock busy delegation with multiple attached clients" {
     defer arena.deinit();
     var threaded = std.Io.Threaded.init_single_threaded;
     const io = threaded.io();
-    const base = try std.fmt.allocPrint(arena.allocator(), "/private/tmp/zask-test-runtime-re-multi-{d}", .{std.c.getpid()});
+    const base = try std.fmt.allocPrint(arena.allocator(), "/tmp/zask-test-runtime-re-multi-{d}", .{std.c.getpid()});
     defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
     const lock_dir = try std.fs.path.join(arena.allocator(), &.{ base, "zask", "demo.lock" });
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, lock_dir, @enumFromInt(0o700));

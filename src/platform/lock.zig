@@ -61,7 +61,7 @@ pub const Lock = struct {
 
 fn ensurePrivateDir(io: std.Io, path: []const u8) !void {
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
-    var dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .follow_symlinks = false });
+    var dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true, .follow_symlinks = false });
     defer dir.close(io);
     try dir.setPermissions(io, private_dir_permissions);
 }
@@ -142,7 +142,7 @@ test "lock.acquire: treats live holder as busy" {
     const gpa = arena.allocator();
     var threaded = std.Io.Threaded.init_single_threaded;
     const io = threaded.io();
-    const base = try std.fmt.allocPrint(gpa, "/private/tmp/zask-test-lock-live-{d}", .{std.c.getpid()});
+    const base = try std.fmt.allocPrint(gpa, "/tmp/zask-test-lock-live-{d}", .{std.c.getpid()});
     defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
     const dir = try std.fs.path.join(gpa, &.{ base, "demo.lock" });
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, dir, private_dir_permissions);
@@ -160,7 +160,7 @@ test "lock.acquire: recovers when holder is dead empty or unparseable" {
         const gpa = arena.allocator();
         var threaded = std.Io.Threaded.init_single_threaded;
         const io = threaded.io();
-        const base = try std.fmt.allocPrint(gpa, "/private/tmp/zask-test-lock-dead-{d}-{d}", .{ std.c.getpid(), index });
+        const base = try std.fmt.allocPrint(gpa, "/tmp/zask-test-lock-dead-{d}-{d}", .{ std.c.getpid(), index });
         defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
         const dir = try std.fs.path.join(gpa, &.{ base, "demo.lock" });
         _ = try std.Io.Dir.cwd().createDirPathStatus(io, dir, private_dir_permissions);
@@ -179,7 +179,7 @@ test "lock.acquire: reports busy when stale rename cannot proceed" {
     var threaded = std.Io.Threaded.init_single_threaded;
     const io = threaded.io();
     const probe: Probe = .{ .fake = .{ .pid = 4242, .alive = false } };
-    const base = try std.fmt.allocPrint(gpa, "/private/tmp/zask-test-lock-rename-{d}", .{std.c.getpid()});
+    const base = try std.fmt.allocPrint(gpa, "/tmp/zask-test-lock-rename-{d}", .{std.c.getpid()});
     defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
     const dir = try std.fs.path.join(gpa, &.{ base, "demo.lock" });
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, dir, private_dir_permissions);
