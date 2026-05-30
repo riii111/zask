@@ -170,11 +170,10 @@ pub const Lifecycle = struct {
                 return error.TmuxUnavailable;
             },
         }
-        const service_dir = try shell.quote(self.gpa, try pathing.absolute(self.gpa, self.runner.io, try self.cfg.serviceDir(self.gpa, value)));
+        const service_dir = try pathing.absolute(self.gpa, self.runner.io, try self.cfg.serviceDir(self.gpa, value));
         const start_command = try config.Config.serviceStartCommand(self.gpa, value);
-        const cmd = try std.fmt.allocPrint(self.gpa, "cd {s} && {s}", .{ service_dir, start_command });
         try writeProgress(writer, "Starting {s}...\n", .{service});
-        try self.tmux.sendKeys(service, &.{ cmd, "Enter" });
+        try self.tmux.respawnPane(service, service_dir, start_command);
     }
 
     fn ensureServiceStopped(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
@@ -985,7 +984,7 @@ test "docker restart runs compose down before compose up" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "startAll dispatches quoted service command to tmux" {
+test "startAll respawns service pane without sending command to shell history" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo app","session_name":"demo"},
@@ -1004,8 +1003,9 @@ test "startAll dispatches quoted service command to tmux" {
 
     try lifecycle.startAll("all", &writer);
 
-    const send_keys = proc_runner.findCommandContaining(&recorder, "cd '/tmp/demo app/backend' && serve") orelse return error.CommandNotFound;
-    try proc_runner.expectCommandArgv(send_keys, &.{ "tmux", "send-keys", "-t", "demo:api", "cd '/tmp/demo app/backend' && serve", "Enter" });
+    const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArgv(respawn, &.{ "tmux", "respawn-pane", "-k", "-t", "demo:api", "-c", "/tmp/demo app/backend", "sh", "-lc", "serve" });
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "send-keys") == null);
 }
 
 test "startAll resolves relative service cwd before sending command" {
@@ -1030,7 +1030,7 @@ test "startAll resolves relative service cwd before sending command" {
 
     try lifecycle.startAll("all", &writer);
 
-    const expected = try std.fmt.allocPrint(arena.allocator(), "cd '{s}' && serve", .{cwd});
-    const send_keys = proc_runner.findCommandContaining(&recorder, expected) orelse return error.CommandNotFound;
-    try proc_runner.expectCommandArg(send_keys, 4, expected);
+    const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArg(respawn, 6, cwd);
+    try proc_runner.expectCommandArg(respawn, 9, "serve");
 }
