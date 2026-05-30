@@ -533,7 +533,7 @@ fn parseTestConfig(arena: *std.heap.ArenaAllocator, json: []const u8) !Config {
     return Config.parse(arena.allocator(), json, "/home/me");
 }
 
-test "loads defaults and resolves paths" {
+test "config.parse: loads defaults and resolves paths" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"~/work/demo","session_name":"demo"},
@@ -570,7 +570,7 @@ test "config.sessionName: defaults to project name" {
     try std.testing.expectEqualStrings("demo", try cfg.sessionName());
 }
 
-test "resolves profiles and phase group overrides" {
+test "config.resolvePhaseGroup: resolves profiles and phase group overrides" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -602,7 +602,7 @@ test "resolves profiles and phase group overrides" {
     try std.testing.expectEqual(@as(usize, 2), group.len);
 }
 
-test "resolves command phase profile overrides and fallback" {
+test "config.commandPhaseCommand: resolves command phase profile overrides and fallback" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -623,7 +623,7 @@ test "resolves command phase profile overrides and fallback" {
     try std.testing.expectEqualStrings("fallback", try Config.commandPhaseCommand(phases[1], "all"));
 }
 
-test "rejects unknown runtimes and missing services" {
+test "config.resolveGroup: rejects unknown runtimes and missing services" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -639,7 +639,7 @@ test "rejects unknown runtimes and missing services" {
     try std.testing.expectError(error.UnknownGroup, cfg.resolveGroup(arena.allocator(), "missing"));
 }
 
-test "rejects malformed group aliases" {
+test "config.parse: rejects malformed group aliases" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -653,7 +653,7 @@ test "rejects malformed group aliases" {
     try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
 }
 
-test "rejects legacy flat services" {
+test "config.parse: rejects legacy flat services" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -666,7 +666,7 @@ test "rejects legacy flat services" {
     try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
 }
 
-test "rejects legacy phases" {
+test "config.parse: rejects legacy phases" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -845,7 +845,7 @@ test "config.parse: rejects unknown public schema fields" {
     }
 }
 
-test "rejects invalid identifiers at config boundaries" {
+test "config.projectName: rejects invalid identifiers at config boundaries" {
     const json =
         \\{
         \\  "project": {"name":"bad name","root":"/tmp/demo","session_name":"demo"},
@@ -860,7 +860,7 @@ test "rejects invalid identifiers at config boundaries" {
     try std.testing.expectError(error.InvalidIdentifier, Config.serviceName((try cfg.services())[0]));
 }
 
-test "rejects project-relative service paths that escape root" {
+test "config.serviceDir: rejects project-relative service paths that escape root" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -874,7 +874,7 @@ test "rejects project-relative service paths that escape root" {
     try std.testing.expectError(error.InvalidPath, cfg.serviceDir(arena.allocator(), try cfg.findService("api")));
 }
 
-test "allows external service paths outside project root" {
+test "config.serviceDir: allows external service paths outside project root" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -888,7 +888,7 @@ test "allows external service paths outside project root" {
     try std.testing.expectEqualStrings("../external", try cfg.serviceDir(arena.allocator(), try cfg.findService("api")));
 }
 
-test "rejects docker paths that escape project root" {
+test "config.dockerDir: rejects docker paths that escape project root" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -903,7 +903,7 @@ test "rejects docker paths that escape project root" {
     try std.testing.expectError(error.InvalidPath, cfg.dockerDir(arena.allocator()));
 }
 
-test "parses synthetic fixture" {
+test "config.loadPath: parses synthetic fixture" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
