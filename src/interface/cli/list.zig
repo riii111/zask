@@ -37,6 +37,10 @@ pub fn run(ctx: *Context, opts: Options) !void {
 // Tests
 // -----------------------------------------------------------------------------
 
+fn testPrintHelp(writer: *std.Io.Writer) !void {
+    _ = writer;
+}
+
 test "options reject arguments" {
     try std.testing.expectError(error.InvalidArguments, Options.parse(&.{"extra"}));
 }
@@ -91,8 +95,4 @@ test "list.run: prints services and docker section" {
         \\- docker
         \\
     , writer.buffered());
-}
-
-fn testPrintHelp(writer: *std.Io.Writer) !void {
-    _ = writer;
 }
