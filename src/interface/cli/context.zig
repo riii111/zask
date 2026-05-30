@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const config = @import("../../model/config.zig");
+const diagnostics = @import("../../model/diagnostics.zig");
 const docker_client = @import("../../platform/docker.zig");
 const env = @import("../../platform/env.zig");
 const paths = @import("../../platform/paths.zig");
@@ -21,6 +22,7 @@ pub const CommandContext = struct {
     io: ?std.Io = null,
     environ: ?*const env.Map = null,
     argv0: []const u8 = "zask",
+    diagnostics: ?*diagnostics.Diagnostics = null,
 };
 
 pub const Context = struct {
@@ -50,7 +52,11 @@ pub fn isProjectAlias(argv0: []const u8) bool {
 fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
     const io = context.io orelse return error.MissingIo;
     const path = try absoluteConfigPath(context.gpa, io, if (parsed.config_path) |p| p else try projectConfigPath(context.gpa, context.environ, parsed.project orelse return error.ProjectRequired));
-    const cfg = try config.loadPath(context.gpa, io, path, try paths.home(context.environ));
+    const home = try paths.home(context.environ);
+    const cfg = if (context.diagnostics) |diags|
+        try config.loadPathDiagnostic(context.gpa, io, path, home, diags)
+    else
+        try config.loadPath(context.gpa, io, path, home);
     const runner: proc_runner.Runner = .{ .gpa = context.gpa, .io = io };
     return .{
         .gpa = context.gpa,
