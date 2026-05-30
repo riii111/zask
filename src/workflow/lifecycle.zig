@@ -207,8 +207,15 @@ pub const Lifecycle = struct {
     }
 
     fn dockerStartAlreadyHandled(self: Lifecycle, writer: *std.Io.Writer) !bool {
-        var state = try self.dockerStartPaneState();
-        if (state == .busy) {
+        var pane = self.tmux.observePane("docker");
+        defer pane.deinit(self.gpa);
+        switch (dockerStartDecision(pane)) {
+            .send_start => return false,
+            .window_not_ready => return error.WindowNotReady,
+            .tmux_unavailable => return error.TmuxUnavailable,
+            .no_op => {},
+        }
+        if (pane.state == .busy) {
             const compose = self.docker.observe();
             defer compose.deinit(self.gpa);
             switch (compose.state) {
@@ -218,7 +225,14 @@ pub const Lifecycle = struct {
                 },
                 .empty => {
                     if (waits.waitForPaneIdle(self, "docker")) {
-                        state = try self.dockerStartPaneState();
+                        var refreshed = self.tmux.observePane("docker");
+                        defer refreshed.deinit(self.gpa);
+                        return switch (dockerStartDecision(refreshed)) {
+                            .no_op => true,
+                            .send_start => false,
+                            .window_not_ready => error.WindowNotReady,
+                            .tmux_unavailable => error.TmuxUnavailable,
+                        };
                     } else {
                         try writeProgress(writer, "Docker already starting\n", .{});
                         return true;
@@ -230,18 +244,7 @@ pub const Lifecycle = struct {
                 },
             }
         }
-        return switch (dockerStartDecision(state)) {
-            .no_op => true,
-            .send_start => false,
-            .window_not_ready => error.WindowNotReady,
-            .tmux_unavailable => error.TmuxUnavailable,
-        };
-    }
-
-    fn dockerStartPaneState(self: Lifecycle) !observations.PaneState {
-        const pane = self.tmux.observePane("docker");
-        defer pane.deinit(self.gpa);
-        return pane.state;
+        return true;
     }
 };
 
@@ -291,8 +294,9 @@ fn serviceStopDecision(state: observations.PaneState) StopDecision {
     };
 }
 
-fn dockerStartDecision(state: observations.PaneState) StartDecision {
-    return startDecisionForState(state);
+fn dockerStartDecision(pane: observations.PaneObservation) StartDecision {
+    if (pane.command.len > 0 and tmux_client.isShellCommand(pane.command)) return .send_start;
+    return startDecisionForState(pane.state);
 }
 
 // -----------------------------------------------------------------------------
@@ -334,7 +338,7 @@ test "maps pane observations to lifecycle start and stop decisions" {
 
     for (cases) |case| {
         try std.testing.expectEqual(case.start, serviceStartDecision(observations.PaneObservation.empty(case.state)));
-        try std.testing.expectEqual(case.start, dockerStartDecision(case.state));
+        try std.testing.expectEqual(case.start, dockerStartDecision(observations.PaneObservation.empty(case.state)));
         try std.testing.expectEqual(case.stop, serviceStopDecision(case.state));
     }
 }
@@ -343,6 +347,12 @@ test "service start treats shell pane as startable" {
     const pane = observations.PaneObservation.fromOwned(.busy, "0", "12345", "zsh");
 
     try std.testing.expectEqual(StartDecision.send_start, serviceStartDecision(pane));
+}
+
+test "docker start treats shell pane as startable" {
+    const pane = observations.PaneObservation.fromOwned(.busy, "0", "12345", "zsh");
+
+    try std.testing.expectEqual(StartDecision.send_start, dockerStartDecision(pane));
 }
 
 test "precheck abort stops startup and warn continues" {
@@ -886,6 +896,39 @@ test "docker start sends compose up after transient busy pane" {
     try proc_runner.expectCommandArgContains(respawn, 9, "docker compose");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting Docker...") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
+}
+
+test "docker start respawns shell pane without compose probe" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"compose": "compose.yaml"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("api\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startTarget("docker", &writer);
+
+    const respawn = proc_runner.findCommandContaining(&recorder, "docker compose") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArg(respawn, 1, "respawn-pane");
+    try proc_runner.expectCommandOrder(&recorder, "pgrep", "respawn-pane");
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting Docker...") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker already starting") == null);
 }
 
 test "docker start disables compose menu and waits when started" {
