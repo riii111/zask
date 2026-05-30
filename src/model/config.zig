@@ -930,7 +930,8 @@ test "config.parse: parses receipt lab showcase fixture" {
 
     try std.testing.expectEqualStrings("receipt_lab", try cfg.projectName());
     try std.testing.expectEqual(@as(usize, 8), (try cfg.services()).len);
-    try std.testing.expectEqual(@as(usize, 3), cfg.phases().len);
+    try std.testing.expectEqual(@as(usize, 4), cfg.phases().len);
+    try std.testing.expectEqualStrings("docker", cfg.phases()[0].object.get("type").?.string);
     try std.testing.expectEqualStrings("bff-only", cfg.resolvePhaseGroup("dashboard", "backend"));
     try std.testing.expectEqualStrings("none", cfg.resolvePhaseGroup("dashboard", "workers"));
     try std.testing.expectEqual(@as(?i64, 18110), Config.servicePort(try cfg.findService("bff-dashboard")));

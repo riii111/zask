@@ -55,6 +55,10 @@
   },
   "startup_order": [
     {
+      "name": "Docker Services",
+      "docker": true
+    },
+    {
       "name": "Backend APIs",
       "group": "backend",
       "wait_ports": [
