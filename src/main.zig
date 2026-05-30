@@ -5,7 +5,7 @@ pub fn main(init: std.process.Init) !void {
     try zask.cli.run(init);
 }
 
-test "runs default command" {
+test "main: runs default command" {
     var buffer: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 

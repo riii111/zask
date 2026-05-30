@@ -41,7 +41,7 @@ fn testPrintHelp(writer: *std.Io.Writer) !void {
     _ = writer;
 }
 
-test "options reject arguments" {
+test "list.Options: rejects arguments" {
     try std.testing.expectError(error.InvalidArguments, Options.parse(&.{"extra"}));
 }
 

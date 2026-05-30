@@ -173,7 +173,7 @@ fn writeRule(writer: *std.Io.Writer, left: []const u8, fill: []const u8, right: 
     try writer.writeAll(right);
 }
 
-test "renders launcher frame with grouped services" {
+test "dashboard.renderLauncher: renders launcher frame with grouped services" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
