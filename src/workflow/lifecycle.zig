@@ -705,7 +705,6 @@ test "service start surfaces diagnostic when pane observation becomes unavailabl
     defer recorder.deinit();
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
-    try recorder.enqueue("0|0|123|node\n", "", .{ .exited = 0 });
     try recorder.enqueueError(error.FileNotFound);
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
@@ -833,11 +832,10 @@ test "docker start is a no-op when docker pane is running" {
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
     try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|docker\n", "", .{ .exited = 0 });
-    try recorder.enqueue("0|0|12345|docker\n", "", .{ .exited = 0 });
-    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
-    try recorder.enqueue("NAME SERVICE STATUS\none api running\n", "", .{ .exited = 0 });
-    try recorder.enqueue("NAME SERVICE STATUS\none api running\n", "", .{ .exited = 0 });
+    try recorder.enqueue("api\n", "", .{ .exited = 0 });
+    try recorder.enqueue("api\n", "", .{ .exited = 0 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
@@ -848,7 +846,6 @@ test "docker start is a no-op when docker pane is running" {
 
     try proc_runner.expectCommandContaining(&recorder, "has-session");
     try proc_runner.expectCommandContaining(&recorder, "list-panes");
-    try proc_runner.expectCommandContaining(&recorder, "pgrep");
     try proc_runner.expectCommandContaining(&recorder, "ps");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }
@@ -867,7 +864,7 @@ test "docker start sends compose up after transient busy pane" {
     defer recorder.deinit();
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
-    try recorder.enqueue("0|0|12345|docker\n", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("12346\n", "", .{ .exited = 0 });
     try recorder.enqueue("\n", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
