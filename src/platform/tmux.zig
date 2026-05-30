@@ -173,6 +173,7 @@ pub const Client = struct {
             else => return observations.PaneObservation.empty(.tmux_unavailable),
         };
         if (info.dead) return info.consumeIntoObservation(.dead);
+        if (!isShellCommand(info.command)) return info.consumeIntoObservation(.busy);
         const run_result = self.runner.run(&.{ "pgrep", "-P", info.pid }, .{}) catch return info.consumeIntoObservation(.tmux_unavailable);
         const result = runner.captured(run_result);
         defer self.gpa.free(result.stdout);
@@ -218,6 +219,14 @@ pub const Client = struct {
         _ = try self.runner.run(argv.items, .{ .check = true, .discard = true });
     }
 
+    pub fn respawnPane(self: Client, window: []const u8, cwd: []const u8, command: []const u8) !void {
+        const pane_target = try self.target(window);
+        defer self.gpa.free(pane_target);
+        const wrapped_command = try self.buildRespawnScript(command);
+        defer self.gpa.free(wrapped_command);
+        _ = try self.runner.run(&.{ self.tmux_path, "respawn-pane", "-k", "-t", pane_target, "-c", cwd, "sh", "-lc", wrapped_command }, .{ .check = true, .discard = true });
+    }
+
     pub fn setOption(self: Client, name: []const u8, value: []const u8) !void {
         _ = try self.runner.run(&.{ self.tmux_path, "set-option", "-t", self.session, name, value }, .{ .check = true, .discard = true });
     }
@@ -245,6 +254,20 @@ pub const Client = struct {
 
     fn target(self: Client, window: []const u8) ![]const u8 {
         return std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ self.session, window });
+    }
+
+    fn buildRespawnScript(self: Client, command: []const u8) ![]const u8 {
+        return std.fmt.allocPrint(self.gpa,
+            \\__zask_interrupted=0
+            \\trap '__zask_interrupted=1' INT
+            \\{s}
+            \\__zask_status=$?
+            \\# SIGINT may surface only as exit status 130 when the trap is not run.
+            \\if [ "$__zask_interrupted" = 1 ] || [ "$__zask_status" = 130 ]; then
+            \\  exec "${{SHELL:-sh}}"
+            \\fi
+            \\exit "$__zask_status"
+        , .{command});
     }
 };
 
@@ -463,6 +486,42 @@ test "sendKeys records tmux command through runner" {
     try runner.expectCommandArgv(command, &.{ "tmux", "send-keys", "-t", "demo:api", "echo ok", "Enter" });
 }
 
+test "tmux.respawnPane: records wrapped shell command" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    const client = testClient(&recorder);
+
+    try client.respawnPane("api", "/tmp/demo app", "npm run dev");
+
+    const command = recorder.commands.items[0];
+    try runner.expectCommandArg(command, 1, "respawn-pane");
+    try runner.expectCommandArg(command, 7, "sh");
+    try runner.expectCommandArg(command, 8, "-lc");
+    try runner.expectCommandArgContains(command, 9, "trap '__zask_interrupted=1' INT");
+    try runner.expectCommandArgContains(command, 9, "npm run dev");
+    try runner.expectCommandArgContains(command, 9, "exec \"${SHELL:-sh}\"");
+}
+
+test "tmux.buildRespawnScript: propagates command exit status" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const client = Client{
+        .gpa = std.testing.allocator,
+        .runner = undefined,
+        .session = "demo",
+    };
+    const wrapped_command = try client.buildRespawnScript("sh -c 'exit 7'");
+    defer std.testing.allocator.free(wrapped_command);
+
+    const result = try std.process.run(std.testing.allocator, threaded.io(), .{
+        .argv = &.{ "sh", "-c", wrapped_command },
+    });
+    defer std.testing.allocator.free(result.stdout);
+    defer std.testing.allocator.free(result.stderr);
+
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 7 }, result.term);
+}
+
 test "window sizing helpers record and parse tmux argv" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
@@ -488,18 +547,17 @@ test "window sizing helpers record and parse tmux argv" {
     try runner.expectCommandArgv(recorder.commands.items[3], &.{ "tmux", "choose-tree", "-Zw", "-t", "%1" });
 }
 
-test "paneRunning checks pane child processes" {
+test "paneRunning accepts direct non-shell process" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
-    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
     const client = testClient(&recorder);
 
     try std.testing.expect(client.paneRunning("api"));
-    try runner.expectCommandArgv(recorder.commands.items[1], &.{ "pgrep", "-P", "12345" });
+    try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
 }
 
-test "paneRunning rejects dead panes and panes without children" {
+test "paneRunning rejects dead panes and idle shell panes" {
     var dead_recorder = runner.Recorder.init(std.testing.allocator);
     defer dead_recorder.deinit();
     try dead_recorder.enqueue("1|130|12345|node\n", "", .{ .exited = 0 });
@@ -510,7 +568,7 @@ test "paneRunning rejects dead panes and panes without children" {
 
     var idle_recorder = runner.Recorder.init(std.testing.allocator);
     defer idle_recorder.deinit();
-    try idle_recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
+    try idle_recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try idle_recorder.enqueue("\n", "", .{ .exited = 1 });
     const idle_client = testClient(&idle_recorder);
 
@@ -562,7 +620,7 @@ test "observePane returns tmux unavailable when pane info cannot be captured" {
 test "observePane returns tmux unavailable with pane fields when pgrep cannot spawn" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
-    try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueueError(error.FileNotFound);
     const client = testClient(&recorder);
 
@@ -572,7 +630,7 @@ test "observePane returns tmux unavailable with pane fields when pgrep cannot sp
     try std.testing.expectEqual(observations.PaneState.tmux_unavailable, observation.state);
     try std.testing.expectEqualStrings("0", observation.exit_code);
     try std.testing.expectEqualStrings("12345", observation.pid);
-    try std.testing.expectEqualStrings("node", observation.command);
+    try std.testing.expectEqualStrings("zsh", observation.command);
     try runner.expectCommandArg(recorder.commands.items[1], 0, "pgrep");
 }
 

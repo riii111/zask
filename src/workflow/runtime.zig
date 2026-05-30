@@ -535,7 +535,6 @@ test "runtime.close: kills session after resource stop" {
     defer recorder.deinit();
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
-    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("\n", "", .{ .exited = 1 });

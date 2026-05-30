@@ -4,7 +4,6 @@ const config = @import("../../model/config.zig");
 const docker_client = @import("../../platform/docker.zig");
 const observations = @import("../../model/observations.zig");
 const proc_runner = @import("../../platform/runner.zig");
-const tmux_client = @import("../../platform/tmux.zig");
 const tmux_options = @import("../../model/tmux_options.zig");
 const Context = @import("context.zig").Context;
 
@@ -149,11 +148,11 @@ fn observeService(ctx: Context, service: std.json.Value) !observations.ServiceOb
 }
 
 fn shouldObserveHealth(pane: observations.PaneObservation) bool {
-    return pane.state == .busy and !tmux_client.isShellCommand(pane.command);
+    return pane.state == .busy;
 }
 
 fn shouldObserveCompose(pane: observations.PaneObservation) bool {
-    return pane.state == .busy and !tmux_client.isShellCommand(pane.command);
+    return pane.state == .busy;
 }
 
 fn observeHealth(ctx: Context, service: std.json.Value) !observations.HealthObservation {
@@ -185,7 +184,7 @@ fn serviceMonitorStatus(observation: observations.ServiceObservation) MonitorSta
         .dead => .dead,
         .idle, .window_missing => .stop,
         .tmux_unavailable => .unknown,
-        .busy => if (tmux_client.isShellCommand(observation.pane.command)) .stop else healthMonitorStatus(observation.health),
+        .busy => healthMonitorStatus(observation.health),
     };
 }
 
@@ -194,7 +193,7 @@ fn dockerMonitorStatus(pane: observations.PaneObservation, compose: observations
         .dead => .dead,
         .idle, .window_missing => .stop,
         .tmux_unavailable => .unknown,
-        .busy => if (tmux_client.isShellCommand(pane.command)) .stop else switch (compose.state) {
+        .busy => switch (compose.state) {
             .running => .live,
             .empty => .ready,
             .unavailable => .unknown,
@@ -252,7 +251,7 @@ fn recordedCommandCount(recorder: *const proc_runner.Recorder, name: []const u8)
     return count;
 }
 
-test "service monitor skips health checks unless pane is busy" {
+test "monitor.service: skips health checks unless pane is busy" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -274,9 +273,36 @@ test "service monitor skips health checks unless pane is busy" {
     try std.testing.expectEqual(MonitorStatus.stop, row.status);
     try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "nc"));
     try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "curl"));
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "docker monitor skips compose observation unless pane is busy" {
+test "monitor.service: checks health for busy shell panes" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve","port":3000}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const ctx: Context = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+
+    const row = try serviceMonitorRow(ctx, (try cfg.services())[0]);
+
+    try std.testing.expectEqual(MonitorStatus.live, row.status);
+    try std.testing.expectEqual(@as(usize, 1), recordedCommandCount(&recorder, "nc"));
+    try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "curl"));
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "monitor.docker: skips compose observation unless pane is busy" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -298,4 +324,31 @@ test "docker monitor skips compose observation unless pane is busy" {
 
     try std.testing.expectEqual(MonitorStatus.stop, row.status);
     try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "docker"));
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "monitor.docker: checks compose for busy shell panes" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"compose": "compose.yaml"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
+    try recorder.enqueue("api\n", "", .{ .exited = 0 });
+    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const ctx: Context = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+
+    const row = try dockerMonitorRow(ctx);
+
+    try std.testing.expectEqual(MonitorStatus.live, row.status);
+    try std.testing.expectEqual(@as(usize, 1), recordedCommandCount(&recorder, "docker"));
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }

@@ -170,11 +170,10 @@ pub const Lifecycle = struct {
                 return error.TmuxUnavailable;
             },
         }
-        const service_dir = try shell.quote(self.gpa, try pathing.absolute(self.gpa, self.runner.io, try self.cfg.serviceDir(self.gpa, value)));
+        const service_dir = try pathing.absolute(self.gpa, self.runner.io, try self.cfg.serviceDir(self.gpa, value));
         const start_command = try config.Config.serviceStartCommand(self.gpa, value);
-        const cmd = try std.fmt.allocPrint(self.gpa, "cd {s} && {s}", .{ service_dir, start_command });
         try writeProgress(writer, "Starting {s}...\n", .{service});
-        try self.tmux.sendKeys(service, &.{ cmd, "Enter" });
+        try self.tmux.respawnPane(service, service_dir, start_command);
     }
 
     fn ensureServiceStopped(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
@@ -201,10 +200,10 @@ pub const Lifecycle = struct {
         try waits.ensureWindowReady(self, "docker");
         if (try self.dockerStartAlreadyHandled(writer)) return;
         try writeProgress(writer, "Starting Docker...\n", .{});
-        const docker_dir = try shell.quote(self.gpa, try pathing.absolute(self.gpa, self.runner.io, try self.cfg.dockerDir(self.gpa)));
+        const docker_dir = try pathing.absolute(self.gpa, self.runner.io, try self.cfg.dockerDir(self.gpa));
         const compose_file = try shell.quote(self.gpa, self.cfg.dockerComposeFile());
-        const cmd = try std.fmt.allocPrint(self.gpa, "cd {s} && COMPOSE_MENU=false docker compose -f {s} up", .{ docker_dir, compose_file });
-        try self.tmux.sendKeys("docker", &.{ cmd, "Enter" });
+        const cmd = try std.fmt.allocPrint(self.gpa, "COMPOSE_MENU=false docker compose -f {s} up", .{compose_file});
+        try self.tmux.respawnPane("docker", docker_dir, cmd);
     }
 
     fn dockerStartAlreadyHandled(self: Lifecycle, writer: *std.Io.Writer) !bool {
@@ -403,8 +402,8 @@ test "startAll starts idle docker before service command" {
     try lifecycle.startAll("all", &writer);
 
     try proc_runner.expectCommandContaining(&recorder, "docker compose");
-    try proc_runner.expectCommandContaining(&recorder, "cd '/tmp/demo/backend' && serve");
-    try proc_runner.expectCommandOrder(&recorder, "docker compose", "cd '/tmp/demo/backend' && serve");
+    try proc_runner.expectCommandContaining(&recorder, "serve");
+    try proc_runner.expectCommandOrder(&recorder, "docker compose", "serve");
     try proc_runner.expectNoTmuxSizingCommands(&recorder);
     try proc_runner.expectNoRemainingResponses(&recorder);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
@@ -445,7 +444,7 @@ test "startAll honors docker startup order step" {
     try lifecycle.startAll("all", &writer);
 
     try proc_runner.expectCommandOrder(&recorder, "echo setup", "docker compose");
-    try proc_runner.expectCommandOrder(&recorder, "docker compose", "cd '/tmp/demo/backend' && serve");
+    try proc_runner.expectCommandOrder(&recorder, "docker compose", "serve");
     try proc_runner.expectNoTmuxSizingCommands(&recorder);
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
@@ -706,7 +705,6 @@ test "service start surfaces diagnostic when pane observation becomes unavailabl
     defer recorder.deinit();
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
-    try recorder.enqueue("0|0|123|node\n", "", .{ .exited = 0 });
     try recorder.enqueueError(error.FileNotFound);
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
@@ -834,11 +832,10 @@ test "docker start is a no-op when docker pane is running" {
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
     try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|docker\n", "", .{ .exited = 0 });
-    try recorder.enqueue("0|0|12345|docker\n", "", .{ .exited = 0 });
-    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
-    try recorder.enqueue("NAME SERVICE STATUS\none api running\n", "", .{ .exited = 0 });
-    try recorder.enqueue("NAME SERVICE STATUS\none api running\n", "", .{ .exited = 0 });
+    try recorder.enqueue("api\n", "", .{ .exited = 0 });
+    try recorder.enqueue("api\n", "", .{ .exited = 0 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
@@ -849,7 +846,6 @@ test "docker start is a no-op when docker pane is running" {
 
     try proc_runner.expectCommandContaining(&recorder, "has-session");
     try proc_runner.expectCommandContaining(&recorder, "list-panes");
-    try proc_runner.expectCommandContaining(&recorder, "pgrep");
     try proc_runner.expectCommandContaining(&recorder, "ps");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }
@@ -868,7 +864,7 @@ test "docker start sends compose up after transient busy pane" {
     defer recorder.deinit();
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
-    try recorder.enqueue("0|0|12345|docker\n", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("12346\n", "", .{ .exited = 0 });
     try recorder.enqueue("\n", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
@@ -885,9 +881,9 @@ test "docker start sends compose up after transient busy pane" {
 
     try lifecycle.startTarget("docker", &writer);
 
-    const send_keys = proc_runner.findCommandContaining(&recorder, "docker compose") orelse return error.CommandNotFound;
-    try proc_runner.expectCommandArg(send_keys, 1, "send-keys");
-    try proc_runner.expectCommandArgContains(send_keys, 4, "docker compose");
+    const respawn = proc_runner.findCommandContaining(&recorder, "docker compose") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArg(respawn, 1, "respawn-pane");
+    try proc_runner.expectCommandArgContains(respawn, 9, "docker compose");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting Docker...") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }
@@ -918,9 +914,9 @@ test "docker start disables compose menu and waits when started" {
 
     try lifecycle.startTarget("docker", &writer);
 
-    const send_keys = proc_runner.findCommandContaining(&recorder, "COMPOSE_MENU=false") orelse return error.CommandNotFound;
-    try proc_runner.expectCommandArg(send_keys, 1, "send-keys");
-    try proc_runner.expectCommandArgContains(send_keys, 4, "COMPOSE_MENU=false");
+    const respawn = proc_runner.findCommandContaining(&recorder, "COMPOSE_MENU=false") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArg(respawn, 1, "respawn-pane");
+    try proc_runner.expectCommandArgContains(respawn, 9, "COMPOSE_MENU=false");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }
 
@@ -985,7 +981,7 @@ test "docker restart runs compose down before compose up" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "startAll dispatches quoted service command to tmux" {
+test "startAll respawns service pane without sending command to shell history" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo app","session_name":"demo"},
@@ -1004,8 +1000,13 @@ test "startAll dispatches quoted service command to tmux" {
 
     try lifecycle.startAll("all", &writer);
 
-    const send_keys = proc_runner.findCommandContaining(&recorder, "cd '/tmp/demo app/backend' && serve") orelse return error.CommandNotFound;
-    try proc_runner.expectCommandArgv(send_keys, &.{ "tmux", "send-keys", "-t", "demo:api", "cd '/tmp/demo app/backend' && serve", "Enter" });
+    const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArg(respawn, 1, "respawn-pane");
+    try proc_runner.expectCommandArg(respawn, 6, "/tmp/demo app/backend");
+    try proc_runner.expectCommandArg(respawn, 7, "sh");
+    try proc_runner.expectCommandArg(respawn, 8, "-lc");
+    try proc_runner.expectCommandArgContains(respawn, 9, "serve");
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "send-keys") == null);
 }
 
 test "startAll resolves relative service cwd before sending command" {
@@ -1030,7 +1031,7 @@ test "startAll resolves relative service cwd before sending command" {
 
     try lifecycle.startAll("all", &writer);
 
-    const expected = try std.fmt.allocPrint(arena.allocator(), "cd '{s}' && serve", .{cwd});
-    const send_keys = proc_runner.findCommandContaining(&recorder, expected) orelse return error.CommandNotFound;
-    try proc_runner.expectCommandArg(send_keys, 4, expected);
+    const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArg(respawn, 6, cwd);
+    try proc_runner.expectCommandArgContains(respawn, 9, "serve");
 }
