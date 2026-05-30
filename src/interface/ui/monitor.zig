@@ -243,6 +243,10 @@ fn countMonitorRow(row: MonitorRow, live_count: *usize, warn_count: *usize, dead
     }
 }
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 fn recordedCommandCount(recorder: *const proc_runner.Recorder, name: []const u8) usize {
     var count: usize = 0;
     for (recorder.commands.items) |command| {
