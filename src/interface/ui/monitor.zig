@@ -251,7 +251,7 @@ fn recordedCommandCount(recorder: *const proc_runner.Recorder, name: []const u8)
     return count;
 }
 
-test "service monitor skips health checks unless pane is busy" {
+test "monitor.service: skips health checks unless pane is busy" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -273,9 +273,10 @@ test "service monitor skips health checks unless pane is busy" {
     try std.testing.expectEqual(MonitorStatus.stop, row.status);
     try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "nc"));
     try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "curl"));
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "service monitor checks health for busy shell panes" {
+test "monitor.service: checks health for busy shell panes" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -289,7 +290,6 @@ test "service monitor checks health for busy shell panes" {
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("12346\n", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
-    try recorder.enqueue("", "", .{ .exited = 0 });
     const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     const ctx: Context = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
@@ -299,9 +299,10 @@ test "service monitor checks health for busy shell panes" {
     try std.testing.expectEqual(MonitorStatus.live, row.status);
     try std.testing.expectEqual(@as(usize, 1), recordedCommandCount(&recorder, "nc"));
     try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "curl"));
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "docker monitor skips compose observation unless pane is busy" {
+test "monitor.docker: skips compose observation unless pane is busy" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -323,9 +324,10 @@ test "docker monitor skips compose observation unless pane is busy" {
 
     try std.testing.expectEqual(MonitorStatus.stop, row.status);
     try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "docker"));
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "docker monitor checks compose for busy shell panes" {
+test "monitor.docker: checks compose for busy shell panes" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -348,4 +350,5 @@ test "docker monitor checks compose for busy shell panes" {
 
     try std.testing.expectEqual(MonitorStatus.live, row.status);
     try std.testing.expectEqual(@as(usize, 1), recordedCommandCount(&recorder, "docker"));
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }

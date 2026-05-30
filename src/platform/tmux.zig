@@ -222,7 +222,7 @@ pub const Client = struct {
     pub fn respawnPane(self: Client, window: []const u8, cwd: []const u8, command: []const u8) !void {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
-        const wrapped_command = try self.respawnShellCommand(command);
+        const wrapped_command = try self.buildRespawnScript(command);
         defer self.gpa.free(wrapped_command);
         _ = try self.runner.run(&.{ self.tmux_path, "respawn-pane", "-k", "-t", pane_target, "-c", cwd, "sh", "-lc", wrapped_command }, .{ .check = true, .discard = true });
     }
@@ -256,7 +256,7 @@ pub const Client = struct {
         return std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ self.session, window });
     }
 
-    fn respawnShellCommand(self: Client, command: []const u8) ![]const u8 {
+    fn buildRespawnScript(self: Client, command: []const u8) ![]const u8 {
         return std.fmt.allocPrint(self.gpa,
             \\__zask_interrupted=0
             \\trap '__zask_interrupted=1' INT
@@ -486,7 +486,7 @@ test "sendKeys records tmux command through runner" {
     try runner.expectCommandArgv(command, &.{ "tmux", "send-keys", "-t", "demo:api", "echo ok", "Enter" });
 }
 
-test "respawnPane records shell command through runner" {
+test "tmux.respawnPane: records wrapped shell command" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     const client = testClient(&recorder);
@@ -502,7 +502,7 @@ test "respawnPane records shell command through runner" {
     try runner.expectCommandArgContains(command, 9, "exec \"${SHELL:-sh}\"");
 }
 
-test "respawnPane wrapper preserves command exit status" {
+test "tmux.buildRespawnScript: propagates command exit status" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     const client = Client{
@@ -510,7 +510,7 @@ test "respawnPane wrapper preserves command exit status" {
         .runner = undefined,
         .session = "demo",
     };
-    const wrapped_command = try client.respawnShellCommand("sh -c 'exit 7'");
+    const wrapped_command = try client.buildRespawnScript("sh -c 'exit 7'");
     defer std.testing.allocator.free(wrapped_command);
 
     const result = try std.process.run(std.testing.allocator, threaded.io(), .{
