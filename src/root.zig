@@ -3,6 +3,7 @@ const std = @import("std");
 pub const cli = @import("interface/cli.zig");
 pub const config = @import("model/config.zig");
 pub const config_value = @import("model/config_value.zig");
+pub const diagnostics = @import("model/diagnostics.zig");
 pub const dashboard = @import("interface/ui/dashboard.zig");
 pub const docker = @import("platform/docker.zig");
 pub const lifecycle = @import("workflow/lifecycle.zig");
