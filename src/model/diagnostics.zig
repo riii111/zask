@@ -5,10 +5,9 @@ pub const Diagnostic = struct {
     message: []const u8,
 };
 
-/// Collects user-facing config problems as `path / message` pairs so that
-/// validation can report every issue at once instead of failing on the first.
-/// Entries borrow the collector's allocator; callers use the same arena that
-/// owns the parsed config, so nothing is freed individually.
+/// Accumulates config problems as `path / message` pairs so validation can
+/// report every issue at once instead of failing on the first. Pass an arena:
+/// `deinit` drops only the entry list, never the stored strings.
 pub const Diagnostics = struct {
     gpa: std.mem.Allocator,
     items: std.ArrayList(Diagnostic),

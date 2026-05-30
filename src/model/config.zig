@@ -13,12 +13,12 @@ pub const Config = struct {
     pub fn parse(gpa: std.mem.Allocator, json: []const u8, home: []const u8) !Config {
         var diags = diagnostics.Diagnostics.init(gpa);
         defer diags.deinit();
-        return parseDiagnostic(gpa, json, home, &diags);
+        return parseWithDiagnostics(gpa, json, home, &diags);
     }
 
     // Like parse, but records validation problems into the caller's collector so
     // the CLI can render them. On error.InvalidConfig, diags holds every issue.
-    pub fn parseDiagnostic(gpa: std.mem.Allocator, json: []const u8, home: []const u8, diags: *diagnostics.Diagnostics) !Config {
+    pub fn parseWithDiagnostics(gpa: std.mem.Allocator, json: []const u8, home: []const u8, diags: *diagnostics.Diagnostics) !Config {
         const value = parseJsonBytes(gpa, json) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => return error.InvalidConfigSyntax,
@@ -243,18 +243,18 @@ pub const Config = struct {
 pub fn loadPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []const u8) !Config {
     var diags = diagnostics.Diagnostics.init(gpa);
     defer diags.deinit();
-    return loadPathDiagnostic(gpa, io, path, home, &diags);
+    return loadPathWithDiagnostics(gpa, io, path, home, &diags);
 }
 
 // Like loadPath, but records config validation problems into the caller's
 // collector. File and JSON-syntax failures stay as plain errors.
-pub fn loadPathDiagnostic(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []const u8, diags: *diagnostics.Diagnostics) !Config {
+pub fn loadPathWithDiagnostics(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []const u8, diags: *diagnostics.Diagnostics) !Config {
     const bytes = readFile(gpa, io, path) catch |err| switch (err) {
         error.FileNotFound => return error.ConfigNotFound,
         error.StreamTooLong => return error.ConfigTooLarge,
         else => return err,
     };
-    return Config.parseDiagnostic(gpa, bytes, home, diags);
+    return Config.parseWithDiagnostics(gpa, bytes, home, diags);
 }
 
 pub fn parseJsonBytes(gpa: std.mem.Allocator, bytes: []const u8) !Value {

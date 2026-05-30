@@ -54,7 +54,7 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
     const path = try absoluteConfigPath(context.gpa, io, if (parsed.config_path) |p| p else try projectConfigPath(context.gpa, context.environ, parsed.project orelse return error.ProjectRequired));
     const home = try paths.home(context.environ);
     const cfg = if (context.diagnostics) |diags|
-        try config.loadPathDiagnostic(context.gpa, io, path, home, diags)
+        try config.loadPathWithDiagnostics(context.gpa, io, path, home, diags)
     else
         try config.loadPath(context.gpa, io, path, home);
     const runner: proc_runner.Runner = .{ .gpa = context.gpa, .io = io };
