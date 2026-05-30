@@ -218,6 +218,12 @@ pub const Client = struct {
         _ = try self.runner.run(argv.items, .{ .check = true, .discard = true });
     }
 
+    pub fn respawnPane(self: Client, window: []const u8, cwd: []const u8, command: []const u8) !void {
+        const pane_target = try self.target(window);
+        defer self.gpa.free(pane_target);
+        _ = try self.runner.run(&.{ self.tmux_path, "respawn-pane", "-k", "-t", pane_target, "-c", cwd, "sh", "-lc", command }, .{ .check = true, .discard = true });
+    }
+
     pub fn setOption(self: Client, name: []const u8, value: []const u8) !void {
         _ = try self.runner.run(&.{ self.tmux_path, "set-option", "-t", self.session, name, value }, .{ .check = true, .discard = true });
     }
@@ -461,6 +467,17 @@ test "sendKeys records tmux command through runner" {
 
     const command = recorder.commands.items[0];
     try runner.expectCommandArgv(command, &.{ "tmux", "send-keys", "-t", "demo:api", "echo ok", "Enter" });
+}
+
+test "respawnPane records shell command through runner" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    const client = testClient(&recorder);
+
+    try client.respawnPane("api", "/tmp/demo app", "npm run dev");
+
+    const command = recorder.commands.items[0];
+    try runner.expectCommandArgv(command, &.{ "tmux", "respawn-pane", "-k", "-t", "demo:api", "-c", "/tmp/demo app", "sh", "-lc", "npm run dev" });
 }
 
 test "window sizing helpers record and parse tmux argv" {
