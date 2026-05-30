@@ -54,6 +54,7 @@ pub const Lifecycle = struct {
             return waits.ensureDockerReady(self, writer);
         }
         if (self.cfg.resolveGroup(self.gpa, target)) |services| {
+            defer self.gpa.free(services);
             for (services) |svc| try self.startService(svc, writer);
         } else |_| try self.startService(target, writer);
     }
@@ -74,6 +75,7 @@ pub const Lifecycle = struct {
         }
         if (std.mem.eql(u8, target, "--all")) return self.stopAll(writer);
         if (self.cfg.resolveGroup(self.gpa, target)) |services| {
+            defer self.gpa.free(services);
             for (services) |svc| try self.stopService(svc, writer);
         } else |_| try self.stopService(target, writer);
     }
@@ -87,6 +89,7 @@ pub const Lifecycle = struct {
         }
         try self.ensureSessionActive(writer);
         if (self.cfg.resolveGroup(self.gpa, target)) |services| {
+            defer self.gpa.free(services);
             for (services) |svc| try self.restartService(svc, writer);
         } else |_| try self.restartService(target, writer);
     }

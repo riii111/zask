@@ -63,7 +63,9 @@ pub fn runServicePhase(ctx: anytype, phase: std.json.Value, profile: []const u8,
         for (groups.array.items) |group_value| {
             if (group_value != .string) continue;
             const group = ctx.cfg.resolvePhaseGroup(profile, group_value.string);
-            for (try ctx.cfg.resolveGroup(ctx.gpa, group)) |svc| try ctx.startService(svc, writer);
+            const svcs = try ctx.cfg.resolveGroup(ctx.gpa, group);
+            defer ctx.gpa.free(svcs);
+            for (svcs) |svc| try ctx.startService(svc, writer);
         }
     };
     if (phase.object.get("wait_ports")) |ports| if (ports == .array) {
