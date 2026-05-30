@@ -920,3 +920,22 @@ test "parses synthetic fixture" {
     try std.testing.expectEqualStrings("compose.yaml", cfg.dockerComposeFile());
     try std.testing.expectEqual(@as(i64, 5), cfg.dockerWaitTimeout());
 }
+
+test "config.parse: parses receipt lab showcase fixture" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const cfg = try loadPath(arena.allocator(), threaded.io(), "testdata/showcase/receipt-lab/zask.json", "/home/me");
+
+    try std.testing.expectEqualStrings("receipt_lab", try cfg.projectName());
+    try std.testing.expectEqual(@as(usize, 8), (try cfg.services()).len);
+    try std.testing.expectEqual(@as(usize, 3), cfg.phases().len);
+    try std.testing.expectEqualStrings("bff-only", cfg.resolvePhaseGroup("dashboard", "backend"));
+    try std.testing.expectEqualStrings("none", cfg.resolvePhaseGroup("dashboard", "workers"));
+    try std.testing.expectEqual(@as(?i64, 18110), Config.servicePort(try cfg.findService("bff-dashboard")));
+    try std.testing.expect(cfg.dockerEnabled());
+    try std.testing.expectEqualStrings("testdata/showcase/receipt-lab/infra", try cfg.dockerDir(arena.allocator()));
+    try std.testing.expectEqualStrings("compose.yaml", cfg.dockerComposeFile());
+    try std.testing.expectEqual(@as(i64, 5), cfg.dockerWaitTimeout());
+}

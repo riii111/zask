@@ -1,0 +1,158 @@
+{
+  "project": {
+    "name": "receipt_lab",
+    "root": "testdata/showcase/receipt-lab",
+    "session_name": "receipt-lab"
+  },
+  "docker": {
+    "compose": "infra/compose.yaml",
+    "wait_timeout_seconds": 5
+  },
+  "prechecks": [
+    {
+      "name": "showcase runtime",
+      "command": "python3 scripts/check_showcase.py",
+      "on_fail": "abort",
+      "hint": "Install python3 or run from the repository root."
+    }
+  ],
+  "start_profiles": {
+    "dashboard": {
+      "profile": "dashboard",
+      "label": "dashboard and BFF",
+      "group_overrides": {
+        "backend": "bff-only",
+        "workers": "none"
+      }
+    }
+  },
+  "group_aliases": {
+    "none": [],
+    "bff-only": [
+      "bff-dashboard"
+    ],
+    "api-tier": [
+      "bff-dashboard",
+      "api-core",
+      "api-files",
+      "realtime"
+    ],
+    "worker-tier": [
+      "ocr-worker",
+      "email-worker",
+      "scheduler"
+    ],
+    "all-services": [
+      "bff-dashboard",
+      "api-core",
+      "api-files",
+      "realtime",
+      "web-console",
+      "ocr-worker",
+      "email-worker",
+      "scheduler"
+    ]
+  },
+  "startup_order": [
+    {
+      "name": "Backend APIs",
+      "group": "backend",
+      "wait_ports": [
+        18110
+      ]
+    },
+    {
+      "name": "Frontend",
+      "group": "frontend",
+      "wait_ports": [
+        18173
+      ]
+    },
+    {
+      "name": "Workers",
+      "group": "workers"
+    }
+  ],
+  "groups": [
+    {
+      "name": "backend",
+      "services": [
+        {
+          "name": "bff-dashboard",
+          "dir": ".",
+          "command": "python3 scripts/service.py http --name bff-dashboard --role bff --port 18110 --upstream api-core=http://localhost:18120/health --upstream api-files=http://localhost:18130/health --upstream realtime=http://localhost:18140/health",
+          "port": 18110,
+          "healthcheck": {
+            "type": "http",
+            "path": "/health"
+          }
+        },
+        {
+          "name": "api-core",
+          "dir": ".",
+          "command": "python3 scripts/service.py http --name api-core --role ledger-api --port 18120",
+          "port": 18120,
+          "healthcheck": {
+            "type": "http",
+            "path": "/health"
+          }
+        },
+        {
+          "name": "api-files",
+          "dir": ".",
+          "command": "python3 scripts/service.py http --name api-files --role file-api --port 18130",
+          "port": 18130,
+          "healthcheck": {
+            "type": "http",
+            "path": "/health"
+          }
+        },
+        {
+          "name": "realtime",
+          "dir": ".",
+          "command": "python3 scripts/service.py http --name realtime --role event-stream --port 18140",
+          "port": 18140,
+          "healthcheck": {
+            "type": "http",
+            "path": "/health"
+          }
+        }
+      ]
+    },
+    {
+      "name": "frontend",
+      "services": [
+        {
+          "name": "web-console",
+          "dir": ".",
+          "command": "python3 scripts/service.py http --name web-console --role operator-ui --port 18173 --upstream bff-dashboard=http://localhost:18110/health",
+          "port": 18173,
+          "healthcheck": {
+            "type": "http",
+            "path": "/health"
+          }
+        }
+      ]
+    },
+    {
+      "name": "workers",
+      "services": [
+        {
+          "name": "ocr-worker",
+          "dir": ".",
+          "command": "python3 scripts/service.py worker --name ocr-worker --role receipt-ocr --queue receipts.pending --interval 2"
+        },
+        {
+          "name": "email-worker",
+          "dir": ".",
+          "command": "python3 scripts/service.py worker --name email-worker --role mailbox-ingest --queue inbox.new --interval 3"
+        },
+        {
+          "name": "scheduler",
+          "dir": ".",
+          "command": "python3 scripts/service.py worker --name scheduler --role retry-scheduler --queue jobs.delayed --interval 5"
+        }
+      ]
+    }
+  ]
+}

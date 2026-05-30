@@ -153,3 +153,15 @@ Without direnv:
 ```bash
 nix develop
 ```
+
+## Showcase Fixture
+
+The repository includes a fictional Receipt Lab workspace for public
+screenshots and local behavior checks. It models a web console, BFF, backend
+APIs, workers, and optional Docker-backed infrastructure without using any
+private project names.
+
+```bash
+zig build run -- --config testdata/showcase/receipt-lab/zask.json list
+zig build run -- --config testdata/showcase/receipt-lab/zask.json open --dashboard
+```
