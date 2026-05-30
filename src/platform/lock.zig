@@ -61,7 +61,7 @@ pub const Lock = struct {
 
 fn ensurePrivateDir(io: std.Io, path: []const u8) !void {
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
-    var dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .follow_symlinks = false });
+    var dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true, .follow_symlinks = false });
     defer dir.close(io);
     try dir.setPermissions(io, private_dir_permissions);
 }
