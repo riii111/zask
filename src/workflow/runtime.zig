@@ -927,7 +927,7 @@ test "runtime.previewList: rejects resized window mismatch" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "syncWindowSizes resizes windows without opening tree mode" {
+test "runtime.syncWindowSizes: resizes windows without opening tree mode" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},

@@ -27,7 +27,7 @@ pub fn relativeSubPath(value: []const u8) !void {
 // Tests
 // -----------------------------------------------------------------------------
 
-test "identifier accepts alphanumeric underscore and hyphen after first byte" {
+test "validate.identifier: accepts alphanumeric underscore and hyphen after first byte" {
     const cases = [_][]const u8{
         "sample-agent",
         "studio_api",
@@ -38,7 +38,7 @@ test "identifier accepts alphanumeric underscore and hyphen after first byte" {
     }
 }
 
-test "identifier rejects empty pathlike quoted and leading hyphen input" {
+test "validate.identifier: rejects empty pathlike quoted and leading hyphen input" {
     const cases = [_][]const u8{
         "",
         "../sample",
@@ -51,7 +51,7 @@ test "identifier rejects empty pathlike quoted and leading hyphen input" {
     }
 }
 
-test "relative subpath accepts empty current and nested paths" {
+test "validate.relativeSubPath: accepts empty current and nested paths" {
     const cases = [_][]const u8{
         "",
         ".",
@@ -62,7 +62,7 @@ test "relative subpath accepts empty current and nested paths" {
     }
 }
 
-test "relative subpath rejects parent traversal and absolute paths" {
+test "validate.relativeSubPath: rejects parent traversal and absolute paths" {
     const cases = [_][]const u8{
         "../escape",
         "backend/../escape",

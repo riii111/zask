@@ -356,7 +356,7 @@ fn testClient(recorder: *runner.Recorder) Client {
     };
 }
 
-test "observeSession distinguishes active missing and unavailable" {
+test "tmux.observeSession: distinguishes active missing and unavailable" {
     const cases = [_]struct {
         term: ?std.process.Child.Term,
         stderr: []const u8 = "",
@@ -381,7 +381,7 @@ test "observeSession distinguishes active missing and unavailable" {
     }
 }
 
-test "newSession records tmux session argv" {
+test "tmux.newSession: records session argv" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     const client = testClient(&recorder);
@@ -393,7 +393,7 @@ test "newSession records tmux session argv" {
     try runner.expectCommandArgv(command, &.{ "tmux", "new-session", "-d", "-s", "demo", "-n", "dashboard", "-c", "/tmp/demo app", "zask dashboard" });
 }
 
-test "window layout helpers record tmux argv" {
+test "tmux.window: layout helpers record argv" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     const client = testClient(&recorder);
@@ -412,7 +412,7 @@ test "window layout helpers record tmux argv" {
     try runner.expectCommandArgv(layout, &.{ "tmux", "select-layout", "-t", "demo:dashboard", "main-vertical" });
 }
 
-test "newWindow records append target when requested" {
+test "tmux.newWindow: records append target when requested" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     const client = testClient(&recorder);
@@ -427,7 +427,7 @@ test "newWindow records append target when requested" {
     try runner.expectCommandArgv(after_window, &.{ "tmux", "new-window", "-d", "-a", "-t", "demo:api", "-n", "worker", "-c", "/tmp/demo app/worker", "echo worker" });
 }
 
-test "client lifecycle commands record tmux argv" {
+test "tmux.client: lifecycle commands record argv" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     const client = testClient(&recorder);
@@ -446,7 +446,7 @@ test "client lifecycle commands record tmux argv" {
     try runner.expectCommandArgv(recorder.commands.items[4], &.{ "tmux", "kill-session", "-t", "demo" });
 }
 
-test "listClients parses attached client names" {
+test "tmux.listClients: parses attached client names" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("/dev/ttys001\n/dev/ttys002\n", "", .{ .exited = 0 });
@@ -461,7 +461,7 @@ test "listClients parses attached client names" {
     try std.testing.expectEqualStrings("/dev/ttys002", clients[1].name);
 }
 
-test "options and binding helpers record tmux argv" {
+test "tmux.option: option and binding helpers record argv" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     const client = testClient(&recorder);
@@ -475,7 +475,7 @@ test "options and binding helpers record tmux argv" {
     try runner.expectCommandArgv(recorder.commands.items[2], &.{ "tmux", "bind-key", "-T", "prefix", "w", "run-shell", "zask preview-list" });
 }
 
-test "sendKeys records tmux command through runner" {
+test "tmux.sendKeys: records command through runner" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     const client = testClient(&recorder);
@@ -522,7 +522,7 @@ test "tmux.buildRespawnScript: propagates command exit status" {
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 7 }, result.term);
 }
 
-test "window sizing helpers record and parse tmux argv" {
+test "tmux.resizeWindow: sizing helpers record and parse argv" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("@1|120|39\n@2|120|39\n", "", .{ .exited = 0 });
@@ -547,7 +547,7 @@ test "window sizing helpers record and parse tmux argv" {
     try runner.expectCommandArgv(recorder.commands.items[3], &.{ "tmux", "choose-tree", "-Zw", "-t", "%1" });
 }
 
-test "paneRunning accepts direct non-shell process" {
+test "tmux.paneRunning: accepts direct non-shell process" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
@@ -557,7 +557,7 @@ test "paneRunning accepts direct non-shell process" {
     try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
 }
 
-test "paneRunning rejects dead panes and idle shell panes" {
+test "tmux.paneRunning: rejects dead panes and idle shell panes" {
     var dead_recorder = runner.Recorder.init(std.testing.allocator);
     defer dead_recorder.deinit();
     try dead_recorder.enqueue("1|130|12345|node\n", "", .{ .exited = 0 });
@@ -575,7 +575,7 @@ test "paneRunning rejects dead panes and idle shell panes" {
     try std.testing.expect(!idle_client.paneRunning("api"));
 }
 
-test "observePane returns window missing when pane info command fails" {
+test "tmux.observePane: returns window missing when pane info command fails" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("", "no such window", .{ .exited = 1 });
@@ -590,7 +590,7 @@ test "observePane returns window missing when pane info command fails" {
     try std.testing.expectEqualStrings("", observation.command);
 }
 
-test "observePane returns tmux unavailable when pane info hits permission denied" {
+test "tmux.observePane: returns unavailable on pane info permission denied" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("", "error connecting to /tmp/tmux-501/default (Permission denied)", .{ .exited = 1 });
@@ -602,7 +602,7 @@ test "observePane returns tmux unavailable when pane info hits permission denied
     try std.testing.expectEqual(observations.PaneState.tmux_unavailable, observation.state);
 }
 
-test "observePane returns tmux unavailable when pane info cannot be captured" {
+test "tmux.observePane: returns unavailable when pane info cannot be captured" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     recorder.term = .{ .signal = std.posix.SIG.TERM };
@@ -617,7 +617,7 @@ test "observePane returns tmux unavailable when pane info cannot be captured" {
     try std.testing.expectEqualStrings("", observation.command);
 }
 
-test "observePane returns tmux unavailable with pane fields when pgrep cannot spawn" {
+test "tmux.observePane: preserves pane fields on pgrep spawn error" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
@@ -634,7 +634,7 @@ test "observePane returns tmux unavailable with pane fields when pgrep cannot sp
     try runner.expectCommandArg(recorder.commands.items[1], 0, "pgrep");
 }
 
-test "observePane returns dead pane fields without checking children" {
+test "tmux.observePane: returns dead pane fields without checking children" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("1|130|12345|node\n", "", .{ .exited = 0 });
@@ -650,7 +650,7 @@ test "observePane returns dead pane fields without checking children" {
     try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
 }
 
-test "showOption trims empty output to null" {
+test "tmux.showOption: trims empty output to null" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue(" \n", "", .{ .exited = 0 });
@@ -659,7 +659,7 @@ test "showOption trims empty output to null" {
     try std.testing.expect(try client.showOption("@zask_dash_mode") == null);
 }
 
-test "showOption returns non-empty trimmed output" {
+test "tmux.showOption: returns non-empty trimmed output" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue(" all \n", "", .{ .exited = 0 });
@@ -671,7 +671,7 @@ test "showOption returns non-empty trimmed output" {
     try std.testing.expectEqualStrings("all", value);
 }
 
-test "capturePane returns captured stdout" {
+test "tmux.capturePane: returns captured stdout" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("line one\nline two\n", "", .{ .exited = 0 });
@@ -683,7 +683,7 @@ test "capturePane returns captured stdout" {
     try std.testing.expectEqualStrings("line one\nline two\n", output);
 }
 
-test "paneInfo uses first pane line and preserves parsed fields" {
+test "tmux.paneInfo: uses first pane line and preserves parsed fields" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("0|0|111|zsh\n0|0|222|node\n", "", .{ .exited = 0 });
@@ -698,7 +698,7 @@ test "paneInfo uses first pane line and preserves parsed fields" {
     try std.testing.expectEqualStrings("zsh", info.command);
 }
 
-test "paneInfo defaults missing fields" {
+test "tmux.paneInfo: defaults missing fields" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("1\n", "", .{ .exited = 0 });
@@ -713,7 +713,7 @@ test "paneInfo defaults missing fields" {
     try std.testing.expectEqualStrings("", info.command);
 }
 
-test "paneInfo ignores extra trailing fields" {
+test "tmux.paneInfo: ignores extra trailing fields" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("0|0|12345|node|unexpected\n", "", .{ .exited = 0 });

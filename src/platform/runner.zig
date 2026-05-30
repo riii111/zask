@@ -283,7 +283,7 @@ const RecordedResponse = struct {
     term: std.process.Child.Term,
 };
 
-test "recorder captures commands without spawning processes" {
+test "runner.recorder: captures commands without spawning processes" {
     var recorder = Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
@@ -305,7 +305,7 @@ test "recorder captures commands without spawning processes" {
     try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items[0].commands_before);
 }
 
-test "recorder returns queued responses in order" {
+test "runner.recorder: returns queued responses in order" {
     var recorder = Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("first", "", .{ .exited = 0 });
@@ -325,7 +325,7 @@ test "recorder returns queued responses in order" {
     try std.testing.expectEqual(@as(u8, 1), second.term.exited);
 }
 
-test "recorder returns queued responses before queued errors" {
+test "runner.recorder: returns queued responses before queued errors" {
     var recorder = Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("first", "", .{ .exited = 0 });
@@ -342,7 +342,7 @@ test "recorder returns queued responses before queued errors" {
     try expectNoRemainingResponses(&recorder);
 }
 
-test "run maps stream-too-long to output-too-large" {
+test "runner.run: maps stream-too-long to output-too-large" {
     var recorder = Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueueError(error.StreamTooLong);
@@ -351,7 +351,7 @@ test "run maps stream-too-long to output-too-large" {
     try std.testing.expectError(error.OutputTooLarge, run.run(&.{"docker"}, .{}));
 }
 
-test "checked runner rejects non-zero exits" {
+test "runner.checked: rejects non-zero exits" {
     const cases = [_]struct {
         argv: []const []const u8,
         options: RunOptions,

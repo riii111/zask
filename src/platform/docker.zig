@@ -58,7 +58,7 @@ fn parseServices(gpa: std.mem.Allocator, output: []const u8) ![]const []const u8
 // Tests
 // -----------------------------------------------------------------------------
 
-test "runningServices uses compose working directory" {
+test "docker.runningServices: uses compose working directory" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     const run = runner.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
@@ -72,7 +72,7 @@ test "runningServices uses compose working directory" {
     try runner.expectCommandArg(recorder.commands.items[0], 3, "compose.yaml");
 }
 
-test "running ignores empty service output" {
+test "docker.running: ignores empty service output" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("\n", "", .{ .exited = 0 });
@@ -82,7 +82,7 @@ test "running ignores empty service output" {
     try std.testing.expect(!compose.running());
 }
 
-test "running ignores failed compose command output" {
+test "docker.running: ignores failed compose command output" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("api\n", "docker unavailable", .{ .exited = 1 });
@@ -92,7 +92,7 @@ test "running ignores failed compose command output" {
     try std.testing.expect(!compose.running());
 }
 
-test "observe returns running services" {
+test "docker.observe: returns running services" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("api\ndb\n", "", .{ .exited = 0 });
@@ -107,7 +107,7 @@ test "observe returns running services" {
     try std.testing.expect(observation.contains("db"));
 }
 
-test "observe returns empty state and frees parsed services" {
+test "docker.observe: returns empty state and frees parsed services" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("\n\n", "", .{ .exited = 0 });
@@ -121,7 +121,7 @@ test "observe returns empty state and frees parsed services" {
     try std.testing.expectEqual(@as(usize, 0), observation.services.len);
 }
 
-test "observe folds oversized output into unavailable" {
+test "docker.observe: folds oversized output into unavailable" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueueError(error.StreamTooLong);

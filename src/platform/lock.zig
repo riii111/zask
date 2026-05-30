@@ -35,7 +35,9 @@ pub const Lock = struct {
 
     pub fn acquire(gpa: std.mem.Allocator, io: std.Io, name: []const u8, base: []const u8, probe: Probe) !Lock {
         try ensurePrivateDir(io, base);
-        const dir = try std.fs.path.join(gpa, &.{ base, try std.fmt.allocPrint(gpa, "{s}.lock", .{name}) });
+        const lock_name = try std.fmt.allocPrint(gpa, "{s}.lock", .{name});
+        defer gpa.free(lock_name);
+        const dir = try std.fs.path.join(gpa, &.{ base, lock_name });
         errdefer gpa.free(dir);
         const pid = try std.fmt.allocPrint(gpa, "{d}", .{probe.currentPid()});
         defer gpa.free(pid);
@@ -103,7 +105,7 @@ const private_file_permissions: std.Io.File.Permissions = @enumFromInt(0o600);
 // Tests
 // -----------------------------------------------------------------------------
 
-test "lock blocks concurrent acquire and releases directory" {
+test "lock.acquire: blocks concurrent acquire and releases directory" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
@@ -119,7 +121,7 @@ test "lock blocks concurrent acquire and releases directory" {
     second.release();
 }
 
-test "lock recovers stale pid files" {
+test "lock.acquire: recovers stale pid files" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();

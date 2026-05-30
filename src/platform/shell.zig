@@ -19,7 +19,7 @@ pub fn quote(gpa: std.mem.Allocator, value: []const u8) ![]const u8 {
 // Tests
 // -----------------------------------------------------------------------------
 
-test "quote wraps shell strings in single quotes" {
+test "shell.quote: wraps strings in single quotes" {
     const cases = [_]struct {
         input: []const u8,
         expected: []const u8,

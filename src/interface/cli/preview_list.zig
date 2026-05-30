@@ -33,14 +33,14 @@ fn parseSize(arg: []const u8) !u16 {
 // Tests
 // -----------------------------------------------------------------------------
 
-test "options parse preview dimensions" {
+test "preview-list.Options: parses preview dimensions" {
     const opts = try Options.parse(&.{ "%1", "120", "40" });
     try std.testing.expectEqualStrings("%1", opts.pane_id);
     try std.testing.expectEqual(@as(u16, 120), opts.client_width);
     try std.testing.expectEqual(@as(u16, 40), opts.client_height);
 }
 
-test "options reject invalid preview dimensions" {
+test "preview-list.Options: rejects invalid preview dimensions" {
     try std.testing.expectError(error.InvalidArguments, Options.parse(&.{ "%1", "120" }));
     try std.testing.expectError(error.InvalidArguments, Options.parse(&.{ "%1", "wide", "40" }));
 }

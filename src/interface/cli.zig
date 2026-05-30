@@ -19,6 +19,7 @@ const sync_size = @import("cli/sync_size.zig");
 const version = @import("cli/version.zig");
 const root = @import("../root.zig");
 const env = @import("../platform/env.zig");
+const diagnostics = @import("../model/diagnostics.zig");
 
 const CommandContext = cli_context.CommandContext;
 const ParsedArgs = cli_context.ParsedArgs;
@@ -98,11 +99,13 @@ const command_specs = [_]CommandSpec{
 pub fn run(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
+    var diags = diagnostics.Diagnostics.init(arena);
     const context: CommandContext = .{
         .gpa = arena,
         .io = init.io,
         .environ = init.environ_map,
         .argv0 = if (args.len > 0) args[0] else "zask",
+        .diagnostics = &diags,
     };
 
     var stdout_buffer: [1024]u8 = undefined;
@@ -126,6 +129,7 @@ pub fn run(init: std.process.Init) !void {
         },
         error.InvalidConfig => {
             try stdout.writeAll("Error: invalid config\n");
+            try renderDiagnostics(stdout, diags);
             try stdout.flush();
             std.process.exit(2);
         },
@@ -170,6 +174,16 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
 
 fn printGreeting(writer: *std.Io.Writer) !void {
     try writer.print("{s}\n", .{root.greeting()});
+}
+
+fn renderDiagnostics(writer: *std.Io.Writer, diags: diagnostics.Diagnostics) !void {
+    for (diags.slice()) |diagnostic| {
+        if (diagnostic.path.len == 0) {
+            try writer.print("  {s}\n", .{diagnostic.message});
+        } else {
+            try writer.print("  {s}: {s}\n", .{ diagnostic.path, diagnostic.message });
+        }
+    }
 }
 
 fn printHelp(writer: *std.Io.Writer) !void {

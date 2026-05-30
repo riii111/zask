@@ -58,7 +58,7 @@ fn syncSizeCommand(gpa: std.mem.Allocator) ![]const u8 {
     return try std.fmt.allocPrint(gpa, "run-shell {s}", .{quoted});
 }
 
-test "list binding delegates preview sizing to zask command" {
+test "tmux_setup.bindControlKeys: list binding delegates preview sizing to zask command" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());
@@ -80,7 +80,7 @@ test "list binding delegates preview sizing to zask command" {
     try proc_runner.expectCommandArgNotContains(command, 6, "choose-tree");
 }
 
-test "client size hook runs sync command when client becomes active" {
+test "tmux_setup.bindClientSizeHooks: runs sync command when client becomes active" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());

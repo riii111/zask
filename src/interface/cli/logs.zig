@@ -23,12 +23,12 @@ pub fn run(ctx: *Context, opts: Options) !void {
 // Tests
 // -----------------------------------------------------------------------------
 
-test "options parse service" {
+test "logs.Options: parses service" {
     const opts = try Options.parse(&.{"api"});
     try std.testing.expectEqualStrings("api", opts.service);
 }
 
-test "options reject invalid arity" {
+test "logs.Options: rejects invalid arity" {
     try std.testing.expectError(error.InvalidArguments, Options.parse(&.{}));
     try std.testing.expectError(error.InvalidArguments, Options.parse(&.{ "api", "extra" }));
 }

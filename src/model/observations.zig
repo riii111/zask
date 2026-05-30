@@ -100,7 +100,7 @@ pub const ServiceObservation = struct {
     }
 };
 
-test "compose observation reports contained services" {
+test "observations.compose: reports contained services" {
     const services = try std.testing.allocator.alloc([]const u8, 2);
     services[0] = try std.testing.allocator.dupe(u8, "api");
     services[1] = try std.testing.allocator.dupe(u8, "db");
@@ -111,17 +111,17 @@ test "compose observation reports contained services" {
     try std.testing.expect(!observation.contains("web"));
 }
 
-test "compose observation deinit is no-op for empty default services" {
+test "observations.compose.deinit: no-op for empty default services" {
     const observation = ComposeObservation.empty(.empty);
     observation.deinit(std.testing.allocator);
 }
 
-test "pane observation deinit is no-op for empty default fields" {
+test "observations.pane.deinit: no-op for empty default fields" {
     const observation = PaneObservation.empty(.window_missing);
     observation.deinit(std.testing.allocator);
 }
 
-test "pane observation deinit frees exit_code pid and command" {
+test "observations.pane.deinit: frees exit_code pid and command" {
     const exit_code = try std.testing.allocator.dupe(u8, "130");
     const pid = try std.testing.allocator.dupe(u8, "12345");
     const command = try std.testing.allocator.dupe(u8, "node");
