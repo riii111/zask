@@ -26,9 +26,10 @@ ocr-worker     email-worker     scheduler
 receipts.pending   inbox.new        jobs.delayed
 ```
 
-The Docker Compose file models shared infrastructure, but the default startup
-order leaves Docker stopped. Use the normal zask workspace for screenshots, and
-start Docker explicitly only when the local machine already has the images.
+The Docker Compose file models shared infrastructure and log-heavy background
+containers. The default startup order leaves Docker stopped. Use the normal
+zask workspace for screenshots, and start Docker explicitly when the local
+machine can build or pull the images.
 
 Useful commands:
 
@@ -36,6 +37,7 @@ Useful commands:
 cd /path/to/zask
 zig build run -- --config testdata/showcase/receipt-lab/zask.json list
 zig build run -- --config testdata/showcase/receipt-lab/zask.json open --dashboard
+zig build run -- --config testdata/showcase/receipt-lab/zask.json start docker
 zig build run -- --config testdata/showcase/receipt-lab/zask.json status
 zig build run -- --config testdata/showcase/receipt-lab/zask.json close
 ```
