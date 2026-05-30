@@ -222,7 +222,9 @@ pub const Client = struct {
     pub fn respawnPane(self: Client, window: []const u8, cwd: []const u8, command: []const u8) !void {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
-        _ = try self.runner.run(&.{ self.tmux_path, "respawn-pane", "-k", "-t", pane_target, "-c", cwd, "sh", "-lc", command }, .{ .check = true, .discard = true });
+        const wrapped_command = try self.respawnShellCommand(command);
+        defer self.gpa.free(wrapped_command);
+        _ = try self.runner.run(&.{ self.tmux_path, "respawn-pane", "-k", "-t", pane_target, "-c", cwd, "sh", "-lc", wrapped_command }, .{ .check = true, .discard = true });
     }
 
     pub fn setOption(self: Client, name: []const u8, value: []const u8) !void {
@@ -252,6 +254,19 @@ pub const Client = struct {
 
     fn target(self: Client, window: []const u8) ![]const u8 {
         return std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ self.session, window });
+    }
+
+    fn respawnShellCommand(self: Client, command: []const u8) ![]const u8 {
+        return std.fmt.allocPrint(self.gpa,
+            \\__zask_interrupted=0
+            \\trap '__zask_interrupted=1' INT
+            \\{s}
+            \\__zask_status=$?
+            \\if [ "$__zask_interrupted" = 1 ] || [ "$__zask_status" = 130 ]; then
+            \\  exec "${{SHELL:-sh}}"
+            \\fi
+            \\exit "$__zask_status"
+        , .{command});
     }
 };
 
@@ -478,7 +493,12 @@ test "respawnPane records shell command through runner" {
     try client.respawnPane("api", "/tmp/demo app", "npm run dev");
 
     const command = recorder.commands.items[0];
-    try runner.expectCommandArgv(command, &.{ "tmux", "respawn-pane", "-k", "-t", "demo:api", "-c", "/tmp/demo app", "sh", "-lc", "npm run dev" });
+    try runner.expectCommandArg(command, 1, "respawn-pane");
+    try runner.expectCommandArg(command, 7, "sh");
+    try runner.expectCommandArg(command, 8, "-lc");
+    try runner.expectCommandArgContains(command, 9, "trap '__zask_interrupted=1' INT");
+    try runner.expectCommandArgContains(command, 9, "npm run dev");
+    try runner.expectCommandArgContains(command, 9, "exec \"${SHELL:-sh}\"");
 }
 
 test "window sizing helpers record and parse tmux argv" {

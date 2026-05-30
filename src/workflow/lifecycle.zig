@@ -1001,7 +1001,11 @@ test "startAll respawns service pane without sending command to shell history" {
     try lifecycle.startAll("all", &writer);
 
     const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
-    try proc_runner.expectCommandArgv(respawn, &.{ "tmux", "respawn-pane", "-k", "-t", "demo:api", "-c", "/tmp/demo app/backend", "sh", "-lc", "serve" });
+    try proc_runner.expectCommandArg(respawn, 1, "respawn-pane");
+    try proc_runner.expectCommandArg(respawn, 6, "/tmp/demo app/backend");
+    try proc_runner.expectCommandArg(respawn, 7, "sh");
+    try proc_runner.expectCommandArg(respawn, 8, "-lc");
+    try proc_runner.expectCommandArgContains(respawn, 9, "serve");
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "send-keys") == null);
 }
 
@@ -1029,5 +1033,5 @@ test "startAll resolves relative service cwd before sending command" {
 
     const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
     try proc_runner.expectCommandArg(respawn, 6, cwd);
-    try proc_runner.expectCommandArg(respawn, 9, "serve");
+    try proc_runner.expectCommandArgContains(respawn, 9, "serve");
 }
