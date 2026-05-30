@@ -103,6 +103,10 @@ zask --config ./config.json logs web
 zask --config ./config.json close
 ```
 
+Service commands run in a non-interactive `sh -lc` inside each tmux pane. Prefer
+real commands such as `npm run dev`, `make dev`, or `mise exec -- npm run dev`
+over aliases or shell functions from `.zshrc`.
+
 Or use a named project config from the zask config directory:
 
 ```bash
