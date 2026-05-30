@@ -105,7 +105,7 @@ const private_file_permissions: std.Io.File.Permissions = @enumFromInt(0o600);
 // Tests
 // -----------------------------------------------------------------------------
 
-test "lock blocks concurrent acquire and releases directory" {
+test "lock.acquire: blocks concurrent acquire and releases directory" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
@@ -121,7 +121,7 @@ test "lock blocks concurrent acquire and releases directory" {
     second.release();
 }
 
-test "lock recovers stale pid files" {
+test "lock.acquire: recovers stale pid files" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();

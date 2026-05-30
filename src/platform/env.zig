@@ -15,6 +15,6 @@ pub fn exists(map: ?*const Map, name: []const u8) bool {
 // Tests
 // -----------------------------------------------------------------------------
 
-test "missing environment variable returns null" {
+test "env.get: missing variable returns null" {
     try std.testing.expect(get(null, "ZASK_ENV_TEST_SHOULD_NOT_EXIST") == null);
 }
