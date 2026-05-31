@@ -556,10 +556,9 @@ test "runtime.close: kills session after resource stop" {
     try proc_runner.expectCommandOrder(&recorder, "C-c", "down");
     try proc_runner.expectCommandOrder(&recorder, "down", "kill-session");
     try proc_runner.expectCommandArg(recorder.commands.items[kill_index], 1, "kill-session");
-    try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items.len);
-    try std.testing.expectEqual(waits.docker_ready_settle, recorder.sleeps.items[0].duration);
-    try std.testing.expectEqual(close_kill_settle, recorder.sleeps.items[1].duration);
-    try std.testing.expectEqual(kill_index, recorder.sleeps.items[1].commands_before);
+    try std.testing.expectEqual(@as(usize, 1), recorder.sleeps.items.len);
+    try std.testing.expectEqual(close_kill_settle, recorder.sleeps.items[0].duration);
+    try std.testing.expectEqual(kill_index, recorder.sleeps.items[0].commands_before);
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 

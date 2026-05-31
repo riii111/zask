@@ -122,12 +122,11 @@ pub const Lifecycle = struct {
     pub fn stopDocker(self: Lifecycle, writer: *std.Io.Writer) !void {
         if (!self.cfg.dockerEnabled()) return;
         try writeProgress(writer, "Stopping Docker...\n", .{});
+        // Interrupt the pane's `compose up` so the window returns to a shell, but
+        // do not wait for it: `compose down` cleanly stops containers regardless
+        // of the attached `up`, so the old settle before it was dead time.
         if (self.tmux.observeSession() == .active) {
-            var sent = true;
-            self.tmux.sendKeys("docker", &.{"C-c"}) catch {
-                sent = false;
-            };
-            if (sent) self.runner.sleep(waits.docker_ready_settle);
+            self.tmux.sendKeys("docker", &.{"C-c"}) catch {};
         }
         self.docker.down() catch {
             try writeProgress(writer, "Warning: docker compose down failed\n", .{});
@@ -1161,7 +1160,7 @@ test "lifecycle.restartTarget: docker restart runs compose down before compose u
     try lifecycle.restartTarget("docker", &writer);
 
     try proc_runner.expectCommandOrder(&recorder, "down", "docker compose");
-    try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items.len);
+    try std.testing.expectEqual(@as(usize, 1), recorder.sleeps.items.len);
     try std.testing.expectEqual(waits.docker_ready_settle, recorder.sleeps.items[0].duration);
     try proc_runner.expectCommandContaining(&recorder, "docker compose");
     try proc_runner.expectNoRemainingResponses(&recorder);
