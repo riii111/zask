@@ -348,10 +348,7 @@ fn sessionNotRunning(writer: *std.Io.Writer) !void {
     return error.SessionNotRunning;
 }
 
-fn writeProgress(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytype) !void {
-    try writer.print(fmt, args);
-    try writer.flush();
-}
+const writeProgress = waits.writeProgress;
 
 const StartDecision = enum {
     no_op,

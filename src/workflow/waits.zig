@@ -125,7 +125,7 @@ pub fn stopAttempts() usize {
     return stop_attempts;
 }
 
-fn writeProgress(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytype) !void {
+pub fn writeProgress(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytype) !void {
     try writer.print(fmt, args);
     try writer.flush();
 }

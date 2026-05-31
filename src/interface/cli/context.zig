@@ -49,6 +49,12 @@ pub fn isProjectAlias(argv0: []const u8) bool {
     return !std.mem.eql(u8, basename, "zask") and !std.mem.eql(u8, basename, "zask-debug");
 }
 
+/// Parses a client width/height argument shared by commands that receive tmux
+/// pixel dimensions; a non-numeric value is an invalid argument, not a fault.
+pub fn parseSize(arg: []const u8) !u16 {
+    return std.fmt.parseUnsigned(u16, arg, 10) catch return error.InvalidArguments;
+}
+
 fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
     const io = context.io orelse return error.MissingIo;
     const path = try absoluteConfigPath(context.gpa, io, if (parsed.config_path) |p| p else try projectConfigPath(context.gpa, context.environ, parsed.project orelse return error.ProjectRequired));
