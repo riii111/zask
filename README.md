@@ -107,15 +107,24 @@ zask --config ./config.json logs web
 zask --config ./config.json close
 ```
 
+Initialize the current project once, then run zask from that project directory:
+
+```bash
+zask init
+zask open
+zask status
+zask logs web
+zask close
+```
+
 Service commands run in a non-interactive `sh -lc` inside each tmux pane. Prefer
 real commands such as `npm run dev`, `make dev`, or `mise exec -- npm run dev`
 over aliases, shell functions, or version-manager setup that only exists in
 `.zshrc`.
 
-Or use a named project config from the zask config directory:
+You can still use a named project config from outside the project directory:
 
 ```bash
-zask init
 zask demo open
 zask demo list
 zask demo status
@@ -126,7 +135,22 @@ zask demo stop --all
 ## Commands
 
 ```text
+zask <command>
+zask <project> <command>
+zask --config <file> <command>
+
 zask init [project] [--root <path>] [--force]
+zask open [--docker|--<profile>]
+zask attach
+zask list
+zask status
+zask logs <service>
+zask start <--all|svc|group|docker>
+zask stop <--all|svc|group|docker>
+zask restart <svc|group|docker>
+zask re
+zask close
+
 zask <project> open [--docker|--<profile>]
 zask <project> attach
 zask <project> list
@@ -140,6 +164,8 @@ zask <project> close
 ```
 
 Use `zask --config <file> <command>` to run against an explicit config file.
+Inside an initialized project directory, use `zask <command>`. If that directory
+also has `zask.json` or `.zask.json`, the local file takes precedence.
 
 ## Requirements
 

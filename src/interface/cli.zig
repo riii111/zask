@@ -100,12 +100,14 @@ pub fn run(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
     var diags = diagnostics.Diagnostics.init(arena);
+    var err_ctx: cli_context.ErrorContext = .{};
     const context: CommandContext = .{
         .gpa = arena,
         .io = init.io,
         .environ = init.environ_map,
         .argv0 = if (args.len > 0) args[0] else "zask",
         .diagnostics = &diags,
+        .error_context = &err_ctx,
     };
 
     var stdout_buffer: [1024]u8 = undefined;
@@ -122,13 +124,21 @@ pub fn run(init: std.process.Init) !void {
             try stdout.flush();
             std.process.exit(2);
         },
+        error.AmbiguousConfig => {
+            try stdout.writeAll("Error: multiple local config files found\n");
+            try stdout.writeAll("Use --config <file> to choose one.\n");
+            try stdout.flush();
+            std.process.exit(2);
+        },
         error.InvalidConfigSyntax => {
             try stdout.writeAll("Error: config is not valid JSON\n");
+            try renderSelectedConfig(stdout, err_ctx);
             try stdout.flush();
             std.process.exit(2);
         },
         error.InvalidConfig => {
             try stdout.writeAll("Error: invalid config\n");
+            try renderSelectedConfig(stdout, err_ctx);
             try renderDiagnostics(stdout, diags);
             try stdout.flush();
             std.process.exit(2);
@@ -167,7 +177,7 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
         if (err == error.InvalidArguments) try printHelp(writer);
         return err;
     };
-    const command = parseCommand(parsed.command, parsed.config_path != null) orelse return error.UnknownCommand;
+    const command = parseCommand(parsed.command, parsed.config_source == .explicit) orelse return error.UnknownCommand;
     var run_context: cli_context.Context = .{ .base = context, .parsed = parsed, .writer = writer, .print_help = printHelp };
     try command.run(&run_context);
 }
@@ -186,9 +196,15 @@ fn renderDiagnostics(writer: *std.Io.Writer, diags: diagnostics.Diagnostics) !vo
     }
 }
 
+fn renderSelectedConfig(writer: *std.Io.Writer, err_ctx: cli_context.ErrorContext) !void {
+    if (err_ctx.config_source != .discovered and err_ctx.config_source != .inferred_named) return;
+    if (err_ctx.config_path) |path| try writer.print("Config: {s}\n", .{path});
+}
+
 fn printHelp(writer: *std.Io.Writer) !void {
     try writer.writeAll(
         \\Usage:
+        \\  zask <command>
         \\  zask <project> <command>
         \\  zask --config <file> <command>
         \\  <project-alias> <command>
@@ -235,15 +251,36 @@ fn parseArgs(context: CommandContext, args: []const []const u8) !ParsedArgs {
     if (args.len == 0) return error.InvalidArguments;
     if (std.mem.eql(u8, args[0], "--config")) {
         if (args.len < 3) return error.InvalidArguments;
-        return .{ .config_path = args[1], .command = args[2], .args = args[3..] };
+        return .{ .config_path = args[1], .config_source = .explicit, .command = args[2], .args = args[3..] };
     }
     if (cli_context.isProjectAlias(context.argv0)) {
         const basename = std.fs.path.basename(context.argv0);
-        return .{ .project = basename, .command = args[0], .args = args[1..] };
+        return .{ .project = basename, .config_source = .named, .command = args[0], .args = args[1..] };
     }
     if (isGlobalCommand(args[0])) return .{ .command = args[0], .args = args[1..] };
+    if (try shouldUseNamedProject(context, args)) {
+        return .{ .project = args[0], .config_source = .named, .command = args[1], .args = args[2..] };
+    }
+    if (isCommandForm(args[0])) return .{ .command = args[0], .args = args[1..] };
     if (args.len < 2) return error.ProjectRequired;
-    return .{ .project = args[0], .command = args[1], .args = args[2..] };
+    return .{ .project = args[0], .config_source = .named, .command = args[1], .args = args[2..] };
+}
+
+fn shouldUseNamedProject(context: CommandContext, args: []const []const u8) !bool {
+    if (args.len < 2) return false;
+    if (parseCommand(args[1], false) == null) return false;
+    const io = context.io orelse return false;
+    const path = try cli_context.projectConfigPath(context.gpa, context.environ, args[0]);
+    defer context.gpa.free(path);
+    std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    return true;
+}
+
+fn isCommandForm(command: []const u8) bool {
+    return !isGlobalCommand(command) and parseCommand(command, false) != null;
 }
 
 fn isGlobalCommand(command: []const u8) bool {
@@ -297,6 +334,10 @@ test "cli.command: parses public and internal names" {
     try std.testing.expectEqual(Command.preview_list, parseCommand("preview-list", true));
     try std.testing.expectEqual(Command.sync_size, parseCommand("sync-size", true));
 
+    try std.testing.expect(isCommandForm("open"));
+    try std.testing.expect(!isCommandForm("init"));
+    try std.testing.expect(!isCommandForm("dashboard"));
+
     const global_cases = [_]struct {
         input: []const u8,
         expected: bool,
@@ -320,11 +361,12 @@ test "cli.version: prints package version" {
 }
 
 test "cli.help: prints public commands" {
-    var buffer: [1024]u8 = undefined;
+    var buffer: [2048]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
     try runWithArgs(.{ .gpa = std.testing.allocator }, &.{"help"}, &writer);
-    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage:\n  zask <project> <command>"));
+    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage:\n  zask <command>"));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "zask <project> <command>") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "zask --config <file> <command>") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "<project-alias> <command>") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "start <--all|svc|group|docker>") != null);
@@ -342,16 +384,17 @@ test "cli.help: prints public commands" {
 }
 
 test "cli.projectAlias: prints usage without command" {
-    var buffer: [1024]u8 = undefined;
+    var buffer: [2048]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
     try runWithArgs(.{ .gpa = std.testing.allocator, .argv0 = "sample" }, &.{}, &writer);
-    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage:\n  zask <project> <command>"));
+    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage:\n  zask <command>"));
 }
 
 test "cli.parseArgs: accepts project command form" {
     const parsed = try parseArgs(.{ .gpa = std.testing.allocator }, &.{ "demo", "status" });
     try std.testing.expectEqualStrings("demo", parsed.project.?);
+    try std.testing.expectEqual(cli_context.ConfigSource.named, parsed.config_source.?);
     try std.testing.expectEqualStrings("status", parsed.command);
 }
 
@@ -372,6 +415,7 @@ test "cli.parseArgs: accepts init without project" {
 test "cli.parseArgs: accepts explicit config command form" {
     const parsed = try parseArgs(.{ .gpa = std.testing.allocator }, &.{ "--config", "demo.json", "status" });
     try std.testing.expectEqualStrings("demo.json", parsed.config_path.?);
+    try std.testing.expectEqual(cli_context.ConfigSource.explicit, parsed.config_source.?);
     try std.testing.expectEqualStrings("status", parsed.command);
     try std.testing.expectEqual(@as(usize, 0), parsed.args.len);
 }
@@ -387,13 +431,59 @@ test "cli.parseArgs: project alias accepts explicit config form" {
 test "cli.parseArgs: accepts argv0 project alias form" {
     const parsed = try parseArgs(.{ .gpa = std.testing.allocator, .argv0 = "sample" }, &.{"open"});
     try std.testing.expectEqualStrings("sample", parsed.project.?);
+    try std.testing.expectEqual(cli_context.ConfigSource.named, parsed.config_source.?);
     try std.testing.expectEqualStrings("open", parsed.command);
+}
+
+test "cli.parseArgs: defers command form config resolution" {
+    const status_args = try parseArgs(.{ .gpa = std.testing.allocator }, &.{"status"});
+    try std.testing.expect(status_args.project == null);
+    try std.testing.expect(status_args.config_path == null);
+    try std.testing.expect(status_args.config_source == null);
+    try std.testing.expectEqualStrings("status", status_args.command);
+
+    const logs_args = try parseArgs(.{ .gpa = std.testing.allocator }, &.{ "logs", "api" });
+    try std.testing.expect(logs_args.project == null);
+    try std.testing.expect(logs_args.config_source == null);
+    try std.testing.expectEqualStrings("logs", logs_args.command);
+    try std.testing.expectEqualStrings("api", logs_args.args[0]);
+}
+
+test "cli.parseArgs: prefers existing named project over command form" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    var environ = env.Map.init(gpa);
+    defer environ.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(threaded.io(), "xdg/zask/open");
+    try tmp.dir.writeFile(threaded.io(), .{ .sub_path = "xdg/zask/open/config.json", .data = "{}" });
+    const base = try tmp.dir.realPathFileAlloc(threaded.io(), ".", gpa);
+    const xdg = try std.fs.path.join(gpa, &.{ base, "xdg" });
+    try environ.put("XDG_CONFIG_HOME", xdg);
+
+    const parsed = try parseArgs(.{ .gpa = gpa, .io = threaded.io(), .environ = &environ }, &.{ "open", "status" });
+    try std.testing.expectEqualStrings("open", parsed.project.?);
+    try std.testing.expectEqual(cli_context.ConfigSource.named, parsed.config_source.?);
+    try std.testing.expectEqualStrings("status", parsed.command);
+}
+
+test "cli.parseArgs: reports named project probe errors" {
+    var threaded = std.Io.Threaded.init_single_threaded;
+
+    try std.testing.expectError(error.HomeNotSet, parseArgs(.{
+        .gpa = std.testing.allocator,
+        .io = threaded.io(),
+    }, &.{ "open", "status" }));
 }
 
 test "cli.parseArgs: rejects incomplete forms" {
     try std.testing.expectError(error.InvalidArguments, parseArgs(.{ .gpa = std.testing.allocator }, &.{"--config"}));
     try std.testing.expectError(error.InvalidArguments, parseArgs(.{ .gpa = std.testing.allocator }, &.{ "--config", "demo.json" }));
-    try std.testing.expectError(error.ProjectRequired, parseArgs(.{ .gpa = std.testing.allocator }, &.{"status"}));
+    try std.testing.expectError(error.ProjectRequired, parseArgs(.{ .gpa = std.testing.allocator }, &.{"demo"}));
 }
 
 test "cli.runWithArgs: prints usage for invalid arity" {
@@ -401,7 +491,7 @@ test "cli.runWithArgs: prints usage for invalid arity" {
     var writer: std.Io.Writer = .fixed(&buffer);
 
     try std.testing.expectError(error.InvalidArguments, runWithArgs(.{ .gpa = std.testing.allocator }, &.{ "version", "extra" }, &writer));
-    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage:\n  zask <project> <command>"));
+    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage:\n  zask <command>"));
 }
 
 test "cli.runWithArgs: prints usage for incomplete config" {
@@ -409,7 +499,7 @@ test "cli.runWithArgs: prints usage for incomplete config" {
     var writer: std.Io.Writer = .fixed(&buffer);
 
     try std.testing.expectError(error.InvalidArguments, runWithArgs(.{ .gpa = std.testing.allocator }, &.{"--config"}, &writer));
-    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage:\n  zask <project> <command>"));
+    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage:\n  zask <command>"));
 }
 
 test "cli.open: prints usage for invalid profile" {
@@ -427,5 +517,5 @@ test "cli.open: prints usage for invalid profile" {
         .io = threaded.io(),
         .environ = &environ,
     }, &.{ "--config", "testdata/synthetic.json", "open", "--missing" }, &writer));
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Usage:\n  zask <project> <command>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Usage:\n  zask <command>") != null);
 }

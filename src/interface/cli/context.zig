@@ -10,11 +10,26 @@ const tmux_client = @import("../../platform/tmux.zig");
 const validate = @import("../../model/validate.zig");
 const Runtime = @import("../../workflow/runtime.zig").Runtime;
 
+pub const ConfigSource = enum {
+    explicit,
+    named,
+    discovered,
+    inferred_named,
+};
+
 pub const ParsedArgs = struct {
     config_path: ?[]const u8 = null,
+    config_source: ?ConfigSource = null,
     project: ?[]const u8 = null,
     command: []const u8,
     args: []const []const u8,
+};
+
+pub const ErrorContext = struct {
+    /// Error output uses the resolved path, not the raw CLI argument.
+    config_path: ?[]const u8 = null,
+    /// Source is recorded after discovery so diagnostics only mention real selections.
+    config_source: ?ConfigSource = null,
 };
 
 pub const CommandContext = struct {
@@ -23,6 +38,7 @@ pub const CommandContext = struct {
     environ: ?*const env.Map = null,
     argv0: []const u8 = "zask",
     diagnostics: ?*diagnostics.Diagnostics = null,
+    error_context: ?*ErrorContext = null,
 };
 
 pub const Context = struct {
@@ -51,24 +67,53 @@ pub fn isProjectAlias(argv0: []const u8) bool {
 
 fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
     const io = context.io orelse return error.MissingIo;
-    const path = try absoluteConfigPath(context.gpa, io, if (parsed.config_path) |p| p else try projectConfigPath(context.gpa, context.environ, parsed.project orelse return error.ProjectRequired));
+    const resolved = try resolveConfigPath(context.gpa, io, context, parsed);
+    if (context.error_context) |err_ctx| {
+        err_ctx.config_path = resolved.path;
+        err_ctx.config_source = resolved.source;
+    }
     const home = try paths.home(context.environ);
     const cfg = if (context.diagnostics) |diags|
-        try config.loadPathWithDiagnostics(context.gpa, io, path, home, diags)
+        try config.loadPathWithDiagnostics(context.gpa, io, resolved.path, home, diags)
     else
-        try config.loadPath(context.gpa, io, path, home);
+        try config.loadPath(context.gpa, io, resolved.path, home);
     const runner: proc_runner.Runner = .{ .gpa = context.gpa, .io = io };
     return .{
         .gpa = context.gpa,
         .io = io,
         .environ = context.environ,
         .cfg = cfg,
-        .config_path = path,
+        .config_path = resolved.path,
         .zask_path = try zaskExecutablePath(context.gpa, io, context.argv0),
         .runner_impl = runner,
         .tmux_impl = tmux_client.Client{ .gpa = context.gpa, .runner = runner, .session = try cfg.sessionName() },
         .docker_impl = docker_client.Compose{ .gpa = context.gpa, .runner = runner, .dir = try cfg.dockerDir(context.gpa), .file = cfg.dockerComposeFile() },
     };
+}
+
+const ResolvedConfigPath = struct {
+    path: []const u8,
+    source: ConfigSource,
+};
+
+fn resolveConfigPath(gpa: std.mem.Allocator, io: std.Io, context: CommandContext, parsed: ParsedArgs) !ResolvedConfigPath {
+    if (parsed.config_path) |path| {
+        return .{
+            .path = try absoluteConfigPath(gpa, io, path),
+            .source = parsed.config_source orelse .explicit,
+        };
+    }
+    if (parsed.project) |project| {
+        return .{
+            .path = try absoluteConfigPath(gpa, io, try projectConfigPath(gpa, context.environ, project)),
+            .source = .named,
+        };
+    }
+    const discovered_path = discoverConfigPath(gpa, io) catch |err| switch (err) {
+        error.ConfigNotFound => return .{ .path = try inferNamedConfigPath(gpa, io, context.environ), .source = .inferred_named },
+        else => return err,
+    };
+    return .{ .path = discovered_path, .source = .discovered };
 }
 
 pub fn projectConfigPath(gpa: std.mem.Allocator, environ: ?*const env.Map, project: []const u8) ![]const u8 {
@@ -84,6 +129,39 @@ fn absoluteConfigPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]c
     };
 }
 
+fn discoverConfigPath(gpa: std.mem.Allocator, io: std.Io) ![:0]const u8 {
+    const candidates = [_][]const u8{ "zask.json", ".zask.json" };
+    var found: ?[:0]const u8 = null;
+    errdefer if (found) |path| gpa.free(path);
+
+    for (candidates) |candidate| {
+        const path = std.Io.Dir.cwd().realPathFileAlloc(io, candidate, gpa) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        if (found != null) {
+            gpa.free(path);
+            return error.AmbiguousConfig;
+        }
+        found = path;
+    }
+    return found orelse error.ConfigNotFound;
+}
+
+fn inferNamedConfigPath(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env.Map) ![]const u8 {
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(cwd);
+    const project = std.fs.path.basename(cwd);
+    validate.identifier(project) catch return error.ConfigNotFound;
+    const path = try projectConfigPath(gpa, environ, project);
+    errdefer gpa.free(path);
+    std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.ConfigNotFound,
+        else => return err,
+    };
+    return absoluteConfigPath(gpa, io, path);
+}
+
 fn absoluteExePath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
     if (std.fs.path.isAbsolute(path)) return path;
     if (std.mem.indexOfScalar(u8, path, '/') != null) {
@@ -97,4 +175,75 @@ fn zaskExecutablePath(gpa: std.mem.Allocator, io: std.Io, argv0: []const u8) ![]
     if (std.mem.indexOfScalar(u8, argv0, '/') == null) return "zask";
     const sibling = try std.fs.path.join(gpa, &.{ std.fs.path.dirname(argv0) orelse ".", "zask" });
     return absoluteExePath(gpa, io, sibling);
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+fn testWithCwd(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![:0]u8 {
+    const previous = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", gpa);
+    errdefer gpa.free(previous);
+    try std.process.setCurrentPath(io, path);
+    return previous;
+}
+
+test "cli.context.discoverConfigPath: finds zask.json" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "zask.json", .data = "{}" });
+    const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(base);
+    const previous = try testWithCwd(gpa, io, base);
+    defer {
+        std.process.setCurrentPath(io, previous) catch unreachable;
+        gpa.free(previous);
+    }
+
+    const path = try discoverConfigPath(gpa, io);
+    defer gpa.free(path);
+
+    try std.testing.expectEqualStrings("zask.json", std.fs.path.basename(path));
+}
+
+test "cli.context.discoverConfigPath: rejects ambiguous local configs" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "zask.json", .data = "{}" });
+    try tmp.dir.writeFile(io, .{ .sub_path = ".zask.json", .data = "{}" });
+    const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(base);
+    const previous = try testWithCwd(gpa, io, base);
+    defer {
+        std.process.setCurrentPath(io, previous) catch unreachable;
+        gpa.free(previous);
+    }
+
+    try std.testing.expectError(error.AmbiguousConfig, discoverConfigPath(gpa, io));
+}
+
+test "cli.context.discoverConfigPath: rejects missing local config" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(base);
+    const previous = try testWithCwd(gpa, io, base);
+    defer {
+        std.process.setCurrentPath(io, previous) catch unreachable;
+        gpa.free(previous);
+    }
+
+    try std.testing.expectError(error.ConfigNotFound, discoverConfigPath(gpa, io));
 }

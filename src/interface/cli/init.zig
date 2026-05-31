@@ -58,8 +58,13 @@ pub fn run(ctx: *Context, opts: Options) !void {
 
     try ctx.writer.print("Created {s}\n", .{config_path});
     try writeReport(ctx.writer, project, detected);
-    try ctx.writer.print("Next: zask {s} list\n", .{project});
-    try ctx.writer.print("Next: zask {s} open\n", .{project});
+    if (std.mem.eql(u8, project, std.fs.path.basename(cwd))) {
+        try ctx.writer.print("Next: zask list\n", .{});
+        try ctx.writer.print("Next: zask open\n", .{});
+    } else {
+        try ctx.writer.print("Next: zask {s} list\n", .{project});
+        try ctx.writer.print("Next: zask {s} open\n", .{project});
+    }
 }
 
 const DetectedOptions = struct {

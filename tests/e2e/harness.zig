@@ -100,6 +100,14 @@ pub const Workspace = struct {
         try project_dir.writeFile(io, .{ .sub_path = sub_path, .data = contents });
     }
 
+    pub fn writeNamedConfig(self: Workspace, gpa: std.mem.Allocator, io: std.Io, project_name: []const u8, contents: []const u8) !void {
+        const config_path = try self.configPath(gpa, project_name);
+        defer gpa.free(config_path);
+        const config_dir = std.fs.path.dirname(config_path) orelse return error.InvalidPath;
+        _ = try std.Io.Dir.cwd().createDirPathStatus(io, config_dir, @enumFromInt(0o755));
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = config_path, .data = contents });
+    }
+
     pub fn configPath(self: Workspace, gpa: std.mem.Allocator, project_name: []const u8) ![]u8 {
         return std.fs.path.join(gpa, &.{ self.xdg, "zask", project_name, "config.json" });
     }
