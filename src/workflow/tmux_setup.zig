@@ -38,13 +38,13 @@ pub fn bindControlKeys(gpa: std.mem.Allocator, tx: tmux_client.Client) !void {
     , .{ tmux_options.zask_path, tmux_options.config_path }));
     try tx.bindRunShell("m", try std.fmt.allocPrint(gpa,
         \\session="#{{session_name}}";
-        \\mode=$(tmux show-option -t "$session" -qv {s});
-        \\if [ "$mode" = "all" ]; then
-        \\  tmux set-option -t "$session" {s} bad;
+        \\mode=$(tmux show-option -t "$session" -qv {[opt]s});
+        \\if [ "$mode" = "{[all]s}" ]; then
+        \\  tmux set-option -t "$session" {[opt]s} {[bad]s};
         \\else
-        \\  tmux set-option -t "$session" {s} all;
+        \\  tmux set-option -t "$session" {[opt]s} {[all]s};
         \\fi
-    , .{ tmux_options.dash_mode, tmux_options.dash_mode, tmux_options.dash_mode }));
+    , .{ .opt = tmux_options.dash_mode, .all = tmux_options.dash_mode_all, .bad = tmux_options.dash_mode_bad }));
 }
 
 fn syncSizeCommand(gpa: std.mem.Allocator) ![]const u8 {

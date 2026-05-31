@@ -107,8 +107,8 @@ fn render(ctx: RenderContext, writer: *std.Io.Writer) !void {
 
     try writer.print("{s}[zask-monitor]{s} {s}LIVE:{d}{s} {s}WARN:{d}{s} {s}DEAD:{d}{s}  {s}[{s}]{s}  {s}Ctrl+q m: toggle{s}\n\n", .{ ansi.bold, ansi.reset, ansi.green, live_count, ansi.reset, ansi.yellow, warn_count, ansi.reset, ansi.red, dead_count, ansi.reset, ansi.dim, mode, ansi.reset, ansi.dim, ansi.reset });
     for (rows.items) |row| {
-        if (std.mem.eql(u8, mode, "bad") and row.status == .live) continue;
-        try writeMonitorRow(ctx, writer, row, !std.mem.eql(u8, mode, "all") or row.status != .live);
+        if (std.mem.eql(u8, mode, tmux_options.dash_mode_bad) and row.status == .live) continue;
+        try writeMonitorRow(ctx, writer, row, !std.mem.eql(u8, mode, tmux_options.dash_mode_all) or row.status != .live);
         try writer.writeAll("\n");
     }
     try writer.print("\n{s}───────────────────────────────────────────────────────────────{s}\n", .{ ansi.dim, ansi.reset });
@@ -116,7 +116,7 @@ fn render(ctx: RenderContext, writer: *std.Io.Writer) !void {
 }
 
 fn dashboardMode(ctx: RenderContext) ![]const u8 {
-    return try ctx.tmux.showOption(tmux_options.dash_mode) orelse "all";
+    return try ctx.tmux.showOption(tmux_options.dash_mode) orelse tmux_options.dash_mode_all;
 }
 
 fn serviceMonitorRow(ctx: RenderContext, service: std.json.Value) !MonitorRow {
