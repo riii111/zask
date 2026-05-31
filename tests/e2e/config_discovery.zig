@@ -57,7 +57,7 @@ test "list: discovers .zask.json in current project" {
     try std.testing.expect(std.mem.startsWith(u8, res.stdout, "demo\n"));
 }
 
-test "list: reports missing local config for command form" {
+test "config discovery: reports missing config when local and inferred named are absent" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
