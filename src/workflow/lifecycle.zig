@@ -92,7 +92,7 @@ pub const Lifecycle = struct {
         if (std.mem.eql(u8, target, "--all")) return self.startAll("all", writer, .observe);
         if (std.mem.eql(u8, target, "docker")) {
             try self.ensureDockerStarted(writer);
-            return waits.ensureDockerReady(self, writer);
+            return self.waitForDockerReady(writer);
         }
         if (self.cfg.resolveGroup(self.gpa, target)) |services| {
             defer self.gpa.free(services);
@@ -126,7 +126,7 @@ pub const Lifecycle = struct {
             try self.ensureSessionActive(writer);
             try self.stopDocker(writer);
             try self.ensureDockerStarted(writer);
-            return waits.ensureDockerReady(self, writer);
+            return self.waitForDockerReady(writer);
         }
         try self.ensureSessionActive(writer);
         if (self.cfg.resolveGroup(self.gpa, target)) |services| {
@@ -189,10 +189,38 @@ pub const Lifecycle = struct {
     fn startDockerAndWait(self: Lifecycle, writer: *std.Io.Writer) !void {
         if (!self.cfg.dockerEnabled()) return;
         try self.ensureDockerStarted(writer);
-        waits.ensureDockerReady(self, writer) catch {
-            try writer.writeAll("Error: Docker failed to start\n");
-            return error.DockerFailed;
+        try self.waitForDockerReady(writer);
+    }
+
+    fn waitForDockerReady(self: Lifecycle, writer: *std.Io.Writer) !void {
+        waits.ensureDockerReady(self, writer) catch |err| switch (err) {
+            error.DockerNotReady => {
+                try self.writeDockerFailure(writer);
+                return error.StartupFailed;
+            },
+            else => return err,
         };
+    }
+
+    fn writeDockerFailure(self: Lifecycle, writer: *std.Io.Writer) !void {
+        const compose = self.docker.observe();
+        defer compose.deinit(self.gpa);
+        try writer.writeAll("Error: Docker did not become ready\n");
+        try writer.writeAll("  phase: docker\n");
+        try writer.print("  compose: {s}\n", .{composeStateText(compose.state)});
+        try writer.print("  waited: {d}s\n", .{self.cfg.dockerWaitTimeout()});
+        const line = try self.tmux.captureLastLine("docker");
+        defer self.gpa.free(line);
+        if (line.len > 0) try writer.print("  last log: {s}\n", .{line});
+        try self.writeStatusNext(writer);
+        try writer.flush();
+    }
+
+    fn writeStatusNext(self: Lifecycle, writer: *std.Io.Writer) !void {
+        const config_path = try shell.quote(self.gpa, self.config_path);
+        defer self.gpa.free(config_path);
+        try writer.writeAll("\nNext:\n");
+        try writer.print("  zask --config {s} status\n", .{config_path});
     }
 
     fn restartService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
@@ -378,6 +406,14 @@ fn dockerStartDecision(pane: observations.PaneObservation) StartDecision {
     // observed state is busy. Every other case is decided from the state alone.
     if (pane.command.len > 0 and tmux_client.isShellCommand(pane.command)) return .send_start;
     return startDecisionForState(pane.state);
+}
+
+fn composeStateText(state: observations.ComposeState) []const u8 {
+    return switch (state) {
+        .running => "running",
+        .empty => "empty",
+        .unavailable => "unavailable",
+    };
 }
 
 // -----------------------------------------------------------------------------
@@ -743,6 +779,42 @@ test "waits.ensureDockerReady: times out when compose never reports running" {
 
     try std.testing.expectError(error.DockerNotReady, waits.ensureDockerReady(lifecycle, &writer));
     try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items.len);
+}
+
+test "lifecycle.startAll: reports docker readiness failure" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"compose": "compose.yaml", "wait_timeout_seconds": 2},
+        \\  "startup_order": [{"docker": true}],
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    recorder.stdout = "Cannot connect to Docker daemon\n";
+    recorder.term = .{ .exited = 1 };
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.StartupFailed, lifecycle.startAll("all", &writer, .observe));
+
+    const out = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "Error: Docker did not become ready") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "phase: docker") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "compose: unavailable") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "waited: 2s") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "last log: Cannot connect to Docker daemon") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "zask --config 'config.json' status") != null);
 }
 
 test "waits.ensureWindowReady: distinguishes missing windows from unavailable tmux" {
