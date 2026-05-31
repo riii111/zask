@@ -9,6 +9,12 @@ pub const docker_ready_settle = std.Io.Duration.fromSeconds(2);
 const port_wait_interval_seconds = 2;
 const port_wait_interval = std.Io.Duration.fromSeconds(port_wait_interval_seconds);
 
+pub const PaneIdleWait = enum {
+    idle,
+    still_busy,
+    tmux_unavailable,
+};
+
 pub fn ensureDockerReady(ctx: anytype, writer: *std.Io.Writer) !void {
     try writer.writeAll("Waiting for Docker containers...\n");
     var attempt: i64 = 0;
@@ -97,15 +103,19 @@ pub fn waitForAllStopped(ctx: anytype, services: []const []const u8, writer: *st
     }
 }
 
-pub fn waitForPaneIdle(ctx: anytype, window: []const u8) bool {
+pub fn waitForPaneIdle(ctx: anytype, window: []const u8) PaneIdleWait {
     var attempt: usize = 0;
     while (attempt < stop_attempts) : (attempt += 1) {
         const pane = ctx.tmux.observePane(window);
         defer pane.deinit(ctx.gpa);
-        if (pane.state != .busy) return true;
+        switch (pane.state) {
+            .busy => {},
+            .tmux_unavailable => return .tmux_unavailable,
+            .idle, .dead, .window_missing => return .idle,
+        }
         ctx.runner.sleep(stop_interval);
     }
-    return false;
+    return .still_busy;
 }
 
 /// Single source for the `.unavailable` observe branch so every call site stays
