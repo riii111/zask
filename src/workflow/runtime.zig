@@ -278,6 +278,7 @@ pub const Runtime = struct {
         return .{
             .gpa = self.gpa,
             .cfg = self.cfg,
+            .config_path = self.config_path,
             .runner = self.runner(),
             .tmux = self.tmux(),
             .docker = self.docker(),

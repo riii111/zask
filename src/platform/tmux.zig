@@ -227,6 +227,16 @@ pub const Client = struct {
         return result.stdout;
     }
 
+    /// Caller owns the returned slice. Capture failures are reported as an empty
+    /// line so startup diagnostics can still render the surrounding context.
+    /// The returned line is display-safe, but it may still contain sensitive log
+    /// text; callers should keep it brief.
+    pub fn captureLastLine(self: Client, window: []const u8) ![]const u8 {
+        const pane = try self.capturePane(window);
+        defer self.gpa.free(pane);
+        return try lastNonEmptyLine(self.gpa, pane);
+    }
+
     pub fn sendKeys(self: Client, window: []const u8, keys: []const []const u8) !void {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
@@ -296,6 +306,29 @@ pub const Client = struct {
 fn serverUnavailable(stderr: []const u8) bool {
     return std.ascii.indexOfIgnoreCase(stderr, "permission denied") != null or
         std.ascii.indexOfIgnoreCase(stderr, "operation not permitted") != null;
+}
+
+fn lastNonEmptyLine(gpa: std.mem.Allocator, pane: []const u8) ![]const u8 {
+    var lines = std.mem.splitScalar(u8, pane, '\n');
+    var latest: []const u8 = "";
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n\x00");
+        if (trimmed.len > 0) latest = trimmed;
+    }
+    return sanitizeLogLine(gpa, latest);
+}
+
+fn sanitizeLogLine(gpa: std.mem.Allocator, line: []const u8) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
+    for (line) |byte| {
+        if (byte == '\t' or (byte >= 0x20 and byte != 0x7f)) {
+            try out.writer.writeByte(byte);
+        } else {
+            try out.writer.writeByte('?');
+        }
+    }
+    return out.toOwnedSlice();
 }
 
 pub const WindowSize = struct {
@@ -712,6 +745,42 @@ test "tmux.capturePane: returns owned empty slice when capture fails" {
     defer std.testing.allocator.free(output);
 
     try std.testing.expectEqualStrings("", output);
+}
+
+test "tmux.captureLastLine: returns last non-empty pane line" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("first\n\n  last error  \n", "", .{ .exited = 0 });
+    const client = testClient(&recorder);
+
+    const line = try client.captureLastLine("api");
+    defer std.testing.allocator.free(line);
+
+    try std.testing.expectEqualStrings("last error", line);
+}
+
+test "tmux.captureLastLine: replaces control bytes in pane output" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("ok\nbad\x1b[2J\rsecret\x07\n", "", .{ .exited = 0 });
+    const client = testClient(&recorder);
+
+    const line = try client.captureLastLine("api");
+    defer std.testing.allocator.free(line);
+
+    try std.testing.expectEqualStrings("bad?[2J?secret?", line);
+}
+
+test "tmux.captureLastLine: returns owned empty slice when capture fails" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueueError(error.FileNotFound);
+    const client = testClient(&recorder);
+
+    const line = try client.captureLastLine("api");
+    defer std.testing.allocator.free(line);
+
+    try std.testing.expectEqualStrings("", line);
 }
 
 test "tmux.paneInfo: uses first pane line and preserves parsed fields" {
