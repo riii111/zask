@@ -107,9 +107,10 @@ zask --config ./config.json logs web
 zask --config ./config.json close
 ```
 
-If the current directory has `zask.json` or `.zask.json`, zask can discover it:
+Initialize the current project once, then run zask from that project directory:
 
 ```bash
+zask init
 zask open
 zask status
 zask logs web
@@ -121,10 +122,9 @@ real commands such as `npm run dev`, `make dev`, or `mise exec -- npm run dev`
 over aliases, shell functions, or version-manager setup that only exists in
 `.zshrc`.
 
-Or use a named project config from the zask config directory:
+You can still use a named project config from outside the project directory:
 
 ```bash
-zask init
 zask demo open
 zask demo list
 zask demo status
@@ -164,7 +164,8 @@ zask <project> close
 ```
 
 Use `zask --config <file> <command>` to run against an explicit config file.
-Inside a directory with `zask.json` or `.zask.json`, use `zask <command>`.
+Inside an initialized project directory, use `zask <command>`. If that directory
+also has `zask.json` or `.zask.json`, the local file takes precedence.
 
 ## Requirements
 

@@ -27,6 +27,7 @@ test "init: writes config readable by list" {
     try std.testing.expect(std.mem.indexOf(u8, init_res.stdout, "Created") != null);
     try std.testing.expect(std.mem.indexOf(u8, init_res.stdout, "Detected Docker Compose file: compose.yaml") != null);
     try std.testing.expect(std.mem.indexOf(u8, init_res.stdout, "Detected package script: dev") != null);
+    try std.testing.expect(std.mem.indexOf(u8, init_res.stdout, "Next: zask demo list") != null);
 
     const cfg_path = try ws.configPath(gpa, project_name);
     defer gpa.free(cfg_path);
@@ -44,6 +45,46 @@ test "init: writes config readable by list" {
     try std.testing.expect(std.mem.startsWith(u8, list_res.stdout, "demo\n"));
     try std.testing.expect(std.mem.indexOf(u8, list_res.stdout, "- web [frontend]") != null);
     try std.testing.expect(std.mem.indexOf(u8, list_res.stdout, "- docker") != null);
+}
+
+test "init: writes inferred project config readable by command form" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ws = try harness.Workspace.init(gpa, io);
+    defer ws.deinit(gpa);
+
+    try ws.writeProjectFile(io, "package.json", "{\"scripts\":{\"dev\":\"vite\"}}\n");
+
+    var init_res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.project,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{ "init", "--root", "." });
+    defer init_res.deinit(gpa);
+
+    try std.testing.expect(init_res.exitedWith(0));
+    try std.testing.expectEqual(@as(usize, 0), init_res.stderr.len);
+    try std.testing.expect(std.mem.indexOf(u8, init_res.stdout, "Next: zask list") != null);
+    try std.testing.expect(std.mem.indexOf(u8, init_res.stdout, "Next: zask open") != null);
+
+    const cfg_path = try ws.configPath(gpa, "project");
+    defer gpa.free(cfg_path);
+    try std.Io.Dir.accessAbsolute(io, cfg_path, .{});
+
+    var list_res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.project,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{"list"});
+    defer list_res.deinit(gpa);
+
+    try std.testing.expect(list_res.exitedWith(0));
+    try std.testing.expectEqual(@as(usize, 0), list_res.stderr.len);
+    try std.testing.expect(std.mem.startsWith(u8, list_res.stdout, "project\n"));
+    try std.testing.expect(std.mem.indexOf(u8, list_res.stdout, "- web [frontend]") != null);
 }
 
 test "init: rejects re-init without --force" {
