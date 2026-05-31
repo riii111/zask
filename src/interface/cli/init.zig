@@ -398,9 +398,19 @@ test "init.detect: renders detected default compose file" {
     defer std.testing.allocator.free(json);
 
     try std.testing.expectEqualStrings("docker-compose.yml", detected.compose_file.?);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"compose\": \"docker-compose.yml\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "compose_file") == null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "startup_order") == null);
+    try std.testing.expectEqualStrings(
+        \\{
+        \\  "project": {
+        \\    "name": "demo",
+        \\    "root": "."
+        \\  },
+        \\  "docker": {
+        \\    "compose": "docker-compose.yml"
+        \\  },
+        \\  "groups": []
+        \\}
+        \\
+    , json);
 }
 
 test "init.detect: infers package script" {
