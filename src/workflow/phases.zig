@@ -58,14 +58,14 @@ pub fn runCommandPhase(ctx: anytype, phase: std.json.Value, profile: []const u8,
     };
 }
 
-pub fn runServicePhase(ctx: anytype, phase: std.json.Value, profile: []const u8, writer: *std.Io.Writer) !void {
+pub fn runServicePhase(ctx: anytype, phase: std.json.Value, profile: []const u8, writer: *std.Io.Writer, opts: lifecycle_mod.StartOptions) !void {
     if (phase.object.get("groups")) |groups| if (groups == .array) {
         for (groups.array.items) |group_value| {
             if (group_value != .string) continue;
             const group = ctx.cfg.resolvePhaseGroup(profile, group_value.string);
             const svcs = try ctx.cfg.resolveGroup(ctx.gpa, group);
             defer ctx.gpa.free(svcs);
-            for (svcs) |svc| try ctx.startService(svc, writer);
+            for (svcs) |svc| try ctx.startService(svc, writer, opts.mode);
         }
     };
     if (phase.object.get("wait_ports")) |ports| if (ports == .array) {
@@ -191,7 +191,7 @@ test "phases.runServicePhase: propagates window-not-ready as startup failure" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectError(error.WindowNotReady, runServicePhase(lifecycle, cfg.phases()[0], "all", &writer));
+    try std.testing.expectError(error.WindowNotReady, runServicePhase(lifecycle, cfg.phases()[0], "all", &writer, .{}));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "window for api not ready") != null);
 }
 

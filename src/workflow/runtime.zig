@@ -152,7 +152,7 @@ pub const Runtime = struct {
                 try writer.flush();
                 try self.installSessionOptions(scratch);
                 try tmux_setup.bindControlKeys(scratch, self.tmux());
-                try self.lifecycle().startAll(profile, writer);
+                try self.lifecycle().startAll(profile, writer, .{});
                 try writer.writeAll("Attaching to workspace...\n");
                 try writer.flush();
                 try self.attachExisting();
@@ -175,7 +175,7 @@ pub const Runtime = struct {
         try self.appendServiceAndDockerWindows(scratch);
         try self.focusDashboard();
         try tmux_setup.bindControlKeys(scratch, tx);
-        try self.lifecycle().startAll(profile, writer);
+        try self.lifecycle().startAll(profile, writer, .{ .mode = .prime });
         try writer.writeAll("Attaching to workspace...\n");
         try writer.flush();
         try self.attachExisting();

@@ -9,6 +9,15 @@ const shell = @import("../platform/shell.zig");
 const tmux_client = @import("../platform/tmux.zig");
 const waits = @import("waits.zig");
 
+/// observe: probe each pane before acting (a service may already be running).
+/// prime: the caller just created the windows, so the panes are known-idle and
+/// can be respawned without re-observing them.
+pub const StartMode = enum { observe, prime };
+
+pub const StartOptions = struct {
+    mode: StartMode = .observe,
+};
+
 pub const Lifecycle = struct {
     gpa: std.mem.Allocator,
     cfg: config.Config,
@@ -16,13 +25,13 @@ pub const Lifecycle = struct {
     tmux: tmux_client.Client,
     docker: docker_client.Compose,
 
-    pub fn startAll(self: Lifecycle, profile: []const u8, writer: *std.Io.Writer) !void {
+    pub fn startAll(self: Lifecycle, profile: []const u8, writer: *std.Io.Writer, opts: StartOptions) !void {
         try phases.runPrechecks(self, writer);
         if (std.mem.eql(u8, profile, "docker")) return self.startDockerAndWait(writer);
         const phase_list = self.cfg.phases();
         if (phase_list.len == 0) {
             if (self.cfg.dockerEnabled()) try self.startDockerAndWait(writer);
-            for (try self.cfg.services()) |service| try self.startService(try config.Config.serviceName(service), writer);
+            for (try self.cfg.services()) |service| try self.startService(try config.Config.serviceName(service), writer, opts.mode);
             return;
         }
         for (phase_list) |phase| {
@@ -30,7 +39,7 @@ pub const Lifecycle = struct {
             switch (phases.phaseKind(phase)) {
                 .docker => try self.startDockerAndWait(writer),
                 .command => try phases.runCommandPhase(self, phase, profile, writer),
-                .services => try phases.runServicePhase(self, phase, profile, writer),
+                .services => try phases.runServicePhase(self, phase, profile, writer, opts),
             }
         }
     }
@@ -46,15 +55,15 @@ pub const Lifecycle = struct {
 
     pub fn startTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
         try self.ensureSessionActive(writer);
-        if (std.mem.eql(u8, target, "--all")) return self.startAll("all", writer);
+        if (std.mem.eql(u8, target, "--all")) return self.startAll("all", writer, .{});
         if (std.mem.eql(u8, target, "docker")) {
             try self.ensureDockerStarted(writer);
             return waits.ensureDockerReady(self, writer);
         }
         if (self.cfg.resolveGroup(self.gpa, target)) |services| {
             defer self.gpa.free(services);
-            for (services) |svc| try self.startService(svc, writer);
-        } else |_| try self.startService(target, writer);
+            for (services) |svc| try self.startService(svc, writer, .observe);
+        } else |_| try self.startService(target, writer, .observe);
     }
 
     pub fn stopTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
@@ -92,8 +101,8 @@ pub const Lifecycle = struct {
         } else |_| try self.restartService(target, writer);
     }
 
-    pub fn startService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
-        try self.ensureServiceRunning(service, writer);
+    pub fn startService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer, mode: StartMode) !void {
+        try self.ensureServiceRunning(service, writer, mode);
     }
 
     pub fn stopDocker(self: Lifecycle, writer: *std.Io.Writer) !void {
@@ -153,7 +162,7 @@ pub const Lifecycle = struct {
 
     fn restartService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
         try self.stopService(service, writer);
-        try self.startService(service, writer);
+        try self.startService(service, writer, .observe);
     }
 
     fn ensureSessionActive(self: Lifecycle, writer: *std.Io.Writer) !void {
@@ -172,31 +181,33 @@ pub const Lifecycle = struct {
         }
     }
 
-    fn ensureServiceRunning(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
+    fn ensureServiceRunning(self: Lifecycle, service: []const u8, writer: *std.Io.Writer, mode: StartMode) !void {
         const value = try self.cfg.findService(service);
-        waits.ensureWindowReady(self, service) catch |err| switch (err) {
-            error.WindowNotReady => {
-                try writeProgress(writer, "Warning: window for {s} not ready\n", .{service});
-                return error.WindowNotReady;
-            },
-            error.TmuxUnavailable => {
-                try writeProgress(writer, "Warning: tmux unavailable for {s}\n", .{service});
-                return error.TmuxUnavailable;
-            },
-        };
-        const pane = self.tmux.observePane(service);
-        defer pane.deinit(self.gpa);
-        switch (serviceStartDecision(pane)) {
-            .no_op => {
-                try writeProgress(writer, "{s} already running\n", .{service});
-                return;
-            },
-            .send_start => {},
-            .window_not_ready => return error.WindowNotReady,
-            .tmux_unavailable => {
-                try writeProgress(writer, "Warning: tmux unavailable for {s}\n", .{service});
-                return error.TmuxUnavailable;
-            },
+        if (mode == .observe) {
+            waits.ensureWindowReady(self, service) catch |err| switch (err) {
+                error.WindowNotReady => {
+                    try writeProgress(writer, "Warning: window for {s} not ready\n", .{service});
+                    return error.WindowNotReady;
+                },
+                error.TmuxUnavailable => {
+                    try writeProgress(writer, "Warning: tmux unavailable for {s}\n", .{service});
+                    return error.TmuxUnavailable;
+                },
+            };
+            const pane = self.tmux.observePane(service);
+            defer pane.deinit(self.gpa);
+            switch (serviceStartDecision(pane)) {
+                .no_op => {
+                    try writeProgress(writer, "{s} already running\n", .{service});
+                    return;
+                },
+                .send_start => {},
+                .window_not_ready => return error.WindowNotReady,
+                .tmux_unavailable => {
+                    try writeProgress(writer, "Warning: tmux unavailable for {s}\n", .{service});
+                    return error.TmuxUnavailable;
+                },
+            }
         }
         const service_dir = try pathing.absolute(self.gpa, self.runner.io, try self.cfg.serviceDir(self.gpa, value));
         const start_command = try config.Config.serviceStartCommand(self.gpa, value);
@@ -383,6 +394,31 @@ test "lifecycle.dockerStartDecision: treats shell pane as startable" {
     try std.testing.expectEqual(StartDecision.send_start, dockerStartDecision(pane));
 }
 
+test "lifecycle.startAll: prime mode respawns service without observing pane" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startAll("all", &writer, .{ .mode = .prime });
+
+    try proc_runner.expectCommandContaining(&recorder, "respawn-pane");
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "list-panes") == null);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "pgrep") == null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting api...") != null);
+}
+
 test "lifecycle.stopAll: signals every running service before polling once" {
     const json =
         \\{
@@ -440,7 +476,7 @@ test "lifecycle.startAll: precheck abort stops startup and warn continues" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectError(error.PrecheckFailed, lifecycle.startAll("all", &writer));
+    try std.testing.expectError(error.PrecheckFailed, lifecycle.startAll("all", &writer, .{}));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: warn-check check failed") != null);
     try proc_runner.expectCommandContaining(&recorder, "false");
 }
@@ -471,7 +507,7 @@ test "lifecycle.startAll: starts idle docker before service command" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try lifecycle.startAll("all", &writer);
+    try lifecycle.startAll("all", &writer, .{});
 
     try proc_runner.expectCommandContaining(&recorder, "docker compose");
     try proc_runner.expectCommandContaining(&recorder, "serve");
@@ -513,7 +549,7 @@ test "lifecycle.startAll: honors docker startup order step" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try lifecycle.startAll("all", &writer);
+    try lifecycle.startAll("all", &writer, .{});
 
     try proc_runner.expectCommandOrder(&recorder, "echo setup", "docker compose");
     try proc_runner.expectCommandOrder(&recorder, "docker compose", "serve");
@@ -539,7 +575,7 @@ test "lifecycle.startAll: command phase runs interactively" {
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try lifecycle.startAll("all", &writer);
+    try lifecycle.startAll("all", &writer, .{});
 
     const command = proc_runner.findCommandContaining(&recorder, "echo setup") orelse return error.CommandNotFound;
     try std.testing.expect(command.interactive);
@@ -657,7 +693,7 @@ test "lifecycle.startAll: reports missing window as failure" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectError(error.WindowNotReady, lifecycle.startAll("all", &writer));
+    try std.testing.expectError(error.WindowNotReady, lifecycle.startAll("all", &writer, .{}));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: window for api not ready") != null);
 }
 
@@ -1103,7 +1139,7 @@ test "lifecycle.startAll: respawns service pane without sending command to shell
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try lifecycle.startAll("all", &writer);
+    try lifecycle.startAll("all", &writer, .{});
 
     const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
     try proc_runner.expectCommandArg(respawn, 1, "respawn-pane");
@@ -1134,7 +1170,7 @@ test "lifecycle.startAll: resolves relative service cwd before sending command" 
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try lifecycle.startAll("all", &writer);
+    try lifecycle.startAll("all", &writer, .{});
 
     const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
     try proc_runner.expectCommandArg(respawn, 6, cwd);
