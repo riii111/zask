@@ -125,7 +125,7 @@ pub const Runtime = struct {
         for (resized) |window| try tx.restoreWindowAutoSize(window.id);
     }
 
-    pub fn open(self: Runtime, profile: []const u8, fast: bool, writer: *std.Io.Writer) !void {
+    pub fn open(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
         const guard = self.acquireLock() catch |err| switch (err) {
             error.LockBusy => switch (self.tmux().observeSession()) {
                 .active => return self.attachExistingWithRefreshedHooks(),
@@ -139,10 +139,10 @@ pub const Runtime = struct {
             else => return err,
         };
         defer guard.release();
-        try self.openUnlocked(profile, writer, fast);
+        try self.openUnlocked(profile, writer);
     }
 
-    pub fn openUnlocked(self: Runtime, profile: []const u8, writer: *std.Io.Writer, fast: bool) !void {
+    pub fn openUnlocked(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const scratch = arena.allocator();
@@ -152,7 +152,7 @@ pub const Runtime = struct {
                 try writer.flush();
                 try self.installSessionOptions(scratch);
                 try tmux_setup.bindControlKeys(scratch, self.tmux());
-                try self.lifecycle().startAll(profile, writer, .{ .wait_ready = !fast });
+                try self.lifecycle().startAll(profile, writer, .{});
                 try writer.writeAll("Attaching to workspace...\n");
                 try writer.flush();
                 try self.attachExisting();
@@ -175,7 +175,7 @@ pub const Runtime = struct {
         try self.appendServiceAndDockerWindows(scratch);
         try self.focusDashboard();
         try tmux_setup.bindControlKeys(scratch, tx);
-        try self.lifecycle().startAll(profile, writer, .{ .mode = .prime, .wait_ready = !fast });
+        try self.lifecycle().startAll(profile, writer, .{ .mode = .prime });
         try writer.writeAll("Attaching to workspace...\n");
         try writer.flush();
         try self.attachExisting();
@@ -241,7 +241,7 @@ pub const Runtime = struct {
         };
         defer guard.release();
         try self.closeUnlocked(writer);
-        try self.openUnlocked("all", writer, true);
+        try self.openUnlocked("all", writer);
     }
 
     pub fn start(self: Runtime, target: []const u8, writer: *std.Io.Writer) !void {
@@ -803,7 +803,7 @@ test "runtime.open: kills partial session on setup failure" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectError(error.CommandFailed, runtime.openUnlocked("all", &writer, false));
+    try std.testing.expectError(error.CommandFailed, runtime.openUnlocked("all", &writer));
 
     try proc_runner.expectCommandOrder(&recorder, "new-session", "kill-session");
     try proc_runner.expectCommandContaining(&recorder, "set-option");
@@ -837,7 +837,7 @@ test "runtime.open: creates session without tmuxp" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.openUnlocked("all", &writer, false);
+    try runtime.openUnlocked("all", &writer);
 
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "tmuxp") == null);
     try proc_runner.expectCommandContaining(&recorder, "new-session");
@@ -873,7 +873,7 @@ test "runtime.open: refreshes bindings for existing session" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.openUnlocked("all", &writer, false);
+    try runtime.openUnlocked("all", &writer);
 
     try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
     try proc_runner.expectCommandContaining(&recorder, "set-option");
@@ -1017,7 +1017,7 @@ test "runtime.open: attaches when lock is busy" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.open("all", false, &writer);
+    try runtime.open("all", &writer);
 
     try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
     try proc_runner.expectCommandArg(recorder.commands.items[1], 1, "set-hook");
@@ -1060,7 +1060,7 @@ test "runtime.open: preserves lock busy before session exists" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectError(error.LockBusy, runtime.open("all", false, &writer));
+    try std.testing.expectError(error.LockBusy, runtime.open("all", &writer));
 
     try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
     try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
@@ -1103,7 +1103,7 @@ test "runtime.open: reports tmux unavailable when lock busy and tmux unreachable
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectError(error.TmuxUnavailable, runtime.open("all", false, &writer));
+    try std.testing.expectError(error.TmuxUnavailable, runtime.open("all", &writer));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "tmux unavailable") != null);
 }
 

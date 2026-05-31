@@ -127,7 +127,7 @@ zask demo stop --all
 
 ```text
 zask init [project] [--root <path>] [--force]
-zask <project> open [--docker|--<profile>] [--fast]
+zask <project> open [--docker|--<profile>]
 zask <project> attach
 zask <project> list
 zask <project> status
@@ -143,9 +143,10 @@ zask <project> close
 not block on services stopping, since the kill stops them anyway; use `stop --all`
 when you want to wait for a graceful stop while keeping the workspace open.
 
-`open --fast` attaches without waiting for Docker readiness or port checks, so
-resources keep coming up in their windows after you are already attached. Use it
-when services do not depend on Docker being ready at startup.
+`open` brings resources up without blocking on Docker readiness, then attaches.
+To order startup — start Docker first, or wait for a port before the next group —
+declare a `startup_order` with `docker` / `wait_ports` steps; those waits are
+always honored.
 
 Use `zask --config <file> <command>` to run against an explicit config file.
 

@@ -16,9 +16,6 @@ pub const StartMode = enum { observe, prime };
 
 pub const StartOptions = struct {
     mode: StartMode = .observe,
-    /// When false, kick resources off but do not block on Docker readiness or
-    /// port checks, so the caller can attach while they come up in the background.
-    wait_ready: bool = true,
 };
 
 pub const Lifecycle = struct {
@@ -30,17 +27,19 @@ pub const Lifecycle = struct {
 
     pub fn startAll(self: Lifecycle, profile: []const u8, writer: *std.Io.Writer, opts: StartOptions) !void {
         try phases.runPrechecks(self, writer);
-        if (std.mem.eql(u8, profile, "docker")) return self.startDocker(writer, opts.wait_ready);
+        if (std.mem.eql(u8, profile, "docker")) return self.startDockerAndWait(writer);
         const phase_list = self.cfg.phases();
         if (phase_list.len == 0) {
-            if (self.cfg.dockerEnabled()) try self.startDocker(writer, opts.wait_ready);
+            // No declared order: bring Docker up but do not block services on its
+            // readiness. Declare startup_order to gate services on Docker / ports.
+            if (self.cfg.dockerEnabled()) try self.ensureDockerStarted(writer);
             for (try self.cfg.services()) |service| try self.startService(try config.Config.serviceName(service), writer, opts.mode);
             return;
         }
         for (phase_list) |phase| {
             if (phase != .object) continue;
             switch (phases.phaseKind(phase)) {
-                .docker => try self.startDocker(writer, opts.wait_ready),
+                .docker => try self.startDockerAndWait(writer),
                 .command => try phases.runCommandPhase(self, phase, profile, writer),
                 .services => try phases.runServicePhase(self, phase, profile, writer, opts),
             }
@@ -164,10 +163,9 @@ pub const Lifecycle = struct {
         return signaled;
     }
 
-    fn startDocker(self: Lifecycle, writer: *std.Io.Writer, wait_ready: bool) !void {
+    fn startDockerAndWait(self: Lifecycle, writer: *std.Io.Writer) !void {
         if (!self.cfg.dockerEnabled()) return;
         try self.ensureDockerStarted(writer);
-        if (!wait_ready) return;
         waits.ensureDockerReady(self, writer) catch {
             try writer.writeAll("Error: Docker failed to start\n");
             return error.DockerFailed;
@@ -408,7 +406,7 @@ test "lifecycle.dockerStartDecision: treats shell pane as startable" {
     try std.testing.expectEqual(StartDecision.send_start, dockerStartDecision(pane));
 }
 
-test "lifecycle.startAll: fast mode starts docker without waiting for ready" {
+test "lifecycle.startAll: does not block on docker readiness without startup_order" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -430,7 +428,7 @@ test "lifecycle.startAll: fast mode starts docker without waiting for ready" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try lifecycle.startAll("all", &writer, .{ .mode = .prime, .wait_ready = false });
+    try lifecycle.startAll("all", &writer, .{ .mode = .prime });
 
     try proc_runner.expectCommandContaining(&recorder, "docker compose");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") == null);
@@ -541,7 +539,6 @@ test "lifecycle.startAll: starts idle docker before service command" {
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("\n", "", .{ .exited = 1 });
     try recorder.enqueue("", "", .{ .exited = 0 });
-    try recorder.enqueue("api\n", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("\n", "", .{ .exited = 1 });
@@ -558,7 +555,8 @@ test "lifecycle.startAll: starts idle docker before service command" {
     try proc_runner.expectCommandOrder(&recorder, "docker compose", "serve");
     try proc_runner.expectNoTmuxSizingCommands(&recorder);
     try proc_runner.expectNoRemainingResponses(&recorder);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
+    // No startup_order: services are not gated on Docker readiness.
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") == null);
 }
 
 test "lifecycle.startAll: honors docker startup order step" {
