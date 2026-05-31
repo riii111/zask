@@ -53,7 +53,7 @@ pub const Lifecycle = struct {
     pub fn stopAll(self: Lifecycle, writer: *std.Io.Writer) !void {
         const services = try self.cfg.services();
         if (services.len > 0) try writeProgress(writer, "Stopping services...\n", .{});
-        var signaled = try self.broadcastStop(services, writer);
+        var signaled = self.broadcastStop(services, writer);
         defer signaled.deinit(self.gpa);
         try waits.waitForAllStopped(self, signaled.items, writer);
         try self.stopDocker(writer);
@@ -62,7 +62,8 @@ pub const Lifecycle = struct {
     pub fn stopAllFast(self: Lifecycle, writer: *std.Io.Writer) !void {
         const services = try self.cfg.services();
         if (services.len > 0) try writeProgress(writer, "Stopping services...\n", .{});
-        self.signalStop(services, writer);
+        var signaled = self.broadcastStop(services, writer);
+        signaled.deinit(self.gpa);
         try self.stopDocker(writer);
     }
 
@@ -136,35 +137,12 @@ pub const Lifecycle = struct {
         try self.ensureServiceStopped(service, writer);
     }
 
-    /// Reverse order so dependents stop before their dependencies; returns the
-    /// signaled set for the caller to poll together instead of one at a time.
-    fn broadcastStop(self: Lifecycle, services: []const std.json.Value, writer: *std.Io.Writer) !std.ArrayList([]const u8) {
+    /// Best-effort: a failed signal must not abandon the services already signaled
+    /// or the Docker teardown that follows, so every error is swallowed and only the
+    /// reached services are returned. Reverse order stops dependents before their
+    /// dependencies; the caller owns and frees the returned list.
+    fn broadcastStop(self: Lifecycle, services: []const std.json.Value, writer: *std.Io.Writer) std.ArrayList([]const u8) {
         var signaled: std.ArrayList([]const u8) = .empty;
-        errdefer signaled.deinit(self.gpa);
-        var i = services.len;
-        while (i > 0) {
-            i -= 1;
-            const name = try config.Config.serviceName(services[i]);
-            const pane = self.tmux.observePane(name);
-            defer pane.deinit(self.gpa);
-            switch (serviceStopDecision(pane.state)) {
-                .send_stop => {
-                    try self.tmux.sendKeys(name, &.{"C-c"});
-                    try signaled.append(self.gpa, name);
-                },
-                .no_op => try writeProgress(writer, "  {s} ... already stopped\n", .{name}),
-                .tmux_unavailable => {
-                    try writeProgress(writer, "Warning: tmux unavailable for {s}\n", .{name});
-                    return error.TmuxUnavailable;
-                },
-            }
-        }
-        return signaled;
-    }
-
-    /// Swallows every signal failure so `close` still reaches Docker teardown and
-    /// kill-session; the kill stops services anyway.
-    fn signalStop(self: Lifecycle, services: []const std.json.Value, writer: *std.Io.Writer) void {
         var i = services.len;
         while (i > 0) {
             i -= 1;
@@ -172,11 +150,15 @@ pub const Lifecycle = struct {
             const pane = self.tmux.observePane(name);
             defer pane.deinit(self.gpa);
             switch (serviceStopDecision(pane.state)) {
-                .send_stop => self.tmux.sendKeys(name, &.{"C-c"}) catch {},
+                .send_stop => {
+                    self.tmux.sendKeys(name, &.{"C-c"}) catch continue;
+                    signaled.append(self.gpa, name) catch {};
+                },
                 .no_op => writeProgress(writer, "  {s} ... already stopped\n", .{name}) catch {},
                 .tmux_unavailable => {},
             }
         }
+        return signaled;
     }
 
     fn startDockerAndWait(self: Lifecycle, writer: *std.Io.Writer) !void {
@@ -509,6 +491,44 @@ test "lifecycle.stopAll: signals every running service before polling once" {
     try std.testing.expectEqual(waits.stopAttempts(), recorder.sleeps.items.len);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api ... warning: may not have stopped") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "web ... warning: may not have stopped") != null);
+}
+
+test "lifecycle.stopAll: a failed signal still waits the signaled and tears down docker" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "docker": {"compose": "compose.yaml"},
+        \\  "groups": [{"name":"backend","services":[
+        \\    {"name":"api","dir":"backend","command":"serve"},
+        \\    {"name":"web","dir":"frontend","command":"dev"}
+        \\  ]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.stopAll(&writer);
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "web ... stopped") != null);
+    try proc_runner.expectCommandContaining(&recorder, "down");
+    try proc_runner.expectCommandOrder(&recorder, "C-c", "down");
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
 test "lifecycle.startAll: precheck abort stops startup and warn continues" {
