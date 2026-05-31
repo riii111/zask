@@ -64,7 +64,7 @@ pub const Lifecycle = struct {
     pub fn stopAll(self: Lifecycle, writer: *std.Io.Writer) !void {
         const services = try self.cfg.services();
         if (services.len > 0) try writeProgress(writer, "Stopping services...\n", .{});
-        var broadcast = self.broadcastStop(services, writer);
+        var broadcast = try self.broadcastStop(services, writer);
         defer broadcast.deinit(self.gpa);
         // stop --all leaves the workspace up: wait for the signaled services and fail
         // loudly for any we could not signal, since they may still be running.
@@ -82,7 +82,7 @@ pub const Lifecycle = struct {
         if (services.len > 0) try writeProgress(writer, "Stopping services...\n", .{});
         // Unlike stopAll, close kills the session next: skip the wait and ignore
         // failed signals, since the kill stops whatever is left.
-        var broadcast = self.broadcastStop(services, writer);
+        var broadcast = try self.broadcastStop(services, writer);
         broadcast.deinit(self.gpa);
         try self.stopDocker(writer);
     }
@@ -158,11 +158,16 @@ pub const Lifecycle = struct {
     }
 
     /// A failed signal continues the loop (so the rest still get C-c) but is
-    /// recorded, never silently dropped. Reverse order stops dependents before
-    /// their dependencies; the caller owns and frees both lists.
-    fn broadcastStop(self: Lifecycle, services: []const std.json.Value, writer: *std.Io.Writer) StopBroadcast {
+    /// recorded, never silently dropped. Capacity for both lists is reserved up
+    /// front so a record can never be lost to an allocation failure mid-loop.
+    /// Reverse order stops dependents first; the caller owns and frees both lists.
+    fn broadcastStop(self: Lifecycle, services: []const std.json.Value, writer: *std.Io.Writer) !StopBroadcast {
         var signaled: std.ArrayList([]const u8) = .empty;
+        errdefer signaled.deinit(self.gpa);
+        try signaled.ensureTotalCapacity(self.gpa, services.len);
         var failed: std.ArrayList([]const u8) = .empty;
+        errdefer failed.deinit(self.gpa);
+        try failed.ensureTotalCapacity(self.gpa, services.len);
         var i = services.len;
         while (i > 0) {
             i -= 1;
@@ -171,11 +176,11 @@ pub const Lifecycle = struct {
             defer pane.deinit(self.gpa);
             switch (serviceStopDecision(pane.state)) {
                 .send_stop => if (self.tmux.sendKeys(name, &.{"C-c"})) |_|
-                    signaled.append(self.gpa, name) catch {}
+                    signaled.appendAssumeCapacity(name)
                 else |_|
-                    failed.append(self.gpa, name) catch {},
+                    failed.appendAssumeCapacity(name),
                 .no_op => writeProgress(writer, "  {s} ... already stopped\n", .{name}) catch {},
-                .tmux_unavailable => failed.append(self.gpa, name) catch {},
+                .tmux_unavailable => failed.appendAssumeCapacity(name),
             }
         }
         return .{ .signaled = signaled, .failed = failed };
