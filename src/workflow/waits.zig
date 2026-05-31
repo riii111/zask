@@ -26,7 +26,7 @@ pub fn ensureDockerReady(ctx: anytype, writer: *std.Io.Writer) !void {
     return error.DockerNotReady;
 }
 
-pub fn waitForPort(ctx: anytype, port: i64, timeout: i64, writer: *std.Io.Writer) !void {
+pub fn waitForPort(ctx: anytype, port: i64, timeout: i64) !void {
     const port_text = try std.fmt.allocPrint(ctx.gpa, "{d}", .{port});
     defer ctx.gpa.free(port_text);
     var elapsed: i64 = 0;
@@ -34,7 +34,7 @@ pub fn waitForPort(ctx: anytype, port: i64, timeout: i64, writer: *std.Io.Writer
         if (ctx.runner.run(&.{ "nc", "-z", "localhost", port_text }, .{ .check = true, .discard = true })) |_| return else |_| {}
         ctx.runner.sleep(port_wait_interval);
     }
-    try writeProgress(writer, "Warning: port {d} did not become ready within {d}s\n", .{ port, timeout });
+    return error.PortNotReady;
 }
 
 pub fn ensureWindowReady(ctx: anytype, window: []const u8) !void {

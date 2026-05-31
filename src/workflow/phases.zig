@@ -5,6 +5,7 @@ const config_value = @import("../model/config_value.zig");
 const lifecycle_mod = @import("lifecycle.zig");
 const pathing = @import("pathing.zig");
 const runner_mod = @import("../platform/runner.zig");
+const shell = @import("../platform/shell.zig");
 const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
 
@@ -69,7 +70,15 @@ pub fn runServicePhase(ctx: anytype, phase: std.json.Value, profile: []const u8,
         }
     };
     if (phase.object.get("wait_ports")) |ports| if (ports == .array) {
-        for (ports.array.items) |port_value| if (port_value == .integer) try waits.waitForPort(ctx, port_value.integer, 120, writer);
+        for (ports.array.items) |port_value| if (port_value == .integer) {
+            waits.waitForPort(ctx, port_value.integer, 120) catch |err| switch (err) {
+                error.PortNotReady => {
+                    try writePortFailure(ctx, phase, profile, port_value.integer, 120, writer);
+                    return error.StartupFailed;
+                },
+                else => return err,
+            };
+        };
     };
 }
 
@@ -77,6 +86,75 @@ fn phaseCwd(ctx: anytype, dir: []const u8) ![]const u8 {
     if (dir.len == 0) return pathing.absolute(ctx.gpa, ctx.runner.io, try ctx.cfg.projectRoot(ctx.gpa));
     try validate.relativeSubPath(dir);
     return pathing.absolute(ctx.gpa, ctx.runner.io, try std.fs.path.join(ctx.gpa, &.{ try ctx.cfg.projectRoot(ctx.gpa), dir }));
+}
+
+fn writePortFailure(ctx: anytype, phase: std.json.Value, profile: []const u8, port: i64, timeout: i64, writer: *std.Io.Writer) !void {
+    const service = try serviceForPort(ctx, phase, profile, port);
+    const phase_label = phaseLabel(ctx, phase, profile);
+    if (service) |name| {
+        try writer.print("Error: {s} did not become ready\n", .{name});
+    } else {
+        try writer.print("Error: port {d} did not become ready\n", .{port});
+    }
+    try writer.print("  phase: {s}\n", .{phase_label});
+    try writer.print("  expected: localhost:{d}\n", .{port});
+    try writer.print("  waited: {d}s\n", .{timeout});
+    if (service) |name| try writeLastLog(ctx, name, writer);
+    if (service) |name| try writeLogsNext(ctx, name, writer);
+    try writer.flush();
+}
+
+fn serviceForPort(ctx: anytype, phase: std.json.Value, profile: []const u8, port: i64) !?[]const u8 {
+    var matched: ?[]const u8 = null;
+    if (phase.object.get("groups")) |groups| if (groups == .array) {
+        for (groups.array.items) |group_value| {
+            if (group_value != .string) continue;
+            const group = ctx.cfg.resolvePhaseGroup(profile, group_value.string);
+            const svcs = try ctx.cfg.resolveGroup(ctx.gpa, group);
+            defer ctx.gpa.free(svcs);
+            for (svcs) |svc| {
+                const service = try ctx.cfg.findService(svc);
+                if (config.Config.servicePort(service) != port) continue;
+                if (matched != null) return null;
+                matched = svc;
+            }
+        }
+    };
+    return matched;
+}
+
+fn phaseLabel(ctx: anytype, phase: std.json.Value, profile: []const u8) []const u8 {
+    const name = config_value.optionalObjectString(phase, "name", "");
+    if (name.len > 0) return name;
+    if (phase.object.get("groups")) |groups| if (groups == .array and groups.array.items.len == 1) {
+        const group = groups.array.items[0];
+        if (group == .string) return ctx.cfg.resolvePhaseGroup(profile, group.string);
+    };
+    return "startup";
+}
+
+fn writeLastLog(ctx: anytype, window: []const u8, writer: *std.Io.Writer) !void {
+    const pane = try ctx.tmux.capturePane(window);
+    defer ctx.gpa.free(pane);
+    const line = lastLogLine(pane);
+    if (line.len > 0) try writer.print("  last log: {s}\n", .{line});
+}
+
+fn lastLogLine(pane: []const u8) []const u8 {
+    var lines = std.mem.splitScalar(u8, pane, '\n');
+    var latest: []const u8 = "";
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n\x00");
+        if (trimmed.len > 0) latest = trimmed;
+    }
+    return latest;
+}
+
+fn writeLogsNext(ctx: anytype, service: []const u8, writer: *std.Io.Writer) !void {
+    const config_path = try shell.quote(ctx.gpa, ctx.config_path);
+    defer ctx.gpa.free(config_path);
+    try writer.writeAll("\nNext:\n");
+    try writer.print("  zask --config {s} logs {s}\n", .{ config_path, service });
 }
 
 // -----------------------------------------------------------------------------
@@ -224,6 +302,41 @@ test "phases.runServicePhase: honors wait_ports as a declared dependency" {
     try runner_mod.expectCommandArg(port_check, 3, "5432");
     try runner_mod.expectCommandOrder(&recorder, "serve", "nc");
     try runner_mod.expectNoRemainingResponses(&recorder);
+}
+
+test "phases.runServicePhase: reports port readiness failure" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":5432}]}],
+        \\  "startup_order": [{"name":"backend","group":"backend","wait_ports":[5432]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = runner_mod.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    recorder.stdout = "Error: address already in use\n";
+    recorder.term = .{ .exited = 1 };
+    const run = runner_mod.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.StartupFailed, runServicePhase(lifecycle, cfg.phases()[0], "all", &writer, .observe));
+
+    const out = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "Error: api did not become ready") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "phase: backend") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "expected: localhost:5432") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "waited: 120s") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "last log: Error: address already in use") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "zask --config 'config.json' logs api") != null);
 }
 
 test "phases.phaseCwd: rejects path traversal" {

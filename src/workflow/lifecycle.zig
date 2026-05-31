@@ -29,6 +29,7 @@ const StopBroadcast = struct {
 pub const Lifecycle = struct {
     gpa: std.mem.Allocator,
     cfg: config.Config,
+    config_path: []const u8 = "config.json",
     runner: proc_runner.Runner,
     tmux: tmux_client.Client,
     docker: docker_client.Compose,
@@ -716,10 +717,9 @@ test "waits: report port and stop timeouts" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try waits.waitForPort(lifecycle, 5432, 2, &writer);
+    try std.testing.expectError(error.PortNotReady, waits.waitForPort(lifecycle, 5432, 2));
     try waits.waitForStopped(lifecycle, "api", &writer);
 
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: port 5432") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api ... warning: may not have stopped") != null);
 }
 
