@@ -108,11 +108,7 @@ pub const Lifecycle = struct {
                 if (std.mem.eql(u8, target, "--all")) return self.stopDocker(writer);
                 return sessionNotRunning(writer);
             },
-            .unavailable => {
-                try writer.writeAll("tmux unavailable\n");
-                try writer.flush();
-                return error.TmuxUnavailable;
-            },
+            .unavailable => return waits.reportTmuxUnavailable(writer),
         }
         if (std.mem.eql(u8, target, "--all")) return self.stopAll(writer);
         if (self.cfg.resolveGroup(self.gpa, target)) |services| {
@@ -236,11 +232,7 @@ pub const Lifecycle = struct {
                 try writer.flush();
                 return error.SessionNotRunning;
             },
-            .unavailable => {
-                try writer.writeAll("tmux unavailable\n");
-                try writer.flush();
-                return error.TmuxUnavailable;
-            },
+            .unavailable => return waits.reportTmuxUnavailable(writer),
         }
     }
 

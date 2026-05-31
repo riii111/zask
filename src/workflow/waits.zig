@@ -108,6 +108,15 @@ pub fn waitForPaneIdle(ctx: anytype, window: []const u8) bool {
     return false;
 }
 
+/// Writes the standard "tmux unavailable" notice, flushes it, and returns the
+/// error so callers collapse the repeated `.unavailable` observe branch into a
+/// single line.
+pub fn reportTmuxUnavailable(writer: *std.Io.Writer) !void {
+    try writer.writeAll("tmux unavailable\n");
+    try writer.flush();
+    return error.TmuxUnavailable;
+}
+
 pub fn windowReadyAttempts() usize {
     return window_ready_attempts;
 }
