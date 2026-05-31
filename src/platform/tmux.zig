@@ -56,6 +56,8 @@ pub const Client = struct {
             clients.deinit(self.gpa);
         }
 
+        // Lenient parse: single-column output, so there is no field-count
+        // contract to break; blank lines are skipped and the rest are kept.
         var lines = std.mem.splitScalar(u8, result.stdout, '\n');
         while (lines.next()) |line| {
             const name = std.mem.trim(u8, line, " \t\r\n");
@@ -103,6 +105,8 @@ pub const Client = struct {
             windows.deinit(self.gpa);
         }
 
+        // Strict parse: format is fixed, so a field-count or numeric mismatch is
+        // a contract violation (error) rather than a silently defaulted value.
         var lines = std.mem.splitScalar(u8, result.stdout, '\n');
         while (lines.next()) |line| {
             if (line.len == 0) continue;
@@ -191,6 +195,12 @@ pub const Client = struct {
         if (result.term != .exited) return error.TmuxUnavailable;
         if (result.term.exited != 0) return if (serverUnavailable(result.stderr)) error.TmuxUnavailable else error.WindowMissing;
 
+        // Lenient parse (intentional, unlike listWindowSizes): this query fixes
+        // its own four-field format, and pane_dead_status is legitimately empty
+        // for live panes ("0||pid|cmd"). observePane runs on a hot path, so a
+        // truncated or unexpected line degrades to defaults rather than aborting
+        // the surrounding lifecycle. Extra pane lines from split windows are
+        // ignored; only the first pane is observed.
         var lines = std.mem.splitScalar(u8, result.stdout, '\n');
         const line = lines.next() orelse "";
         var fields = std.mem.splitScalar(u8, line, '|');
@@ -695,6 +705,21 @@ test "tmux.paneInfo: uses first pane line and preserves parsed fields" {
     try std.testing.expect(!info.dead);
     try std.testing.expectEqualStrings("0", info.exit_code);
     try std.testing.expectEqualStrings("111", info.pid);
+    try std.testing.expectEqualStrings("zsh", info.command);
+}
+
+test "tmux.paneInfo: accepts empty dead status for live pane" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("0||12345|zsh\n", "", .{ .exited = 0 });
+    const client = testClient(&recorder);
+
+    const info = try client.paneInfo("api");
+    defer info.deinit(std.testing.allocator);
+
+    try std.testing.expect(!info.dead);
+    try std.testing.expectEqualStrings("", info.exit_code);
+    try std.testing.expectEqualStrings("12345", info.pid);
     try std.testing.expectEqualStrings("zsh", info.command);
 }
 
