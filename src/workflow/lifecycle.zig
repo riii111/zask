@@ -18,6 +18,18 @@ pub const StartOptions = struct {
     mode: StartMode = .observe,
 };
 
+/// `failed` is split from `signaled` so `stop --all` can surface services it could
+/// not signal — they may still be running in the workspace it leaves up.
+const StopBroadcast = struct {
+    signaled: std.ArrayList([]const u8),
+    failed: std.ArrayList([]const u8),
+
+    fn deinit(self: *StopBroadcast, gpa: std.mem.Allocator) void {
+        self.signaled.deinit(gpa);
+        self.failed.deinit(gpa);
+    }
+};
+
 pub const Lifecycle = struct {
     gpa: std.mem.Allocator,
     cfg: config.Config,
@@ -52,17 +64,26 @@ pub const Lifecycle = struct {
     pub fn stopAll(self: Lifecycle, writer: *std.Io.Writer) !void {
         const services = try self.cfg.services();
         if (services.len > 0) try writeProgress(writer, "Stopping services...\n", .{});
-        var signaled = self.broadcastStop(services, writer);
-        defer signaled.deinit(self.gpa);
-        try waits.waitForAllStopped(self, signaled.items, writer);
+        var broadcast = self.broadcastStop(services, writer);
+        defer broadcast.deinit(self.gpa);
+        // stop --all leaves the workspace up: wait for the signaled services and fail
+        // loudly for any we could not signal, since they may still be running.
+        try waits.waitForAllStopped(self, broadcast.signaled.items, writer);
         try self.stopDocker(writer);
+        if (broadcast.failed.items.len > 0) {
+            for (broadcast.failed.items) |name|
+                try writeProgress(writer, "Warning: could not signal {s}; it may still be running\n", .{name});
+            return error.ServiceStopIncomplete;
+        }
     }
 
     pub fn stopAllFast(self: Lifecycle, writer: *std.Io.Writer) !void {
         const services = try self.cfg.services();
         if (services.len > 0) try writeProgress(writer, "Stopping services...\n", .{});
-        var signaled = self.broadcastStop(services, writer);
-        signaled.deinit(self.gpa);
+        // Unlike stopAll, close kills the session next: skip the wait and ignore
+        // failed signals, since the kill stops whatever is left.
+        var broadcast = self.broadcastStop(services, writer);
+        broadcast.deinit(self.gpa);
         try self.stopDocker(writer);
     }
 
@@ -136,12 +157,12 @@ pub const Lifecycle = struct {
         try self.ensureServiceStopped(service, writer);
     }
 
-    /// Best-effort: a failed signal must not abandon the services already signaled
-    /// or the Docker teardown that follows, so every error is swallowed and only the
-    /// reached services are returned. Reverse order stops dependents before their
-    /// dependencies; the caller owns and frees the returned list.
-    fn broadcastStop(self: Lifecycle, services: []const std.json.Value, writer: *std.Io.Writer) std.ArrayList([]const u8) {
+    /// A failed signal continues the loop (so the rest still get C-c) but is
+    /// recorded, never silently dropped. Reverse order stops dependents before
+    /// their dependencies; the caller owns and frees both lists.
+    fn broadcastStop(self: Lifecycle, services: []const std.json.Value, writer: *std.Io.Writer) StopBroadcast {
         var signaled: std.ArrayList([]const u8) = .empty;
+        var failed: std.ArrayList([]const u8) = .empty;
         var i = services.len;
         while (i > 0) {
             i -= 1;
@@ -149,15 +170,15 @@ pub const Lifecycle = struct {
             const pane = self.tmux.observePane(name);
             defer pane.deinit(self.gpa);
             switch (serviceStopDecision(pane.state)) {
-                .send_stop => {
-                    self.tmux.sendKeys(name, &.{"C-c"}) catch continue;
-                    signaled.append(self.gpa, name) catch {};
-                },
+                .send_stop => if (self.tmux.sendKeys(name, &.{"C-c"})) |_|
+                    signaled.append(self.gpa, name) catch {}
+                else |_|
+                    failed.append(self.gpa, name) catch {},
                 .no_op => writeProgress(writer, "  {s} ... already stopped\n", .{name}) catch {},
-                .tmux_unavailable => {},
+                .tmux_unavailable => failed.append(self.gpa, name) catch {},
             }
         }
-        return signaled;
+        return .{ .signaled = signaled, .failed = failed };
     }
 
     fn startDockerAndWait(self: Lifecycle, writer: *std.Io.Writer) !void {
@@ -492,7 +513,7 @@ test "lifecycle.stopAll: signals every running service before polling once" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "web ... warning: may not have stopped") != null);
 }
 
-test "lifecycle.stopAll: a failed signal still waits the signaled and tears down docker" {
+test "lifecycle.stopAll: a failed signal still waits, tears down docker, and surfaces" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -522,9 +543,10 @@ test "lifecycle.stopAll: a failed signal still waits the signaled and tears down
     var buffer: [512]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try lifecycle.stopAll(&writer);
+    try std.testing.expectError(error.ServiceStopIncomplete, lifecycle.stopAll(&writer));
 
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "web ... stopped") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "could not signal api") != null);
     try proc_runner.expectCommandContaining(&recorder, "down");
     try proc_runner.expectCommandOrder(&recorder, "C-c", "down");
     try proc_runner.expectNoRemainingResponses(&recorder);
