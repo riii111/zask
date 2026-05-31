@@ -100,7 +100,7 @@ fn writePortFailure(ctx: anytype, phase: std.json.Value, profile: []const u8, po
     try writer.print("  expected: localhost:{d}\n", .{port});
     try writer.print("  waited: {d}s\n", .{timeout});
     if (service) |name| try writeLastLog(ctx, name, writer);
-    if (service) |name| try writeLogsNext(ctx, name, writer);
+    if (service) |name| try writeNextLogsHint(ctx, name, writer);
     try writer.flush();
 }
 
@@ -139,7 +139,7 @@ fn writeLastLog(ctx: anytype, window: []const u8, writer: *std.Io.Writer) !void 
     if (line.len > 0) try writer.print("  last log: {s}\n", .{line});
 }
 
-fn writeLogsNext(ctx: anytype, service: []const u8, writer: *std.Io.Writer) !void {
+fn writeNextLogsHint(ctx: anytype, service: []const u8, writer: *std.Io.Writer) !void {
     const config_path = try shell.quote(ctx.gpa, ctx.config_path);
     defer ctx.gpa.free(config_path);
     try writer.writeAll("\nNext:\n");
@@ -158,6 +158,7 @@ fn testLifecycle(gpa: std.mem.Allocator, run: runner_mod.Runner, cfg: config.Con
     return .{
         .gpa = gpa,
         .cfg = cfg,
+        .config_path = "config.json",
         .runner = run,
         .tmux = .{ .gpa = gpa, .runner = run, .session = "demo" },
         .docker = .{ .gpa = gpa, .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },

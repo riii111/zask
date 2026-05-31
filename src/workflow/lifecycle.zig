@@ -29,7 +29,7 @@ const StopBroadcast = struct {
 pub const Lifecycle = struct {
     gpa: std.mem.Allocator,
     cfg: config.Config,
-    config_path: []const u8 = "config.json",
+    config_path: []const u8,
     runner: proc_runner.Runner,
     tmux: tmux_client.Client,
     docker: docker_client.Compose,
@@ -207,16 +207,16 @@ pub const Lifecycle = struct {
         defer compose.deinit(self.gpa);
         try writer.writeAll("Error: Docker did not become ready\n");
         try writer.writeAll("  phase: docker\n");
-        try writer.print("  compose: {s}\n", .{composeStateText(compose.state)});
+        try writer.print("  compose: {s}\n", .{composeDiagnosticStateText(compose.state)});
         try writer.print("  waited: {d}s\n", .{self.cfg.dockerWaitTimeout()});
         const line = try self.tmux.captureLastLine("docker");
         defer self.gpa.free(line);
         if (line.len > 0) try writer.print("  last log: {s}\n", .{line});
-        try self.writeStatusNext(writer);
+        try self.writeNextStatusHint(writer);
         try writer.flush();
     }
 
-    fn writeStatusNext(self: Lifecycle, writer: *std.Io.Writer) !void {
+    fn writeNextStatusHint(self: Lifecycle, writer: *std.Io.Writer) !void {
         const config_path = try shell.quote(self.gpa, self.config_path);
         defer self.gpa.free(config_path);
         try writer.writeAll("\nNext:\n");
@@ -408,7 +408,9 @@ fn dockerStartDecision(pane: observations.PaneObservation) StartDecision {
     return startDecisionForState(pane.state);
 }
 
-fn composeStateText(state: observations.ComposeState) []const u8 {
+// Diagnostics use raw observation names; status output maps the same states to
+// operator-facing words such as "stopped" and "unknown".
+fn composeDiagnosticStateText(state: observations.ComposeState) []const u8 {
     return switch (state) {
         .running => "running",
         .empty => "empty",
@@ -428,6 +430,7 @@ fn testLifecycle(gpa: std.mem.Allocator, run: proc_runner.Runner, cfg: config.Co
     return .{
         .gpa = gpa,
         .cfg = cfg,
+        .config_path = "config.json",
         .runner = run,
         .tmux = .{ .gpa = gpa, .runner = run, .session = "demo" },
         .docker = .{ .gpa = gpa, .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
