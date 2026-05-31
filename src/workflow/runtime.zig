@@ -237,8 +237,10 @@ pub const Runtime = struct {
             else => return err,
         };
         defer guard.release();
-        try self.closeUnlocked(writer, false);
-        try self.openUnlocked("all", writer, false);
+        // re always kills and reopens, so the graceful stop wait before the kill
+        // is wasted, and the reopen can attach while resources come back up.
+        try self.closeUnlocked(writer, true);
+        try self.openUnlocked("all", writer, true);
     }
 
     pub fn start(self: Runtime, target: []const u8, writer: *std.Io.Writer) !void {
