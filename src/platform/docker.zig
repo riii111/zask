@@ -33,9 +33,7 @@ pub const Compose = struct {
     }
 
     pub fn down(self: Compose) !void {
-        const result = runner.captured(try self.runner.run(&.{ "docker", "compose", "-f", self.file, "down" }, .{ .cwd = self.dir, .check = true }));
-        self.gpa.free(result.stdout);
-        self.gpa.free(result.stderr);
+        _ = try self.runner.run(&.{ "docker", "compose", "-f", self.file, "down" }, .{ .cwd = self.dir, .check = true, .discard = true });
     }
 };
 
