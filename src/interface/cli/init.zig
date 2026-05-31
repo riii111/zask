@@ -118,32 +118,32 @@ fn renderConfig(gpa: std.mem.Allocator, project: []const u8, detected: DetectedO
     var json: std.json.Stringify = .{ .writer = writer, .options = .{ .whitespace = .indent_2 } };
 
     try json.beginObject();
-    try json.objectField("project");
+    try json.objectField(config.keys.project);
     try json.beginObject();
-    try json.objectField("name");
+    try json.objectField(config.keys.name);
     try json.write(project);
-    try json.objectField("root");
+    try json.objectField(config.keys.root);
     try json.write(detected.opts.root);
     try json.endObject();
     if (detected.compose_file) |compose_file| {
-        try json.objectField("docker");
+        try json.objectField(config.keys.docker);
         try json.beginObject();
-        try json.objectField("compose");
+        try json.objectField(config.keys.compose);
         try json.write(compose_file);
         try json.endObject();
     }
-    try json.objectField("groups");
+    try json.objectField(config.keys.groups);
     try json.beginArray();
     if (detected.service) |service| {
         try json.beginObject();
-        try json.objectField("name");
+        try json.objectField(config.keys.name);
         try json.write("frontend");
-        try json.objectField("services");
+        try json.objectField(config.keys.services);
         try json.beginArray();
         try json.beginObject();
-        try json.objectField("name");
+        try json.objectField(config.keys.name);
         try json.write(service.name);
-        try json.objectField("command");
+        try json.objectField(config.keys.command);
         try json.write(service.command);
         try json.endObject();
         try json.endArray();
@@ -249,6 +249,55 @@ test "init.config: renders parseable minimal config" {
     try std.testing.expectEqualStrings(".", project_root);
     try std.testing.expectEqual(@as(usize, 0), (try cfg.services()).len);
     try std.testing.expect(std.mem.indexOf(u8, json, "session_name") == null);
+}
+
+test "init.config: renders minimal config verbatim" {
+    const opts = try Options.parse(&.{"demo"});
+    const json = try renderConfig(std.testing.allocator, "demo", .{ .opts = opts });
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        \\{
+        \\  "project": {
+        \\    "name": "demo",
+        \\    "root": "."
+        \\  },
+        \\  "groups": []
+        \\}
+        \\
+    , json);
+}
+
+test "init.config: renders service and docker config verbatim" {
+    const detected = DetectedOptions{
+        .opts = try Options.parse(&.{ "demo", "--root", "." }),
+        .service = .{ .name = "web", .command = "pnpm run dev", .script = "dev" },
+        .compose_file = "infra/compose.yaml",
+    };
+    const json = try renderConfig(std.testing.allocator, "demo", detected);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        \\{
+        \\  "project": {
+        \\    "name": "demo",
+        \\    "root": "."
+        \\  },
+        \\  "docker": {
+        \\    "compose": "infra/compose.yaml"
+        \\  },
+        \\  "groups": [
+        \\    {
+        \\      "name": "frontend",
+        \\      "services": [
+        \\        {
+        \\          "name": "web",
+        \\          "command": "pnpm run dev"
+        \\        }
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+        \\
+    , json);
 }
 
 test "init.config: renders service and docker config" {
