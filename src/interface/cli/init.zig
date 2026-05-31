@@ -132,6 +132,25 @@ fn renderConfig(gpa: std.mem.Allocator, project: []const u8, detected: DetectedO
         try json.write(compose_file);
         try json.endObject();
     }
+    // Scaffold an explicit order when both Docker and a service exist: open no
+    // longer waits for Docker implicitly, so the service would otherwise race it.
+    if (detected.compose_file != null and detected.service != null) {
+        try json.objectField("startup_order");
+        try json.beginArray();
+        try json.beginObject();
+        try json.objectField("name");
+        try json.write("Docker");
+        try json.objectField("docker");
+        try json.write(true);
+        try json.endObject();
+        try json.beginObject();
+        try json.objectField("name");
+        try json.write("frontend");
+        try json.objectField("group");
+        try json.write("frontend");
+        try json.endObject();
+        try json.endArray();
+    }
     try json.objectField("groups");
     try json.beginArray();
     if (detected.service) |service| {
@@ -272,7 +291,8 @@ test "init.config: renders service and docker config" {
     try std.testing.expectEqualStrings("compose.yaml", cfg.dockerComposeFile());
     try std.testing.expectEqualStrings("./infra", try cfg.dockerDir(arena.allocator()));
     try std.testing.expect(std.mem.indexOf(u8, json, "\"dir\": \".\"") == null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"group\"") == null);
+    // Docker + a service scaffolds an explicit order: Docker phase, then the group.
+    try std.testing.expectEqual(@as(usize, 2), cfg.phases().len);
 }
 
 test "init.config: omits docker when compose is not detected" {
@@ -321,6 +341,7 @@ test "init.detect: renders detected default compose file" {
     try std.testing.expectEqualStrings("docker-compose.yml", detected.compose_file.?);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"compose\": \"docker-compose.yml\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "compose_file") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "startup_order") == null);
 }
 
 test "init.detect: infers package script" {
