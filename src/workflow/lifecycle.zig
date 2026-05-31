@@ -276,6 +276,10 @@ const StopDecision = enum {
 };
 
 fn serviceStartDecision(pane: observations.PaneObservation) StartDecision {
+    // Raw-field exception: when the pane's current command is a shell, the
+    // service process is not the foreground process, so it must be (re)started
+    // even if pgrep made the pane look busy. Every other case is decided from
+    // the observed state alone.
     if (pane.command.len > 0 and tmux_client.isShellCommand(pane.command)) return .send_start;
     return startDecisionForState(pane.state);
 }
@@ -298,6 +302,9 @@ fn serviceStopDecision(state: observations.PaneState) StopDecision {
 }
 
 fn dockerStartDecision(pane: observations.PaneObservation) StartDecision {
+    // Raw-field exception: a shell as the current command means docker compose
+    // is not the foreground process, so it must be (re)started even when the
+    // observed state is busy. Every other case is decided from the state alone.
     if (pane.command.len > 0 and tmux_client.isShellCommand(pane.command)) return .send_start;
     return startDecisionForState(pane.state);
 }
