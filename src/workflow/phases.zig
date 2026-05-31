@@ -9,6 +9,8 @@ const shell = @import("../platform/shell.zig");
 const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
 
+const port_wait_timeout_seconds = 120;
+
 pub const PhaseKind = enum {
     docker,
     command,
@@ -71,9 +73,9 @@ pub fn runServicePhase(ctx: anytype, phase: std.json.Value, profile: []const u8,
     };
     if (phase.object.get("wait_ports")) |ports| if (ports == .array) {
         for (ports.array.items) |port_value| if (port_value == .integer) {
-            waits.waitForPort(ctx, port_value.integer, 120) catch |err| switch (err) {
+            waits.waitForPort(ctx, port_value.integer, port_wait_timeout_seconds) catch |err| switch (err) {
                 error.PortNotReady => {
-                    try writePortFailure(ctx, phase, profile, port_value.integer, 120, writer);
+                    try writePortFailure(ctx, phase, profile, port_value.integer, port_wait_timeout_seconds, writer);
                     return error.StartupFailed;
                 },
                 else => return err,
@@ -327,6 +329,38 @@ test "phases.runServicePhase: reports port readiness failure" {
     try std.testing.expect(std.mem.indexOf(u8, out, "waited: 120s") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "last log: Error: address already in use") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "zask --config 'config.json' logs api") != null);
+}
+
+test "phases.runServicePhase: reports unmatched port without service hints" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":3000}]}],
+        \\  "startup_order": [{"group":"backend","wait_ports":[5432]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = runner_mod.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    recorder.term = .{ .exited = 1 };
+    const run = runner_mod.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.StartupFailed, runServicePhase(lifecycle, cfg.phases()[0], "all", &writer, .observe));
+
+    const out = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "Error: port 5432 did not become ready") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "phase: backend") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "last log:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Next:") == null);
 }
 
 test "phases.phaseCwd: rejects path traversal" {
