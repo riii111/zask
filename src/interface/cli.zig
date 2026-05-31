@@ -132,13 +132,13 @@ pub fn run(init: std.process.Init) !void {
         },
         error.InvalidConfigSyntax => {
             try stdout.writeAll("Error: config is not valid JSON\n");
-            try renderDiscoveredConfig(stdout, err_ctx);
+            try renderSelectedConfig(stdout, err_ctx);
             try stdout.flush();
             std.process.exit(2);
         },
         error.InvalidConfig => {
             try stdout.writeAll("Error: invalid config\n");
-            try renderDiscoveredConfig(stdout, err_ctx);
+            try renderSelectedConfig(stdout, err_ctx);
             try renderDiagnostics(stdout, diags);
             try stdout.flush();
             std.process.exit(2);
@@ -196,8 +196,8 @@ fn renderDiagnostics(writer: *std.Io.Writer, diags: diagnostics.Diagnostics) !vo
     }
 }
 
-fn renderDiscoveredConfig(writer: *std.Io.Writer, err_ctx: cli_context.ErrorContext) !void {
-    if (err_ctx.config_source != .discovered) return;
+fn renderSelectedConfig(writer: *std.Io.Writer, err_ctx: cli_context.ErrorContext) !void {
+    if (err_ctx.config_source != .discovered and err_ctx.config_source != .inferred_named) return;
     if (err_ctx.config_path) |path| try writer.print("Config: {s}\n", .{path});
 }
 
@@ -261,7 +261,7 @@ fn parseArgs(context: CommandContext, args: []const []const u8) !ParsedArgs {
     if (try shouldUseNamedProject(context, args)) {
         return .{ .project = args[0], .config_source = .named, .command = args[1], .args = args[2..] };
     }
-    if (isCommandForm(args[0])) return .{ .config_source = .discovered, .command = args[0], .args = args[1..] };
+    if (isCommandForm(args[0])) return .{ .command = args[0], .args = args[1..] };
     if (args.len < 2) return error.ProjectRequired;
     return .{ .project = args[0], .config_source = .named, .command = args[1], .args = args[2..] };
 }
@@ -435,16 +435,16 @@ test "cli.parseArgs: accepts argv0 project alias form" {
     try std.testing.expectEqualStrings("open", parsed.command);
 }
 
-test "cli.parseArgs: accepts command form for local config discovery" {
+test "cli.parseArgs: defers command form config resolution" {
     const status_args = try parseArgs(.{ .gpa = std.testing.allocator }, &.{"status"});
     try std.testing.expect(status_args.project == null);
     try std.testing.expect(status_args.config_path == null);
-    try std.testing.expectEqual(cli_context.ConfigSource.discovered, status_args.config_source.?);
+    try std.testing.expect(status_args.config_source == null);
     try std.testing.expectEqualStrings("status", status_args.command);
 
     const logs_args = try parseArgs(.{ .gpa = std.testing.allocator }, &.{ "logs", "api" });
     try std.testing.expect(logs_args.project == null);
-    try std.testing.expectEqual(cli_context.ConfigSource.discovered, logs_args.config_source.?);
+    try std.testing.expect(logs_args.config_source == null);
     try std.testing.expectEqualStrings("logs", logs_args.command);
     try std.testing.expectEqualStrings("api", logs_args.args[0]);
 }

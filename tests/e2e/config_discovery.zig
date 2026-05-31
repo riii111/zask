@@ -79,6 +79,51 @@ test "list: reports missing local config for command form" {
     try std.testing.expect(std.mem.indexOf(u8, res.stdout, "Config:") == null);
 }
 
+test "config discovery: infers named config from current directory" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ws = try harness.Workspace.init(gpa, io);
+    defer ws.deinit(gpa);
+    try ws.writeNamedConfig(gpa, io, "project", valid_config);
+
+    var res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.project,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{"list"});
+    defer res.deinit(gpa);
+
+    try std.testing.expect(res.exitedWith(0));
+    try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
+    try std.testing.expect(std.mem.startsWith(u8, res.stdout, "demo\n"));
+}
+
+test "config discovery: local config wins over inferred named config" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ws = try harness.Workspace.init(gpa, io);
+    defer ws.deinit(gpa);
+    try ws.writeProjectFile(io, "zask.json", valid_config);
+    try ws.writeNamedConfig(gpa, io, "project", "not json");
+
+    var res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.project,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{"list"});
+    defer res.deinit(gpa);
+
+    try std.testing.expect(res.exitedWith(0));
+    try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
+    try std.testing.expect(std.mem.startsWith(u8, res.stdout, "demo\n"));
+}
+
 test "list: does not discover parent config" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
@@ -243,4 +288,28 @@ test "list: discovered config syntax error reports selected file" {
     try std.testing.expect(std.mem.indexOf(u8, res.stdout, "not valid JSON") != null);
     try std.testing.expect(std.mem.indexOf(u8, res.stdout, "Config:") != null);
     try std.testing.expect(std.mem.indexOf(u8, res.stdout, "zask.json") != null);
+}
+
+test "config discovery: inferred named config syntax error reports selected file" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ws = try harness.Workspace.init(gpa, io);
+    defer ws.deinit(gpa);
+    try ws.writeNamedConfig(gpa, io, "project", "not json");
+
+    var res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.project,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{"list"});
+    defer res.deinit(gpa);
+
+    try std.testing.expect(res.exitedWith(2));
+    try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "not valid JSON") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "Config:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "config.json") != null);
 }

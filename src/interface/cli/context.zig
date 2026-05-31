@@ -14,6 +14,7 @@ pub const ConfigSource = enum {
     explicit,
     named,
     discovered,
+    inferred_named,
 };
 
 pub const ParsedArgs = struct {
@@ -108,7 +109,11 @@ fn resolveConfigPath(gpa: std.mem.Allocator, io: std.Io, context: CommandContext
             .source = .named,
         };
     }
-    return .{ .path = try discoverConfigPath(gpa, io), .source = .discovered };
+    const discovered_path = discoverConfigPath(gpa, io) catch |err| switch (err) {
+        error.ConfigNotFound => return .{ .path = try inferNamedConfigPath(gpa, io, context.environ), .source = .inferred_named },
+        else => return err,
+    };
+    return .{ .path = discovered_path, .source = .discovered };
 }
 
 pub fn projectConfigPath(gpa: std.mem.Allocator, environ: ?*const env.Map, project: []const u8) ![]const u8 {
@@ -141,6 +146,20 @@ fn discoverConfigPath(gpa: std.mem.Allocator, io: std.Io) ![:0]const u8 {
         found = path;
     }
     return found orelse error.ConfigNotFound;
+}
+
+fn inferNamedConfigPath(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env.Map) ![]const u8 {
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(cwd);
+    const project = std.fs.path.basename(cwd);
+    validate.identifier(project) catch return error.ConfigNotFound;
+    const path = try projectConfigPath(gpa, environ, project);
+    errdefer gpa.free(path);
+    std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.ConfigNotFound,
+        else => return err,
+    };
+    return absoluteConfigPath(gpa, io, path);
 }
 
 fn absoluteExePath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
