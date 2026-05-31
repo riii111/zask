@@ -6,6 +6,54 @@ const diagnostics = @import("diagnostics.zig");
 const Value = std.json.Value;
 const max_config_bytes = 10 * 1024 * 1024;
 
+/// ユーザーが zask.json に書く公開キー名の単一定義。
+/// validate の許可リスト・normalize の入力読み取り・init の生成で共有する。
+/// 正規化後の内部キー(services/phases/enabled/compose_file 等)は別語彙なので含めない。
+pub const keys = struct {
+    // top-level sections
+    pub const project = "project";
+    pub const docker = "docker";
+    pub const groups = "groups";
+    pub const startup_order = "startup_order";
+    pub const prechecks = "prechecks";
+    pub const start_profiles = "start_profiles";
+    pub const group_aliases = "group_aliases";
+
+    // project
+    pub const name = "name";
+    pub const root = "root";
+    pub const session_name = "session_name";
+
+    // docker (authored)
+    pub const compose = "compose";
+    pub const wait_timeout_seconds = "wait_timeout_seconds";
+
+    // group / service
+    pub const services = "services";
+    pub const command = "command";
+    pub const dir = "dir";
+    pub const runtime = "runtime";
+    pub const external = "external";
+    pub const port = "port";
+    pub const healthcheck = "healthcheck";
+    pub const @"type" = "type";
+    pub const path = "path";
+
+    // startup_order step
+    pub const group = "group";
+    pub const wait_ports = "wait_ports";
+    pub const on_fail = "on_fail";
+    pub const commands = "commands";
+
+    // prechecks
+    pub const hint = "hint";
+
+    // start_profiles
+    pub const profile = "profile";
+    pub const label = "label";
+    pub const group_overrides = "group_overrides";
+};
+
 pub const Config = struct {
     value: Value,
     home: []const u8,
@@ -267,20 +315,20 @@ pub fn normalizeConfig(gpa: std.mem.Allocator, source: Value) !Value {
     if (source != .object) return error.InvalidConfig;
 
     var root: std.json.ObjectMap = .empty;
-    try copyObjectField(gpa, &root, source, "project");
+    try copyObjectField(gpa, &root, source, keys.project);
     try normalizeDocker(gpa, &root, source);
     try normalizeServices(gpa, &root, source);
     try normalizeStartupOrder(gpa, &root, source);
-    try copyObjectField(gpa, &root, source, "prechecks");
-    try copyObjectField(gpa, &root, source, "start_profiles");
-    try copyObjectField(gpa, &root, source, "group_aliases");
+    try copyObjectField(gpa, &root, source, keys.prechecks);
+    try copyObjectField(gpa, &root, source, keys.start_profiles);
+    try copyObjectField(gpa, &root, source, keys.group_aliases);
     return .{ .object = root };
 }
 
 fn normalizeDocker(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: Value) !void {
-    const docker = source.object.get("docker") orelse return;
+    const docker = source.object.get(keys.docker) orelse return;
     if (docker != .object) return error.InvalidConfig;
-    const compose = docker.object.get("compose") orelse return error.InvalidConfig;
+    const compose = docker.object.get(keys.compose) orelse return error.InvalidConfig;
     if (compose != .string) return error.InvalidConfig;
     if (compose.string.len == 0) return error.InvalidConfig;
 
@@ -290,7 +338,7 @@ fn normalizeDocker(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: Va
     const file = std.fs.path.basename(compose.string);
     if (dir.len != 0) try object.put(gpa, "dir", .{ .string = dir });
     try object.put(gpa, "compose_file", .{ .string = file });
-    if (docker.object.get("wait_timeout_seconds")) |timeout| {
+    if (docker.object.get(keys.wait_timeout_seconds)) |timeout| {
         if (timeout != .integer) return error.InvalidConfig;
         try object.put(gpa, "wait_timeout", timeout);
     }
@@ -298,15 +346,15 @@ fn normalizeDocker(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: Va
 }
 
 fn normalizeServices(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: Value) !void {
-    const groups = source.object.get("groups") orelse return error.InvalidConfig;
+    const groups = source.object.get(keys.groups) orelse return error.InvalidConfig;
     if (groups != .array) return error.InvalidConfig;
 
     var services = std.json.Array.init(gpa);
     errdefer services.deinit();
     for (groups.array.items) |group| {
         if (group != .object) return error.InvalidConfig;
-        const name = try config_value.requiredObjectString(group, "name");
-        const group_services = group.object.get("services") orelse return error.InvalidConfig;
+        const name = try config_value.requiredObjectString(group, keys.name);
+        const group_services = group.object.get(keys.services) orelse return error.InvalidConfig;
         if (group_services != .array) return error.InvalidConfig;
         for (group_services.array.items) |service| {
             if (service != .object) return error.InvalidConfig;
@@ -318,7 +366,7 @@ fn normalizeServices(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: 
 }
 
 fn normalizeStartupOrder(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: Value) !void {
-    const startup_order = source.object.get("startup_order") orelse return;
+    const startup_order = source.object.get(keys.startup_order) orelse return;
     if (startup_order != .array) return error.InvalidConfig;
 
     var phases = std.json.Array.init(gpa);
@@ -333,21 +381,21 @@ fn normalizeStartupOrder(gpa: std.mem.Allocator, root: *std.json.ObjectMap, sour
             },
             .group => {
                 var groups = std.json.Array.init(gpa);
-                try groups.append(step.object.get("group").?);
+                try groups.append(step.object.get(keys.group).?);
                 try phase.put(gpa, "groups", .{ .array = groups });
-                if (step.object.get("wait_ports")) |wait_ports| {
+                if (step.object.get(keys.wait_ports)) |wait_ports| {
                     try phase.put(gpa, "wait_ports", wait_ports);
                 }
             },
             .command => {
                 try phase.put(gpa, "type", .{ .string = "command" });
-                try phase.put(gpa, "command", step.object.get("command").?);
-                try copyObjectField(gpa, &phase, step, "dir");
-                try copyObjectField(gpa, &phase, step, "on_fail");
-                try copyObjectField(gpa, &phase, step, "commands");
+                try phase.put(gpa, "command", step.object.get(keys.command).?);
+                try copyObjectField(gpa, &phase, step, keys.dir);
+                try copyObjectField(gpa, &phase, step, keys.on_fail);
+                try copyObjectField(gpa, &phase, step, keys.commands);
             },
         }
-        try copyObjectField(gpa, &phase, step, "name");
+        try copyObjectField(gpa, &phase, step, keys.name);
         try phases.append(.{ .object = phase });
     }
     try root.put(gpa, "phases", .{ .array = phases });
@@ -368,7 +416,7 @@ fn cloneObjectWithField(gpa: std.mem.Allocator, source: Value, key: []const u8, 
 
 fn serviceHealthcheck(service: Value) ?Value {
     if (service != .object) return null;
-    return service.object.get("healthcheck");
+    return service.object.get(keys.healthcheck);
 }
 
 const StartupStepKind = enum {
@@ -379,9 +427,9 @@ const StartupStepKind = enum {
 
 fn classifyStartupStep(step: Value) !StartupStepKind {
     if (step != .object) return error.InvalidConfig;
-    if (step.object.get("docker") != null) return .docker;
-    if (step.object.get("group") != null) return .group;
-    if (step.object.get("command") != null) return .command;
+    if (step.object.get(keys.docker) != null) return .docker;
+    if (step.object.get(keys.group) != null) return .group;
+    if (step.object.get(keys.command) != null) return .command;
     return error.InvalidConfig;
 }
 
@@ -403,7 +451,7 @@ pub fn validateAll(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Di
     if (source.object.get("phases") != null)
         try diags.add("phases", "legacy phases are not supported; define startup_order instead");
 
-    try checkKeys(gpa, source, "", &.{ "project", "docker", "startup_order", "prechecks", "start_profiles", "group_aliases", "groups" }, diags);
+    try checkKeys(gpa, source, "", &.{ keys.project, keys.docker, keys.startup_order, keys.prechecks, keys.start_profiles, keys.group_aliases, keys.groups }, diags);
     try validateProject(gpa, source, diags);
     try validateDocker(gpa, source, diags);
     try validateGroups(gpa, source, diags);
@@ -414,26 +462,26 @@ pub fn validateAll(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Di
 }
 
 fn validateProject(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics) !void {
-    const project = source.object.get("project") orelse {
+    const project = source.object.get(keys.project) orelse {
         try diags.add("project", "missing required section");
         return;
     };
     if (!try expectObject(project, "project", diags)) return;
-    try checkKeys(gpa, project, "project", &.{ "name", "root", "session_name" }, diags);
-    try checkIdentifier(gpa, project, "name", "project", diags);
-    _ = try checkRequiredString(gpa, project, "root", "project", diags);
-    try checkOptionalString(gpa, project, "session_name", "project", diags);
-    if (project.object.get("session_name")) |session_name| {
+    try checkKeys(gpa, project, "project", &.{ keys.name, keys.root, keys.session_name }, diags);
+    try checkIdentifier(gpa, project, keys.name, "project", diags);
+    _ = try checkRequiredString(gpa, project, keys.root, "project", diags);
+    try checkOptionalString(gpa, project, keys.session_name, "project", diags);
+    if (project.object.get(keys.session_name)) |session_name| {
         if (session_name == .string)
             validate.identifier(session_name.string) catch try diags.add("project.session_name", "must be a valid identifier");
     }
 }
 
 fn validateDocker(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics) !void {
-    const docker = source.object.get("docker") orelse return;
+    const docker = source.object.get(keys.docker) orelse return;
     if (!try expectObject(docker, "docker", diags)) return;
-    try checkKeys(gpa, docker, "docker", &.{ "compose", "wait_timeout_seconds" }, diags);
-    if (docker.object.get("compose")) |compose| {
+    try checkKeys(gpa, docker, "docker", &.{ keys.compose, keys.wait_timeout_seconds }, diags);
+    if (docker.object.get(keys.compose)) |compose| {
         if (compose != .string) {
             try diags.add("docker.compose", "must be a string");
         } else if (compose.string.len == 0) {
@@ -444,13 +492,13 @@ fn validateDocker(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Dia
                 validate.relativeSubPath(dir) catch try diags.add("docker.compose", "directory must stay within the project root");
         }
     } else try diags.add("docker", "missing required string 'compose'");
-    if (docker.object.get("wait_timeout_seconds")) |timeout| {
+    if (docker.object.get(keys.wait_timeout_seconds)) |timeout| {
         if (timeout != .integer) try diags.add("docker.wait_timeout_seconds", "must be an integer");
     }
 }
 
 fn validateGroups(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics) !void {
-    const groups = source.object.get("groups") orelse {
+    const groups = source.object.get(keys.groups) orelse {
         try diags.add("groups", "missing required array");
         return;
     };
@@ -465,15 +513,15 @@ fn validateGroups(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Dia
     for (groups.array.items, 0..) |group, gi| {
         const gpath = try indexedPath(gpa, "groups", gi);
         if (!try expectObject(group, gpath, diags)) continue;
-        try checkKeys(gpa, group, gpath, &.{ "name", "services" }, diags);
-        if (try checkRequiredString(gpa, group, "name", gpath, diags)) |name| {
+        try checkKeys(gpa, group, gpath, &.{ keys.name, keys.services }, diags);
+        if (try checkRequiredString(gpa, group, keys.name, gpath, diags)) |name| {
             const name_path = try joinPath(gpa, gpath, "name");
             validate.identifier(name) catch try diags.add(name_path, "must be a valid identifier");
             if (group_names.contains(name)) {
                 try diags.addFmt(name_path, "duplicate group '{s}'", .{name});
             } else try group_names.put(name, {});
         }
-        const services = group.object.get("services") orelse {
+        const services = group.object.get(keys.services) orelse {
             try diags.add(gpath, "missing required array 'services'");
             continue;
         };
@@ -491,43 +539,43 @@ fn validateGroups(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Dia
 
 fn validateService(gpa: std.mem.Allocator, service: Value, path: []const u8, diags: *diagnostics.Diagnostics, service_names: *std.StringHashMap(void)) !void {
     if (!try expectObject(service, path, diags)) return;
-    try checkKeys(gpa, service, path, &.{ "name", "dir", "runtime", "command", "external", "port", "healthcheck" }, diags);
-    if (try checkRequiredString(gpa, service, "name", path, diags)) |name| {
+    try checkKeys(gpa, service, path, &.{ keys.name, keys.dir, keys.runtime, keys.command, keys.external, keys.port, keys.healthcheck }, diags);
+    if (try checkRequiredString(gpa, service, keys.name, path, diags)) |name| {
         const name_path = try joinPath(gpa, path, "name");
         validate.identifier(name) catch try diags.add(name_path, "must be a valid identifier");
         if (service_names.contains(name)) {
             try diags.addFmt(name_path, "duplicate service '{s}'", .{name});
         } else try service_names.put(name, {});
     }
-    _ = try checkRequiredString(gpa, service, "command", path, diags);
-    try checkOptionalString(gpa, service, "dir", path, diags);
-    try checkOptionalString(gpa, service, "runtime", path, diags);
-    if (service.object.get("external")) |external| {
+    _ = try checkRequiredString(gpa, service, keys.command, path, diags);
+    try checkOptionalString(gpa, service, keys.dir, path, diags);
+    try checkOptionalString(gpa, service, keys.runtime, path, diags);
+    if (service.object.get(keys.external)) |external| {
         if (external != .bool) try diags.add(try joinPath(gpa, path, "external"), "must be a boolean");
     }
-    if (service.object.get("port")) |port| {
+    if (service.object.get(keys.port)) |port| {
         if (port != .integer) try diags.add(try joinPath(gpa, path, "port"), "must be an integer");
     }
     try checkServiceDir(gpa, service, path, diags);
-    if (service.object.get("healthcheck")) |healthcheck| {
+    if (service.object.get(keys.healthcheck)) |healthcheck| {
         const hpath = try joinPath(gpa, path, "healthcheck");
         if (!try expectObject(healthcheck, hpath, diags)) return;
-        try checkKeys(gpa, healthcheck, hpath, &.{ "type", "path" }, diags);
-        try checkOptionalString(gpa, healthcheck, "type", hpath, diags);
-        try checkOptionalString(gpa, healthcheck, "path", hpath, diags);
+        try checkKeys(gpa, healthcheck, hpath, &.{ keys.type, keys.path }, diags);
+        try checkOptionalString(gpa, healthcheck, keys.type, hpath, diags);
+        try checkOptionalString(gpa, healthcheck, keys.path, hpath, diags);
     }
 }
 
 // Mirrors Config.serviceDir: only project-relative dirs are constrained.
 fn checkServiceDir(gpa: std.mem.Allocator, service: Value, path: []const u8, diags: *diagnostics.Diagnostics) !void {
-    const dir = config_value.optionalObjectString(service, "dir", ".");
-    const external = config_value.optionalObjectBool(service, "external", false);
+    const dir = config_value.optionalObjectString(service, keys.dir, ".");
+    const external = config_value.optionalObjectBool(service, keys.external, false);
     if (external or std.fs.path.isAbsolute(dir) or std.mem.startsWith(u8, dir, "~")) return;
     validate.relativeSubPath(dir) catch try diags.add(try joinPath(gpa, path, "dir"), "must stay within the project root");
 }
 
 fn validateStartupOrder(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics) !void {
-    const startup_order = source.object.get("startup_order") orelse return;
+    const startup_order = source.object.get(keys.startup_order) orelse return;
     if (startup_order != .array) {
         try diags.add("startup_order", "must be an array");
         return;
@@ -539,25 +587,25 @@ fn validateStartupOrder(gpa: std.mem.Allocator, source: Value, diags: *diagnosti
 
 fn validateStartupStep(gpa: std.mem.Allocator, step: Value, path: []const u8, diags: *diagnostics.Diagnostics) !void {
     if (!try expectObject(step, path, diags)) return;
-    try checkOptionalString(gpa, step, "name", path, diags);
-    const has_docker = step.object.get("docker") != null;
-    const has_group = step.object.get("group") != null;
-    const has_command = step.object.get("command") != null;
+    try checkOptionalString(gpa, step, keys.name, path, diags);
+    const has_docker = step.object.get(keys.docker) != null;
+    const has_group = step.object.get(keys.group) != null;
+    const has_command = step.object.get(keys.command) != null;
     const kind_count: u8 = @as(u8, @intFromBool(has_docker)) + @as(u8, @intFromBool(has_group)) + @as(u8, @intFromBool(has_command));
     if (kind_count != 1) {
         try diags.add(path, "must have exactly one of 'docker', 'group', or 'command'");
         return;
     }
     if (has_docker) {
-        try checkKeys(gpa, step, path, &.{ "name", "docker" }, diags);
-        const docker = step.object.get("docker").?;
+        try checkKeys(gpa, step, path, &.{ keys.name, keys.docker }, diags);
+        const docker = step.object.get(keys.docker).?;
         if (docker != .bool or !docker.bool) try diags.add(try joinPath(gpa, path, "docker"), "must be true");
         return;
     }
     if (has_group) {
-        try checkKeys(gpa, step, path, &.{ "name", "group", "wait_ports" }, diags);
-        if (step.object.get("group").? != .string) try diags.add(try joinPath(gpa, path, "group"), "must be a string");
-        if (step.object.get("wait_ports")) |wait_ports| {
+        try checkKeys(gpa, step, path, &.{ keys.name, keys.group, keys.wait_ports }, diags);
+        if (step.object.get(keys.group).? != .string) try diags.add(try joinPath(gpa, path, "group"), "must be a string");
+        if (step.object.get(keys.wait_ports)) |wait_ports| {
             const wpath = try joinPath(gpa, path, "wait_ports");
             if (wait_ports != .array) {
                 try diags.add(wpath, "must be an array");
@@ -567,15 +615,15 @@ fn validateStartupStep(gpa: std.mem.Allocator, step: Value, path: []const u8, di
         }
         return;
     }
-    try checkKeys(gpa, step, path, &.{ "name", "command", "dir", "on_fail", "commands" }, diags);
-    if (step.object.get("command").? != .string) try diags.add(try joinPath(gpa, path, "command"), "must be a string");
-    try checkOptionalString(gpa, step, "dir", path, diags);
-    try checkOptionalString(gpa, step, "on_fail", path, diags);
-    if (step.object.get("commands")) |commands| try checkStringObject(gpa, commands, try joinPath(gpa, path, "commands"), diags);
+    try checkKeys(gpa, step, path, &.{ keys.name, keys.command, keys.dir, keys.on_fail, keys.commands }, diags);
+    if (step.object.get(keys.command).? != .string) try diags.add(try joinPath(gpa, path, "command"), "must be a string");
+    try checkOptionalString(gpa, step, keys.dir, path, diags);
+    try checkOptionalString(gpa, step, keys.on_fail, path, diags);
+    if (step.object.get(keys.commands)) |commands| try checkStringObject(gpa, commands, try joinPath(gpa, path, "commands"), diags);
 }
 
 fn validatePrechecks(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics) !void {
-    const prechecks = source.object.get("prechecks") orelse return;
+    const prechecks = source.object.get(keys.prechecks) orelse return;
     if (prechecks != .array) {
         try diags.add("prechecks", "must be an array");
         return;
@@ -583,33 +631,33 @@ fn validatePrechecks(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.
     for (prechecks.array.items, 0..) |check, i| {
         const path = try indexedPath(gpa, "prechecks", i);
         if (!try expectObject(check, path, diags)) continue;
-        try checkKeys(gpa, check, path, &.{ "name", "command", "on_fail", "hint", "dir" }, diags);
-        _ = try checkRequiredString(gpa, check, "command", path, diags);
-        try checkOptionalString(gpa, check, "name", path, diags);
-        try checkOptionalString(gpa, check, "on_fail", path, diags);
-        try checkOptionalString(gpa, check, "hint", path, diags);
-        try checkOptionalString(gpa, check, "dir", path, diags);
+        try checkKeys(gpa, check, path, &.{ keys.name, keys.command, keys.on_fail, keys.hint, keys.dir }, diags);
+        _ = try checkRequiredString(gpa, check, keys.command, path, diags);
+        try checkOptionalString(gpa, check, keys.name, path, diags);
+        try checkOptionalString(gpa, check, keys.on_fail, path, diags);
+        try checkOptionalString(gpa, check, keys.hint, path, diags);
+        try checkOptionalString(gpa, check, keys.dir, path, diags);
     }
 }
 
 fn validateStartProfiles(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics) !void {
-    const profiles = source.object.get("start_profiles") orelse return;
+    const profiles = source.object.get(keys.start_profiles) orelse return;
     if (!try expectObject(profiles, "start_profiles", diags)) return;
     var it = profiles.object.iterator();
     while (it.next()) |entry| {
         const path = try joinPath(gpa, "start_profiles", entry.key_ptr.*);
         const profile = entry.value_ptr.*;
         if (!try expectObject(profile, path, diags)) continue;
-        try checkKeys(gpa, profile, path, &.{ "profile", "label", "group_overrides" }, diags);
-        _ = try checkRequiredString(gpa, profile, "profile", path, diags);
-        try checkOptionalString(gpa, profile, "label", path, diags);
-        if (profile.object.get("group_overrides")) |overrides|
+        try checkKeys(gpa, profile, path, &.{ keys.profile, keys.label, keys.group_overrides }, diags);
+        _ = try checkRequiredString(gpa, profile, keys.profile, path, diags);
+        try checkOptionalString(gpa, profile, keys.label, path, diags);
+        if (profile.object.get(keys.group_overrides)) |overrides|
             try checkStringObject(gpa, overrides, try joinPath(gpa, path, "group_overrides"), diags);
     }
 }
 
 fn validateGroupAliases(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics) !void {
-    const aliases = source.object.get("group_aliases") orelse return;
+    const aliases = source.object.get(keys.group_aliases) orelse return;
     if (!try expectObject(aliases, "group_aliases", diags)) return;
     var it = aliases.object.iterator();
     while (it.next()) |entry| {
