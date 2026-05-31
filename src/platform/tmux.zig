@@ -215,12 +215,14 @@ pub const Client = struct {
         return PaneInfo.init(self.gpa, std.mem.eql(u8, dead, "1"), exit_code, pid, command);
     }
 
-    /// Caller owns the returned slice. Returns an empty slice when the pane
-    /// cannot be captured, which is indistinguishable from a genuinely empty pane.
+    /// Caller owns the returned slice. When the pane cannot be captured an empty
+    /// but still owned slice is returned, so the caller frees it the same way in
+    /// both cases. An empty result is indistinguishable from a genuinely empty
+    /// pane.
     pub fn capturePane(self: Client, window: []const u8) ![]const u8 {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
-        const result = runner.captured(self.runner.run(&.{ self.tmux_path, "capture-pane", "-t", pane_target, "-p" }, .{}) catch return "");
+        const result = runner.captured(self.runner.run(&.{ self.tmux_path, "capture-pane", "-t", pane_target, "-p" }, .{}) catch return self.gpa.dupe(u8, ""));
         defer self.gpa.free(result.stderr);
         return result.stdout;
     }
@@ -698,6 +700,18 @@ test "tmux.capturePane: returns captured stdout" {
     defer std.testing.allocator.free(output);
 
     try std.testing.expectEqualStrings("line one\nline two\n", output);
+}
+
+test "tmux.capturePane: returns owned empty slice when capture fails" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueueError(error.FileNotFound);
+    const client = testClient(&recorder);
+
+    const output = try client.capturePane("api");
+    defer std.testing.allocator.free(output);
+
+    try std.testing.expectEqualStrings("", output);
 }
 
 test "tmux.paneInfo: uses first pane line and preserves parsed fields" {

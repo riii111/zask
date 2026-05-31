@@ -356,13 +356,13 @@ test "lifecycle.decision: maps pane observations to start and stop decisions" {
 }
 
 test "lifecycle.serviceStartDecision: treats shell pane as startable" {
-    const pane = observations.PaneObservation.fromOwned(.busy, "0", "12345", "zsh");
+    const pane = observations.PaneObservation{ .state = .busy, .command = "zsh" };
 
     try std.testing.expectEqual(StartDecision.send_start, serviceStartDecision(pane));
 }
 
 test "lifecycle.dockerStartDecision: treats shell pane as startable" {
-    const pane = observations.PaneObservation.fromOwned(.busy, "0", "12345", "zsh");
+    const pane = observations.PaneObservation{ .state = .busy, .command = "zsh" };
 
     try std.testing.expectEqual(StartDecision.send_start, dockerStartDecision(pane));
 }
