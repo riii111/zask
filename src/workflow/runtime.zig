@@ -101,6 +101,10 @@ pub const Runtime = struct {
         try self.tmux().chooseTree(pane_id);
     }
 
+    /// Resizes every window to the client size, verifies, then restores
+    /// auto-size for all of them. On failure the errdefer restores auto-size
+    /// only for the windows already resized (windows[0..resized_count]); windows
+    /// not yet resized are left untouched.
     pub fn syncWindowSizes(self: Runtime, client_width: u16, client_height: u16) !void {
         if (client_width == 0 or client_height <= tmux_status_bar_height) return error.InvalidPreviewSize;
         const expected_height = client_height - tmux_status_bar_height;
@@ -197,6 +201,9 @@ pub const Runtime = struct {
         try self.closeUnlocked(writer);
     }
 
+    /// Teardown order is load-bearing: stop services and docker first so their
+    /// stop signals reach the live panes, let them settle, then kill the tmux
+    /// session. Killing the session first would orphan those resources.
     fn closeUnlocked(self: Runtime, writer: *std.Io.Writer) !void {
         switch (self.tmux().observeSession()) {
             .active => {},

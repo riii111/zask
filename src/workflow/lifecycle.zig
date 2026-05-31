@@ -35,6 +35,8 @@ pub const Lifecycle = struct {
         }
     }
 
+    /// Stops services in reverse of startup order, then docker last, so each
+    /// service goes down before the resources started before it.
     pub fn stopAll(self: Lifecycle, writer: *std.Io.Writer) !void {
         const services = try self.cfg.services();
         if (services.len > 0) try writeProgress(writer, "Stopping services...\n", .{});
