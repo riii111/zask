@@ -38,11 +38,9 @@ pub const Lifecycle = struct {
     pub fn stopAll(self: Lifecycle, writer: *std.Io.Writer) !void {
         const services = try self.cfg.services();
         if (services.len > 0) try writeProgress(writer, "Stopping services...\n", .{});
-        var i = services.len;
-        while (i > 0) {
-            i -= 1;
-            try self.stopService(try config.Config.serviceName(services[i]), writer);
-        }
+        var signaled = try self.broadcastStop(services, writer);
+        defer signaled.deinit(self.gpa);
+        try waits.waitForAllStopped(self, signaled.items, writer);
         try self.stopDocker(writer);
     }
 
@@ -115,6 +113,33 @@ pub const Lifecycle = struct {
 
     fn stopService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
         try self.ensureServiceStopped(service, writer);
+    }
+
+    /// Sends C-c to every running service without waiting and returns the signaled
+    /// set, so callers can poll them together instead of blocking on each in turn.
+    /// Services in reverse order keeps dependents stopped before their dependencies.
+    fn broadcastStop(self: Lifecycle, services: []const std.json.Value, writer: *std.Io.Writer) !std.ArrayList([]const u8) {
+        var signaled: std.ArrayList([]const u8) = .empty;
+        errdefer signaled.deinit(self.gpa);
+        var i = services.len;
+        while (i > 0) {
+            i -= 1;
+            const name = try config.Config.serviceName(services[i]);
+            const pane = self.tmux.observePane(name);
+            defer pane.deinit(self.gpa);
+            switch (serviceStopDecision(pane.state)) {
+                .send_stop => {
+                    try self.tmux.sendKeys(name, &.{"C-c"});
+                    try signaled.append(self.gpa, name);
+                },
+                .no_op => try writeProgress(writer, "  {s} ... already stopped\n", .{name}),
+                .tmux_unavailable => {
+                    try writeProgress(writer, "Warning: tmux unavailable for {s}\n", .{name});
+                    return error.TmuxUnavailable;
+                },
+            }
+        }
+        return signaled;
     }
 
     fn startDockerAndWait(self: Lifecycle, writer: *std.Io.Writer) !void {
@@ -356,6 +381,40 @@ test "lifecycle.dockerStartDecision: treats shell pane as startable" {
     const pane = observations.PaneObservation.fromOwned(.busy, "0", "12345", "zsh");
 
     try std.testing.expectEqual(StartDecision.send_start, dockerStartDecision(pane));
+}
+
+test "lifecycle.stopAll: signals every running service before polling once" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[
+        \\    {"name":"api","dir":"backend","command":"serve"},
+        \\    {"name":"web","dir":"frontend","command":"dev"}
+        \\  ]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    recorder.stdout = "0|0|12345|node\n";
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.stopAll(&writer);
+
+    const first_wait = recorder.sleeps.items[0].commands_before;
+    var signals_before_wait: usize = 0;
+    for (recorder.commands.items[0..first_wait]) |command| {
+        if (proc_runner.commandContains(command, "C-c")) signals_before_wait += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), signals_before_wait);
+    try std.testing.expectEqual(waits.stopAttempts(), recorder.sleeps.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api ... warning: may not have stopped") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "web ... warning: may not have stopped") != null);
 }
 
 test "lifecycle.startAll: precheck abort stops startup and warn continues" {

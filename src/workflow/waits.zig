@@ -68,6 +68,36 @@ pub fn waitForStopped(ctx: anytype, service: []const u8, writer: *std.Io.Writer)
     try writer.flush();
 }
 
+/// Polls every signaled service together so the total wait is the slowest single
+/// service, not the sum. Callers broadcast C-c first, then hand the signaled set
+/// here. Each service is reported as it settles.
+pub fn waitForAllStopped(ctx: anytype, services: []const []const u8, writer: *std.Io.Writer) !void {
+    if (services.len == 0) return;
+    const stopped = try ctx.gpa.alloc(bool, services.len);
+    defer ctx.gpa.free(stopped);
+    @memset(stopped, false);
+
+    var remaining = services.len;
+    var attempt: usize = 0;
+    while (attempt < stop_attempts) : (attempt += 1) {
+        for (services, stopped) |service, *done| {
+            if (done.*) continue;
+            const pane = ctx.tmux.observePane(service);
+            defer pane.deinit(ctx.gpa);
+            if (pane.state != .busy) {
+                done.* = true;
+                remaining -= 1;
+                try writeProgress(writer, "  {s} ... stopped\n", .{service});
+            }
+        }
+        if (remaining == 0) return;
+        ctx.runner.sleep(stop_interval);
+    }
+    for (services, stopped) |service, done| {
+        if (!done) try writeProgress(writer, "  {s} ... warning: may not have stopped completely\n", .{service});
+    }
+}
+
 pub fn waitForPaneIdle(ctx: anytype, window: []const u8) bool {
     var attempt: usize = 0;
     while (attempt < stop_attempts) : (attempt += 1) {
@@ -81,6 +111,10 @@ pub fn waitForPaneIdle(ctx: anytype, window: []const u8) bool {
 
 pub fn windowReadyAttempts() usize {
     return window_ready_attempts;
+}
+
+pub fn stopAttempts() usize {
+    return stop_attempts;
 }
 
 fn writeProgress(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytype) !void {
