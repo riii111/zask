@@ -33,6 +33,8 @@ pub const Lock = struct {
     io: std.Io,
     dir: []const u8,
 
+    /// On success the returned Lock owns the on-disk lock directory; the caller
+    /// must release it with release().
     pub fn acquire(gpa: std.mem.Allocator, io: std.Io, name: []const u8, base: []const u8, probe: Probe) !Lock {
         try ensurePrivateDir(io, base);
         const lock_name = try std.fmt.allocPrint(gpa, "{s}.lock", .{name});

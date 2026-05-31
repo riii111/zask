@@ -57,6 +57,8 @@ pub const Lifecycle = struct {
         }
     }
 
+    /// Stops services in reverse of startup order, then docker last, so each
+    /// service goes down before the resources started before it.
     pub fn stopAll(self: Lifecycle, writer: *std.Io.Writer) !void {
         const services = try self.cfg.services();
         if (services.len > 0) try writeProgress(writer, "Stopping services...\n", .{});
@@ -344,6 +346,10 @@ const StopDecision = enum {
 };
 
 fn serviceStartDecision(pane: observations.PaneObservation) StartDecision {
+    // Raw-field exception: when the pane's current command is a shell, the
+    // service process is not the foreground process, so it must be (re)started
+    // even if pgrep made the pane look busy. Every other case is decided from
+    // the observed state alone.
     if (pane.command.len > 0 and tmux_client.isShellCommand(pane.command)) return .send_start;
     return startDecisionForState(pane.state);
 }
@@ -366,6 +372,9 @@ fn serviceStopDecision(state: observations.PaneState) StopDecision {
 }
 
 fn dockerStartDecision(pane: observations.PaneObservation) StartDecision {
+    // Raw-field exception: a shell as the current command means docker compose
+    // is not the foreground process, so it must be (re)started even when the
+    // observed state is busy. Every other case is decided from the state alone.
     if (pane.command.len > 0 and tmux_client.isShellCommand(pane.command)) return .send_start;
     return startDecisionForState(pane.state);
 }
@@ -415,13 +424,13 @@ test "lifecycle.decision: maps pane observations to start and stop decisions" {
 }
 
 test "lifecycle.serviceStartDecision: treats shell pane as startable" {
-    const pane = observations.PaneObservation.fromOwned(.busy, "0", "12345", "zsh");
+    const pane = observations.PaneObservation{ .state = .busy, .command = "zsh" };
 
     try std.testing.expectEqual(StartDecision.send_start, serviceStartDecision(pane));
 }
 
 test "lifecycle.dockerStartDecision: treats shell pane as startable" {
-    const pane = observations.PaneObservation.fromOwned(.busy, "0", "12345", "zsh");
+    const pane = observations.PaneObservation{ .state = .busy, .command = "zsh" };
 
     try std.testing.expectEqual(StartDecision.send_start, dockerStartDecision(pane));
 }

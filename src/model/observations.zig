@@ -30,6 +30,8 @@ pub const PaneObservation = struct {
         return .{ .state = state };
     }
 
+    /// Takes ownership of the passed slices; the returned value frees them on
+    /// deinit. Do not deinit or reuse the originals afterwards.
     pub fn fromOwned(state: PaneState, exit_code: []const u8, pid: []const u8, command: []const u8) PaneObservation {
         return .{
             .state = state,
@@ -64,6 +66,8 @@ pub const ComposeObservation = struct {
         return .{ .state = state };
     }
 
+    /// Takes ownership of the passed slice and its elements; the returned value
+    /// frees them on deinit. Do not deinit or reuse the original.
     pub fn fromOwned(state: ComposeState, services: []const []const u8) ComposeObservation {
         return .{
             .state = state,

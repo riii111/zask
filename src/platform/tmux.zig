@@ -45,6 +45,7 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ self.tmux_path, "detach-client", "-t", client_name, "-E", command }, .{ .check = true, .discard = true });
     }
 
+    /// Caller owns the returned slice; free it with freeClientInfos.
     pub fn listClients(self: Client) ![]ClientInfo {
         const result = runner.captured(try self.runner.run(&.{ self.tmux_path, "list-clients", "-t", self.session, "-F", "#{client_name}" }, .{ .check = true }));
         defer self.gpa.free(result.stdout);
@@ -56,6 +57,8 @@ pub const Client = struct {
             clients.deinit(self.gpa);
         }
 
+        // Lenient parse: single-column output, so there is no field-count
+        // contract to break; blank lines are skipped and the rest are kept.
         var lines = std.mem.splitScalar(u8, result.stdout, '\n');
         while (lines.next()) |line| {
             const name = std.mem.trim(u8, line, " \t\r\n");
@@ -92,6 +95,7 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ self.tmux_path, "new-window", "-d", "-a", "-t", target_window, "-n", window_name, "-c", cwd, command }, .{ .check = true, .discard = true });
     }
 
+    /// Caller owns the returned slice; free it with freeWindowSizes.
     pub fn listWindowSizes(self: Client) ![]WindowSize {
         const result = runner.captured(try self.runner.run(&.{ self.tmux_path, "list-windows", "-t", self.session, "-F", "#{window_id}|#{window_width}|#{window_height}" }, .{ .check = true }));
         defer self.gpa.free(result.stdout);
@@ -103,6 +107,8 @@ pub const Client = struct {
             windows.deinit(self.gpa);
         }
 
+        // Strict parse: format is fixed, so a field-count or numeric mismatch is
+        // a contract violation (error) rather than a silently defaulted value.
         var lines = std.mem.splitScalar(u8, result.stdout, '\n');
         while (lines.next()) |line| {
             if (line.len == 0) continue;
@@ -182,6 +188,8 @@ pub const Client = struct {
         return info.consumeIntoObservation(state);
     }
 
+    /// Returns pane fields owned by the result; caller must deinit, unless the
+    /// value is moved into an observation via consumeIntoObservation.
     pub fn paneInfo(self: Client, window: []const u8) !PaneInfo {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
@@ -191,6 +199,12 @@ pub const Client = struct {
         if (result.term != .exited) return error.TmuxUnavailable;
         if (result.term.exited != 0) return if (serverUnavailable(result.stderr)) error.TmuxUnavailable else error.WindowMissing;
 
+        // Lenient parse (intentional, unlike listWindowSizes): this query fixes
+        // its own four-field format, and pane_dead_status is legitimately empty
+        // for live panes ("0||pid|cmd"). observePane runs on a hot path, so a
+        // truncated or unexpected line degrades to defaults rather than aborting
+        // the surrounding lifecycle. Extra pane lines from split windows are
+        // ignored; only the first pane is observed.
         var lines = std.mem.splitScalar(u8, result.stdout, '\n');
         const line = lines.next() orelse "";
         var fields = std.mem.splitScalar(u8, line, '|');
@@ -201,10 +215,14 @@ pub const Client = struct {
         return PaneInfo.init(self.gpa, std.mem.eql(u8, dead, "1"), exit_code, pid, command);
     }
 
+    /// Caller owns the returned slice. When the pane cannot be captured an empty
+    /// but still owned slice is returned, so the caller frees it the same way in
+    /// both cases. An empty result is indistinguishable from a genuinely empty
+    /// pane.
     pub fn capturePane(self: Client, window: []const u8) ![]const u8 {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
-        const result = runner.captured(self.runner.run(&.{ self.tmux_path, "capture-pane", "-t", pane_target, "-p" }, .{}) catch return "");
+        const result = runner.captured(self.runner.run(&.{ self.tmux_path, "capture-pane", "-t", pane_target, "-p" }, .{}) catch return self.gpa.dupe(u8, ""));
         defer self.gpa.free(result.stderr);
         return result.stdout;
     }
@@ -235,6 +253,7 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ self.tmux_path, "set-hook", "-t", self.session, name, command }, .{ .check = true, .discard = true });
     }
 
+    /// Caller owns the returned slice when the result is non-null.
     pub fn showOption(self: Client, name: []const u8) !?[]const u8 {
         const result = runner.captured(self.runner.run(&.{ self.tmux_path, "show-option", "-t", self.session, "-qv", name }, .{}) catch return null);
         defer self.gpa.free(result.stdout);
@@ -683,6 +702,18 @@ test "tmux.capturePane: returns captured stdout" {
     try std.testing.expectEqualStrings("line one\nline two\n", output);
 }
 
+test "tmux.capturePane: returns owned empty slice when capture fails" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueueError(error.FileNotFound);
+    const client = testClient(&recorder);
+
+    const output = try client.capturePane("api");
+    defer std.testing.allocator.free(output);
+
+    try std.testing.expectEqualStrings("", output);
+}
+
 test "tmux.paneInfo: uses first pane line and preserves parsed fields" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
@@ -695,6 +726,21 @@ test "tmux.paneInfo: uses first pane line and preserves parsed fields" {
     try std.testing.expect(!info.dead);
     try std.testing.expectEqualStrings("0", info.exit_code);
     try std.testing.expectEqualStrings("111", info.pid);
+    try std.testing.expectEqualStrings("zsh", info.command);
+}
+
+test "tmux.paneInfo: accepts empty dead status for live pane" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("0||12345|zsh\n", "", .{ .exited = 0 });
+    const client = testClient(&recorder);
+
+    const info = try client.paneInfo("api");
+    defer info.deinit(std.testing.allocator);
+
+    try std.testing.expect(!info.dead);
+    try std.testing.expectEqualStrings("", info.exit_code);
+    try std.testing.expectEqualStrings("12345", info.pid);
     try std.testing.expectEqualStrings("zsh", info.command);
 }
 

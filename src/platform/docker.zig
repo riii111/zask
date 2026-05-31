@@ -45,6 +45,8 @@ fn parseServices(gpa: std.mem.Allocator, output: []const u8) ![]const []const u8
         for (services.items) |service| gpa.free(service);
         services.deinit(gpa);
     }
+    // Lenient parse: single-column output, so there is no field-count contract
+    // to break; blank lines are skipped and the remaining service names kept.
     var lines = std.mem.splitScalar(u8, output, '\n');
     while (lines.next()) |line| {
         const service = std.mem.trim(u8, line, " \t\r");
