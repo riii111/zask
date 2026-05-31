@@ -19,7 +19,6 @@ const sync_size = @import("cli/sync_size.zig");
 const version = @import("cli/version.zig");
 const root = @import("../root.zig");
 const env = @import("../platform/env.zig");
-const paths = @import("../platform/paths.zig");
 const diagnostics = @import("../model/diagnostics.zig");
 
 const CommandContext = cli_context.CommandContext;
@@ -259,7 +258,7 @@ fn parseArgs(context: CommandContext, args: []const []const u8) !ParsedArgs {
         return .{ .project = basename, .config_source = .named, .command = args[0], .args = args[1..] };
     }
     if (isGlobalCommand(args[0])) return .{ .command = args[0], .args = args[1..] };
-    if (shouldUseNamedProject(context, args)) {
+    if (try shouldUseNamedProject(context, args)) {
         return .{ .project = args[0], .config_source = .named, .command = args[1], .args = args[2..] };
     }
     if (isCommandForm(args[0])) return .{ .config_source = .discovered, .command = args[0], .args = args[1..] };
@@ -267,14 +266,17 @@ fn parseArgs(context: CommandContext, args: []const []const u8) !ParsedArgs {
     return .{ .project = args[0], .config_source = .named, .command = args[1], .args = args[2..] };
 }
 
-fn shouldUseNamedProject(context: CommandContext, args: []const []const u8) bool {
+fn shouldUseNamedProject(context: CommandContext, args: []const []const u8) !bool {
     if (args.len < 2) return false;
     if (parseCommand(args[1], false) == null) return false;
     const io = context.io orelse return false;
-    // Named project configs intentionally keep priority over local discovery.
-    const path = cli_context.projectConfigPath(context.gpa, context.environ, args[0]) catch return false;
+    const path = try cli_context.projectConfigPath(context.gpa, context.environ, args[0]);
     defer context.gpa.free(path);
-    return paths.exists(io, path);
+    std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    return true;
 }
 
 fn isCommandForm(command: []const u8) bool {
@@ -467,6 +469,15 @@ test "cli.parseArgs: prefers existing named project over command form" {
     try std.testing.expectEqualStrings("open", parsed.project.?);
     try std.testing.expectEqual(cli_context.ConfigSource.named, parsed.config_source.?);
     try std.testing.expectEqualStrings("status", parsed.command);
+}
+
+test "cli.parseArgs: reports named project probe errors" {
+    var threaded = std.Io.Threaded.init_single_threaded;
+
+    try std.testing.expectError(error.HomeNotSet, parseArgs(.{
+        .gpa = std.testing.allocator,
+        .io = threaded.io(),
+    }, &.{ "open", "status" }));
 }
 
 test "cli.parseArgs: rejects incomplete forms" {

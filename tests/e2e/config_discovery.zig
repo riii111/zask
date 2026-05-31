@@ -197,3 +197,27 @@ test "list: discovered config validation reports selected file" {
     try std.testing.expect(std.mem.indexOf(u8, res.stdout, "Config:") != null);
     try std.testing.expect(std.mem.indexOf(u8, res.stdout, "zask.json") != null);
 }
+
+test "list: discovered config syntax error reports selected file" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ws = try harness.Workspace.init(gpa, io);
+    defer ws.deinit(gpa);
+    try ws.writeProjectFile(io, "zask.json", "not json");
+
+    var res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.project,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{"list"});
+    defer res.deinit(gpa);
+
+    try std.testing.expect(res.exitedWith(2));
+    try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "not valid JSON") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "Config:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "zask.json") != null);
+}

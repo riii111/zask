@@ -25,9 +25,9 @@ pub const ParsedArgs = struct {
 };
 
 pub const ErrorContext = struct {
-    /// Resolved absolute config path selected by runtime loading.
+    /// Error output uses the resolved path, not the raw CLI argument.
     config_path: ?[]const u8 = null,
-    /// Config source selected by runtime loading after parsing and discovery.
+    /// Source is recorded after discovery so diagnostics only mention real selections.
     config_source: ?ConfigSource = null,
 };
 

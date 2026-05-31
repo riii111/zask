@@ -107,6 +107,15 @@ zask --config ./config.json logs web
 zask --config ./config.json close
 ```
 
+If the current directory has `zask.json` or `.zask.json`, zask can discover it:
+
+```bash
+zask open
+zask status
+zask logs web
+zask close
+```
+
 Service commands run in a non-interactive `sh -lc` inside each tmux pane. Prefer
 real commands such as `npm run dev`, `make dev`, or `mise exec -- npm run dev`
 over aliases, shell functions, or version-manager setup that only exists in
@@ -140,6 +149,7 @@ zask <project> close
 ```
 
 Use `zask --config <file> <command>` to run against an explicit config file.
+Inside a directory with `zask.json` or `.zask.json`, use `zask <command>`.
 
 ## Requirements
 
