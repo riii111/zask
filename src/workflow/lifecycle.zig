@@ -326,18 +326,22 @@ pub const Lifecycle = struct {
                     return true;
                 },
                 .empty => {
-                    if (waits.waitForPaneIdle(self, "docker")) {
-                        var refreshed = self.tmux.observePane("docker");
-                        defer refreshed.deinit(self.gpa);
-                        return switch (dockerStartDecision(refreshed)) {
-                            .no_op => true,
-                            .send_start => false,
-                            .window_not_ready => error.WindowNotReady,
-                            .tmux_unavailable => error.TmuxUnavailable,
-                        };
-                    } else {
-                        try writeProgress(writer, "Docker already starting\n", .{});
-                        return true;
+                    switch (waits.waitForPaneIdle(self, "docker")) {
+                        .idle => {
+                            var refreshed = self.tmux.observePane("docker");
+                            defer refreshed.deinit(self.gpa);
+                            return switch (dockerStartDecision(refreshed)) {
+                                .no_op => true,
+                                .send_start => false,
+                                .window_not_ready => error.WindowNotReady,
+                                .tmux_unavailable => error.TmuxUnavailable,
+                            };
+                        },
+                        .still_busy => {
+                            try writeProgress(writer, "Docker already starting\n", .{});
+                            return true;
+                        },
+                        .tmux_unavailable => return error.TmuxUnavailable,
                     }
                 },
                 .unavailable => {
@@ -473,6 +477,67 @@ test "lifecycle.dockerStartDecision: treats shell pane as startable" {
     const pane = observations.PaneObservation{ .state = .busy, .command = "zsh" };
 
     try std.testing.expectEqual(StartDecision.send_start, dockerStartDecision(pane));
+}
+
+test "waits.waitForPaneIdle: distinguishes tmux unavailable from idle" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .signal = @enumFromInt(1) });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+
+    try std.testing.expectEqual(waits.PaneIdleWait.tmux_unavailable, waits.waitForPaneIdle(lifecycle, "docker"));
+    try std.testing.expectEqual(@as(usize, 0), recorder.sleeps.items.len);
+}
+
+test "waits.waitForPaneIdle: returns still busy after timeout" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    recorder.stdout = "0|0|12345|node\n";
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+
+    try std.testing.expectEqual(waits.PaneIdleWait.still_busy, waits.waitForPaneIdle(lifecycle, "docker"));
+    try std.testing.expectEqual(waits.stopAttempts(), recorder.sleeps.items.len);
+}
+
+test "waits.waitForPaneIdle: returns idle for non-busy states" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+
+    try std.testing.expectEqual(waits.PaneIdleWait.idle, waits.waitForPaneIdle(lifecycle, "docker"));
+    try std.testing.expectEqual(@as(usize, 0), recorder.sleeps.items.len);
 }
 
 test "lifecycle.startAll: does not block on docker readiness without startup_order" {
