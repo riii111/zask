@@ -68,7 +68,7 @@ pub fn runServicePhase(ctx: anytype, phase: std.json.Value, profile: []const u8,
             for (svcs) |svc| try ctx.startService(svc, writer, opts.mode);
         }
     };
-    if (phase.object.get("wait_ports")) |ports| if (ports == .array) {
+    if (opts.wait_ready) if (phase.object.get("wait_ports")) |ports| if (ports == .array) {
         for (ports.array.items) |port_value| if (port_value == .integer) try waits.waitForPort(ctx, port_value.integer, 120, writer);
     };
 }

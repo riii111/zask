@@ -77,7 +77,7 @@ const CommandSpec = struct {
 };
 
 const command_specs = [_]CommandSpec{
-    .{ .command = .open, .names = &.{"open"}, .usage = "open [--docker|--<profile>]", .description = "Open workspace and attach" },
+    .{ .command = .open, .names = &.{"open"}, .usage = "open [--docker|--<profile>] [--fast]", .description = "Open workspace and attach" },
     .{ .command = .close, .names = &.{"close"}, .usage = "close [--fast]", .description = "Stop resources and close workspace" },
     .{ .command = .re, .names = &.{"re"}, .usage = "re", .description = "Restart session" },
     .{ .command = .attach, .names = &.{"attach"}, .usage = "attach", .description = "Attach to existing workspace" },

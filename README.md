@@ -127,7 +127,7 @@ zask demo stop --all
 
 ```text
 zask init [project] [--root <path>] [--force]
-zask <project> open [--docker|--<profile>]
+zask <project> open [--docker|--<profile>] [--fast]
 zask <project> attach
 zask <project> list
 zask <project> status
@@ -141,6 +141,10 @@ zask <project> close [--fast]
 
 `close --fast` skips the graceful per-service stop wait and kills the session
 after a short grace. Docker containers are still stopped with `compose down`.
+
+`open --fast` attaches without waiting for Docker readiness or port checks, so
+resources keep coming up in their windows after you are already attached. Use it
+when services do not depend on Docker being ready at startup.
 
 Use `zask --config <file> <command>` to run against an explicit config file.
 
