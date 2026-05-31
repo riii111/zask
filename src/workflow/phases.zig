@@ -73,6 +73,7 @@ pub fn runServicePhase(ctx: anytype, phase: std.json.Value, profile: []const u8,
     };
     if (phase.object.get("wait_ports")) |ports| if (ports == .array) {
         for (ports.array.items) |port_value| if (port_value == .integer) {
+            try writePortWait(ctx, phase, profile, port_value.integer, writer);
             waits.waitForPort(ctx, port_value.integer, port_wait_timeout_seconds) catch |err| switch (err) {
                 error.PortNotReady => {
                     try writePortFailure(ctx, phase, profile, port_value.integer, port_wait_timeout_seconds, writer);
@@ -88,6 +89,15 @@ fn phaseCwd(ctx: anytype, dir: []const u8) ![]const u8 {
     if (dir.len == 0) return pathing.absolute(ctx.gpa, ctx.runner.io, try ctx.cfg.projectRoot(ctx.gpa));
     try validate.relativeSubPath(dir);
     return pathing.absolute(ctx.gpa, ctx.runner.io, try std.fs.path.join(ctx.gpa, &.{ try ctx.cfg.projectRoot(ctx.gpa), dir }));
+}
+
+fn writePortWait(ctx: anytype, phase: std.json.Value, profile: []const u8, port: i64, writer: *std.Io.Writer) !void {
+    if (try serviceForPort(ctx, phase, profile, port)) |name| {
+        try writer.print("Waiting for {s} on localhost:{d}...\n", .{ name, port });
+    } else {
+        try writer.print("Waiting for localhost:{d}...\n", .{port});
+    }
+    try writer.flush();
 }
 
 fn writePortFailure(ctx: anytype, phase: std.json.Value, profile: []const u8, port: i64, timeout: i64, writer: *std.Io.Writer) !void {
@@ -324,6 +334,7 @@ test "phases.runServicePhase: reports port readiness failure" {
 
     try std.testing.expectEqualStrings(
         \\Starting api...
+        \\Waiting for api on localhost:5432...
         \\Error: api did not become ready
         \\  phase: backend
         \\  expected: localhost:5432
@@ -363,6 +374,7 @@ test "phases.runServicePhase: reports unmatched port without service hints" {
 
     try std.testing.expectEqualStrings(
         \\Starting api...
+        \\Waiting for localhost:5432...
         \\Error: port 5432 did not become ready
         \\  phase: backend
         \\  expected: localhost:5432
