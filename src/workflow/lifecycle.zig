@@ -14,10 +14,6 @@ const waits = @import("waits.zig");
 /// can be respawned without re-observing them.
 pub const StartMode = enum { observe, prime };
 
-pub const StartOptions = struct {
-    mode: StartMode = .observe,
-};
-
 /// `failed` is split from `signaled` so `stop --all` can surface services it could
 /// not signal — they may still be running in the workspace it leaves up.
 const StopBroadcast = struct {
@@ -37,7 +33,7 @@ pub const Lifecycle = struct {
     tmux: tmux_client.Client,
     docker: docker_client.Compose,
 
-    pub fn startAll(self: Lifecycle, profile: []const u8, writer: *std.Io.Writer, opts: StartOptions) !void {
+    pub fn startAll(self: Lifecycle, profile: []const u8, writer: *std.Io.Writer, mode: StartMode) !void {
         try phases.runPrechecks(self, writer);
         if (std.mem.eql(u8, profile, "docker")) return self.startDockerAndWait(writer);
         const phase_list = self.cfg.phases();
@@ -48,7 +44,7 @@ pub const Lifecycle = struct {
                     try writeProgress(writer, "Tip: add startup_order to start Docker before services.\n", .{});
                 try self.ensureDockerStarted(writer);
             }
-            for (service_list) |service| try self.startService(try config.Config.serviceName(service), writer, opts.mode);
+            for (service_list) |service| try self.startService(try config.Config.serviceName(service), writer, mode);
             return;
         }
         for (phase_list) |phase| {
@@ -56,7 +52,7 @@ pub const Lifecycle = struct {
             switch (phases.phaseKind(phase)) {
                 .docker => try self.startDockerAndWait(writer),
                 .command => try phases.runCommandPhase(self, phase, profile, writer),
-                .services => try phases.runServicePhase(self, phase, profile, writer, opts),
+                .services => try phases.runServicePhase(self, phase, profile, writer, mode),
             }
         }
     }
@@ -77,11 +73,12 @@ pub const Lifecycle = struct {
         }
     }
 
-    pub fn stopAllFast(self: Lifecycle, writer: *std.Io.Writer) !void {
+    pub fn teardownResources(self: Lifecycle, writer: *std.Io.Writer) !void {
         const services = try self.cfg.services();
         if (services.len > 0) try writeProgress(writer, "Stopping services...\n", .{});
-        // Unlike stopAll, close kills the session next: skip the wait and ignore
-        // failed signals, since the kill stops whatever is left.
+        // close kills the session right after, so skip the wait and ignore failed
+        // signals (the kill stops whatever is left) — unlike stopAll, which keeps
+        // the session and must confirm.
         var broadcast = try self.broadcastStop(services, writer);
         broadcast.deinit(self.gpa);
         try self.stopDocker(writer);
@@ -89,7 +86,7 @@ pub const Lifecycle = struct {
 
     pub fn startTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
         try self.ensureSessionActive(writer);
-        if (std.mem.eql(u8, target, "--all")) return self.startAll("all", writer, .{});
+        if (std.mem.eql(u8, target, "--all")) return self.startAll("all", writer, .observe);
         if (std.mem.eql(u8, target, "docker")) {
             try self.ensureDockerStarted(writer);
             return waits.ensureDockerReady(self, writer);
@@ -451,7 +448,7 @@ test "lifecycle.startAll: does not block on docker readiness without startup_ord
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try lifecycle.startAll("all", &writer, .{ .mode = .prime });
+    try lifecycle.startAll("all", &writer, .prime);
 
     try proc_runner.expectCommandContaining(&recorder, "docker compose");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") == null);
@@ -476,7 +473,7 @@ test "lifecycle.startAll: prime mode respawns service without observing pane" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try lifecycle.startAll("all", &writer, .{ .mode = .prime });
+    try lifecycle.startAll("all", &writer, .prime);
 
     try proc_runner.expectCommandContaining(&recorder, "respawn-pane");
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "list-panes") == null);
@@ -580,7 +577,7 @@ test "lifecycle.startAll: precheck abort stops startup and warn continues" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectError(error.PrecheckFailed, lifecycle.startAll("all", &writer, .{}));
+    try std.testing.expectError(error.PrecheckFailed, lifecycle.startAll("all", &writer, .observe));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: warn-check check failed") != null);
     try proc_runner.expectCommandContaining(&recorder, "false");
 }
@@ -610,7 +607,7 @@ test "lifecycle.startAll: starts idle docker before service command" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try lifecycle.startAll("all", &writer, .{});
+    try lifecycle.startAll("all", &writer, .observe);
 
     try proc_runner.expectCommandContaining(&recorder, "docker compose");
     try proc_runner.expectCommandContaining(&recorder, "serve");
@@ -653,7 +650,7 @@ test "lifecycle.startAll: honors docker startup order step" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try lifecycle.startAll("all", &writer, .{});
+    try lifecycle.startAll("all", &writer, .observe);
 
     try proc_runner.expectCommandOrder(&recorder, "echo setup", "docker compose");
     try proc_runner.expectCommandOrder(&recorder, "docker compose", "serve");
@@ -679,7 +676,7 @@ test "lifecycle.startAll: command phase runs interactively" {
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try lifecycle.startAll("all", &writer, .{});
+    try lifecycle.startAll("all", &writer, .observe);
 
     const command = proc_runner.findCommandContaining(&recorder, "echo setup") orelse return error.CommandNotFound;
     try std.testing.expect(command.interactive);
@@ -797,7 +794,7 @@ test "lifecycle.startAll: reports missing window as failure" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectError(error.WindowNotReady, lifecycle.startAll("all", &writer, .{}));
+    try std.testing.expectError(error.WindowNotReady, lifecycle.startAll("all", &writer, .observe));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: window for api not ready") != null);
 }
 
@@ -1243,7 +1240,7 @@ test "lifecycle.startAll: respawns service pane without sending command to shell
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try lifecycle.startAll("all", &writer, .{});
+    try lifecycle.startAll("all", &writer, .observe);
 
     const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
     try proc_runner.expectCommandArg(respawn, 1, "respawn-pane");
@@ -1274,7 +1271,7 @@ test "lifecycle.startAll: resolves relative service cwd before sending command" 
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try lifecycle.startAll("all", &writer, .{});
+    try lifecycle.startAll("all", &writer, .observe);
 
     const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
     try proc_runner.expectCommandArg(respawn, 6, cwd);

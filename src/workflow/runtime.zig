@@ -152,7 +152,7 @@ pub const Runtime = struct {
                 try writer.flush();
                 try self.installSessionOptions(scratch);
                 try tmux_setup.bindControlKeys(scratch, self.tmux());
-                try self.lifecycle().startAll(profile, writer, .{});
+                try self.lifecycle().startAll(profile, writer, .observe);
                 try writer.writeAll("Attaching to workspace...\n");
                 try writer.flush();
                 try self.attachExisting();
@@ -175,7 +175,7 @@ pub const Runtime = struct {
         try self.appendServiceAndDockerWindows(scratch);
         try self.focusDashboard();
         try tmux_setup.bindControlKeys(scratch, tx);
-        try self.lifecycle().startAll(profile, writer, .{ .mode = .prime });
+        try self.lifecycle().startAll(profile, writer, .prime);
         try writer.writeAll("Attaching to workspace...\n");
         try writer.flush();
         try self.attachExisting();
@@ -212,7 +212,7 @@ pub const Runtime = struct {
         }
         // kill-session below stops services regardless, so skip the graceful poll;
         // `stop --all` keeps it since it leaves the session running.
-        try self.lifecycle().stopAllFast(writer);
+        try self.lifecycle().teardownResources(writer);
         self.runner().sleep(close_kill_settle);
         const tx = self.tmux();
         try tx.killSession();
