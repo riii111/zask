@@ -66,3 +66,38 @@ test "list: config validation prints diagnostic detail lines with field paths" {
     try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
     try std.testing.expect(std.mem.indexOf(u8, res.stdout, "panic") == null);
 }
+
+test "list: config validation prints unresolved reference diagnostics" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ws = try harness.Workspace.init(gpa, io);
+    defer ws.deinit(gpa);
+
+    try ws.writeProjectFile(io, "config.json",
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[
+        \\    {"name":"api","command":"serve"}
+        \\  ]}],
+        \\  "group_aliases": {"frontend":["web"]},
+        \\  "startup_order": [{"group":"workers"}]
+        \\}
+    );
+
+    var res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.project,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{ "--config", "config.json", "list" });
+    defer res.deinit(gpa);
+
+    try std.testing.expect(res.exitedWith(2));
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "invalid config") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "startup_order[0].group: unknown group 'workers'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "group_aliases.frontend[0]: unknown service 'web'") != null);
+    try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "panic") == null);
+}
