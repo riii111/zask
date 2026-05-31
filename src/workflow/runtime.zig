@@ -609,6 +609,33 @@ test "runtime.close: kills session even when a service signal fails" {
     try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "demo" });
 }
 
+test "runtime.close: kills session even when send-keys fails" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.closeUnlocked(&writer);
+
+    try proc_runner.expectCommandContaining(&recorder, "C-c");
+    const kill = recorder.commands.items[recorder.commands.items.len - 1];
+    try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "demo" });
+}
+
 test "runtime.attach: refreshes size hooks before switching client" {
     const json =
         \\{
