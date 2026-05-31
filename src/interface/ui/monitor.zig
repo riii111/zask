@@ -135,7 +135,7 @@ fn serviceMonitorRow(ctx: Context, service: std.json.Value) !MonitorRow {
 fn dockerMonitorRow(ctx: Context) !MonitorRow {
     const pane = ctx.tmux.observePane("docker");
     const skipped = observations.ComposeObservation.empty(.empty);
-    const compose = if (shouldObserveCompose(pane)) try observeDocker(ctx) else skipped;
+    const compose = if (shouldObserveCompose(pane)) observeDocker(ctx) else skipped;
     defer compose.deinit(ctx.gpa);
     return .{ .name = "docker", .status = dockerMonitorStatus(pane, compose), .exit_code = pane.exit_code, .command = pane.command, .port = "compose" };
 }
@@ -170,11 +170,13 @@ fn observeHealth(ctx: Context, service: std.json.Value) !observations.HealthObse
     return if (http.term == .exited and http.term.exited == 0) .ready else .degraded;
 }
 
-fn observeDocker(ctx: Context) !observations.ComposeObservation {
+fn observeDocker(ctx: Context) observations.ComposeObservation {
     return (docker_client.Compose{
         .gpa = ctx.gpa,
         .runner = ctx.runner,
-        .dir = try ctx.cfg.dockerDir(ctx.gpa),
+        // The monitor runs from the project root, so the compose dir is the subdir
+        // under root; dockerDir would prepend root again and double the path.
+        .dir = ctx.cfg.dockerSubdir(),
         .file = ctx.cfg.dockerComposeFile(),
     }).observe();
 }
@@ -355,4 +357,30 @@ test "monitor.docker: checks compose for busy shell panes" {
     try std.testing.expectEqual(MonitorStatus.live, row.status);
     try std.testing.expectEqual(@as(usize, 1), recordedCommandCount(&recorder, "docker"));
     try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "monitor.docker: runs compose from the root-relative subdir, not a doubled path" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"work/demo","session_name":"demo"},
+        \\  "docker": {"compose": "infra/compose.yaml"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
+    try recorder.enqueue("api\n", "", .{ .exited = 0 });
+    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const ctx: Context = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+
+    const row = try dockerMonitorRow(ctx);
+
+    const compose = proc_runner.findCommandContaining(&recorder, "compose") orelse return error.MissingComposeCommand;
+    try proc_runner.expectCommandCwd(compose, "infra");
+    try std.testing.expectEqual(MonitorStatus.live, row.status);
 }

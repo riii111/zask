@@ -107,6 +107,14 @@ pub const Config = struct {
         return std.fs.path.join(gpa, &.{ root, dir });
     }
 
+    /// The compose directory relative to the project root. Callers already running
+    /// from the project root (the monitor pane) must use this — `dockerDir` prepends
+    /// the root, which doubles the path when the cwd is already the root.
+    pub fn dockerSubdir(self: Config) []const u8 {
+        const dir = self.optionalString(&.{ "docker", "dir" }, "");
+        return if (dir.len == 0) "." else dir;
+    }
+
     pub fn dockerComposeFile(self: Config) []const u8 {
         return self.optionalString(&.{ "docker", "compose_file" }, "docker-compose.yml");
     }
