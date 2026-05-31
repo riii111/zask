@@ -53,6 +53,17 @@ pub const Lifecycle = struct {
         try self.stopDocker(writer);
     }
 
+    /// Broadcasts C-c and tears down Docker without waiting for services to
+    /// settle. The caller is expected to kill the session right after, so the
+    /// grace before that kill is the only stop budget services get.
+    pub fn stopAllFast(self: Lifecycle, writer: *std.Io.Writer) !void {
+        const services = try self.cfg.services();
+        if (services.len > 0) try writeProgress(writer, "Stopping services...\n", .{});
+        var signaled = try self.broadcastStop(services, writer);
+        signaled.deinit(self.gpa);
+        try self.stopDocker(writer);
+    }
+
     pub fn startTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
         try self.ensureSessionActive(writer);
         if (std.mem.eql(u8, target, "--all")) return self.startAll("all", writer, .{});

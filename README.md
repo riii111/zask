@@ -136,8 +136,11 @@ zask <project> start <--all|svc|group|docker>
 zask <project> stop <--all|svc|group|docker>
 zask <project> restart <svc|group|docker>
 zask <project> re
-zask <project> close
+zask <project> close [--fast]
 ```
+
+`close --fast` skips the graceful per-service stop wait and kills the session
+after a short grace. Docker containers are still stopped with `compose down`.
 
 Use `zask --config <file> <command>` to run against an explicit config file.
 

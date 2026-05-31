@@ -181,7 +181,7 @@ pub const Runtime = struct {
         try self.attachExisting();
     }
 
-    pub fn close(self: Runtime, writer: *std.Io.Writer) !void {
+    pub fn close(self: Runtime, fast: bool, writer: *std.Io.Writer) !void {
         const guard = self.acquireLock() catch |err| switch (err) {
             error.LockBusy => switch (self.tmux().observeSession()) {
                 .unavailable => {
@@ -194,10 +194,10 @@ pub const Runtime = struct {
             else => return err,
         };
         defer guard.release();
-        try self.closeUnlocked(writer);
+        try self.closeUnlocked(writer, fast);
     }
 
-    fn closeUnlocked(self: Runtime, writer: *std.Io.Writer) !void {
+    fn closeUnlocked(self: Runtime, writer: *std.Io.Writer, fast: bool) !void {
         switch (self.tmux().observeSession()) {
             .active => {},
             .missing => {
@@ -210,7 +210,7 @@ pub const Runtime = struct {
                 return error.TmuxUnavailable;
             },
         }
-        try self.lifecycle().stopAll(writer);
+        if (fast) try self.lifecycle().stopAllFast(writer) else try self.lifecycle().stopAll(writer);
         self.runner().sleep(close_kill_settle);
         const tx = self.tmux();
         try tx.killSession();
@@ -237,7 +237,7 @@ pub const Runtime = struct {
             else => return err,
         };
         defer guard.release();
-        try self.closeUnlocked(writer);
+        try self.closeUnlocked(writer, false);
         try self.openUnlocked("all", writer);
     }
 
@@ -515,7 +515,7 @@ test "runtime.close: kills session after service stop wait failure" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.closeUnlocked(&writer);
+    try runtime.closeUnlocked(&writer, false);
 
     const kill = recorder.commands.items[recorder.commands.items.len - 1];
     try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "demo" });
@@ -548,7 +548,7 @@ test "runtime.close: kills session after resource stop" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.closeUnlocked(&writer);
+    try runtime.closeUnlocked(&writer, false);
 
     const kill_index = recorder.commands.items.len - 1;
     try proc_runner.expectCommandOrder(&recorder, "C-c", "down");
@@ -559,6 +559,33 @@ test "runtime.close: kills session after resource stop" {
     try std.testing.expectEqual(close_kill_settle, recorder.sleeps.items[1].duration);
     try std.testing.expectEqual(kill_index, recorder.sleeps.items[1].commands_before);
     try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "runtime.close: fast path skips stop polling before killing session" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    recorder.stdout = "0|0|12345|node\n";
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.closeUnlocked(&writer, true);
+
+    const kill_index = recorder.commands.items.len - 1;
+    try proc_runner.expectCommandOrder(&recorder, "C-c", "kill-session");
+    try proc_runner.expectCommandArg(recorder.commands.items[kill_index], 1, "kill-session");
+    try std.testing.expectEqual(@as(usize, 1), recorder.sleeps.items.len);
+    try std.testing.expectEqual(close_kill_settle, recorder.sleeps.items[0].duration);
 }
 
 test "runtime.attach: refreshes size hooks before switching client" {
@@ -1119,7 +1146,7 @@ test "runtime.close: reports tmux unavailable when lock busy and tmux unreachabl
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectError(error.TmuxUnavailable, runtime.close(&writer));
+    try std.testing.expectError(error.TmuxUnavailable, runtime.close(false, &writer));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "tmux unavailable") != null);
 }
 
