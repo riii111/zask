@@ -9,7 +9,7 @@ const shell = @import("../platform/shell.zig");
 const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
 
-const port_wait_timeout_seconds = 120;
+const port_wait_timeout_seconds = 30;
 
 pub const PhaseKind = enum {
     docker,
@@ -103,6 +103,7 @@ fn writePortWait(ctx: anytype, phase: std.json.Value, profile: []const u8, port:
 fn writePortFailure(ctx: anytype, phase: std.json.Value, profile: []const u8, port: i64, timeout: i64, writer: *std.Io.Writer) !void {
     const service = try serviceForPort(ctx, phase, profile, port);
     const phase_label = phaseLabel(ctx, phase, profile);
+    try writer.writeByte('\n');
     if (service) |name| {
         try writer.print("Error: {s} did not become ready\n", .{name});
     } else {
@@ -335,10 +336,11 @@ test "phases.runServicePhase: reports port readiness failure" {
     try std.testing.expectEqualStrings(
         \\Starting api...
         \\Waiting for api on localhost:5432...
+        \\
         \\Error: api did not become ready
         \\  phase: backend
         \\  expected: localhost:5432
-        \\  waited: 120s
+        \\  waited: 30s
         \\  last log: Error: address already in use
         \\
         \\Next:
@@ -375,10 +377,11 @@ test "phases.runServicePhase: reports unmatched port without service hints" {
     try std.testing.expectEqualStrings(
         \\Starting api...
         \\Waiting for localhost:5432...
+        \\
         \\Error: port 5432 did not become ready
         \\  phase: backend
         \\  expected: localhost:5432
-        \\  waited: 120s
+        \\  waited: 30s
         \\
     , writer.buffered());
 }
