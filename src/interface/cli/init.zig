@@ -132,6 +132,25 @@ fn renderConfig(gpa: std.mem.Allocator, project: []const u8, detected: DetectedO
         try json.write(compose_file);
         try json.endObject();
     }
+    // Scaffold an explicit order when both Docker and a service exist: open no
+    // longer waits for Docker implicitly, so the service would otherwise race it.
+    if (detected.compose_file != null and detected.service != null) {
+        try json.objectField(config.keys.startup_order);
+        try json.beginArray();
+        try json.beginObject();
+        try json.objectField(config.keys.name);
+        try json.write("Docker");
+        try json.objectField(config.keys.docker);
+        try json.write(true);
+        try json.endObject();
+        try json.beginObject();
+        try json.objectField(config.keys.name);
+        try json.write("frontend");
+        try json.objectField(config.keys.group);
+        try json.write("frontend");
+        try json.endObject();
+        try json.endArray();
+    }
     try json.objectField(config.keys.groups);
     try json.beginArray();
     if (detected.service) |service| {
@@ -284,6 +303,16 @@ test "init.config: renders service and docker config verbatim" {
         \\  "docker": {
         \\    "compose": "infra/compose.yaml"
         \\  },
+        \\  "startup_order": [
+        \\    {
+        \\      "name": "Docker",
+        \\      "docker": true
+        \\    },
+        \\    {
+        \\      "name": "frontend",
+        \\      "group": "frontend"
+        \\    }
+        \\  ],
         \\  "groups": [
         \\    {
         \\      "name": "frontend",
@@ -321,7 +350,7 @@ test "init.config: renders service and docker config" {
     try std.testing.expectEqualStrings("compose.yaml", cfg.dockerComposeFile());
     try std.testing.expectEqualStrings("./infra", try cfg.dockerDir(arena.allocator()));
     try std.testing.expect(std.mem.indexOf(u8, json, "\"dir\": \".\"") == null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"group\"") == null);
+    try std.testing.expectEqual(@as(usize, 2), cfg.phases().len);
 }
 
 test "init.config: omits docker when compose is not detected" {
@@ -368,8 +397,19 @@ test "init.detect: renders detected default compose file" {
     defer std.testing.allocator.free(json);
 
     try std.testing.expectEqualStrings("docker-compose.yml", detected.compose_file.?);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"compose\": \"docker-compose.yml\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "compose_file") == null);
+    try std.testing.expectEqualStrings(
+        \\{
+        \\  "project": {
+        \\    "name": "demo",
+        \\    "root": "."
+        \\  },
+        \\  "docker": {
+        \\    "compose": "docker-compose.yml"
+        \\  },
+        \\  "groups": []
+        \\}
+        \\
+    , json);
 }
 
 test "init.detect: infers package script" {

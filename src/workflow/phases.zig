@@ -58,14 +58,14 @@ pub fn runCommandPhase(ctx: anytype, phase: std.json.Value, profile: []const u8,
     };
 }
 
-pub fn runServicePhase(ctx: anytype, phase: std.json.Value, profile: []const u8, writer: *std.Io.Writer) !void {
+pub fn runServicePhase(ctx: anytype, phase: std.json.Value, profile: []const u8, writer: *std.Io.Writer, mode: lifecycle_mod.StartMode) !void {
     if (phase.object.get("groups")) |groups| if (groups == .array) {
         for (groups.array.items) |group_value| {
             if (group_value != .string) continue;
             const group = ctx.cfg.resolvePhaseGroup(profile, group_value.string);
             const svcs = try ctx.cfg.resolveGroup(ctx.gpa, group);
             defer ctx.gpa.free(svcs);
-            for (svcs) |svc| try ctx.startService(svc, writer);
+            for (svcs) |svc| try ctx.startService(svc, writer, mode);
         }
     };
     if (phase.object.get("wait_ports")) |ports| if (ports == .array) {
@@ -191,8 +191,39 @@ test "phases.runServicePhase: propagates window-not-ready as startup failure" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectError(error.WindowNotReady, runServicePhase(lifecycle, cfg.phases()[0], "all", &writer));
+    try std.testing.expectError(error.WindowNotReady, runServicePhase(lifecycle, cfg.phases()[0], "all", &writer, .observe));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "window for api not ready") != null);
+}
+
+test "phases.runServicePhase: honors wait_ports as a declared dependency" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}],
+        \\  "startup_order": [{"name":"backend","group":"backend","wait_ports":[5432]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = runner_mod.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const run = runner_mod.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runServicePhase(lifecycle, cfg.phases()[0], "all", &writer, .observe);
+
+    const port_check = runner_mod.findCommandContaining(&recorder, "nc") orelse return error.PortCheckMissing;
+    try runner_mod.expectCommandArg(port_check, 3, "5432");
+    try runner_mod.expectCommandOrder(&recorder, "serve", "nc");
+    try runner_mod.expectNoRemainingResponses(&recorder);
 }
 
 test "phases.phaseCwd: rejects path traversal" {

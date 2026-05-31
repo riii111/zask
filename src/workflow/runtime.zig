@@ -152,7 +152,7 @@ pub const Runtime = struct {
                 try writer.flush();
                 try self.installSessionOptions(scratch);
                 try tmux_setup.bindControlKeys(scratch, self.tmux());
-                try self.lifecycle().startAll(profile, writer);
+                try self.lifecycle().startAll(profile, writer, .observe);
                 try writer.writeAll("Attaching to workspace...\n");
                 try writer.flush();
                 try self.attachExisting();
@@ -175,7 +175,7 @@ pub const Runtime = struct {
         try self.appendServiceAndDockerWindows(scratch);
         try self.focusDashboard();
         try tmux_setup.bindControlKeys(scratch, tx);
-        try self.lifecycle().startAll(profile, writer);
+        try self.lifecycle().startAll(profile, writer, .prime);
         try writer.writeAll("Attaching to workspace...\n");
         try writer.flush();
         try self.attachExisting();
@@ -210,7 +210,9 @@ pub const Runtime = struct {
                 return error.TmuxUnavailable;
             },
         }
-        try self.lifecycle().stopAll(writer);
+        // kill-session below stops services regardless, so skip the graceful poll;
+        // `stop --all` keeps it since it leaves the session running.
+        try self.lifecycle().teardownResources(writer);
         self.runner().sleep(close_kill_settle);
         const tx = self.tmux();
         try tx.killSession();
@@ -492,7 +494,7 @@ test "runtime.logs: reports tmux unavailable distinctly from missing session" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "tmux unavailable") != null);
 }
 
-test "runtime.close: kills session after service stop wait failure" {
+test "runtime.close: kills session after signaling services" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -505,10 +507,6 @@ test "runtime.close: kills session after service stop wait failure" {
     defer recorder.deinit();
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
-    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
-    try recorder.enqueue("", "", .{ .exited = 0 });
-    try recorder.enqueue("", "", .{ .exited = 1 });
-    try recorder.enqueue("", "", .{ .exited = 0 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     const runtime = testRuntime(arena.allocator(), run, cfg);
@@ -517,6 +515,7 @@ test "runtime.close: kills session after service stop wait failure" {
 
     try runtime.closeUnlocked(&writer);
 
+    try proc_runner.expectCommandOrder(&recorder, "C-c", "kill-session");
     const kill = recorder.commands.items[recorder.commands.items.len - 1];
     try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "demo" });
 }
@@ -536,8 +535,6 @@ test "runtime.close: kills session after resource stop" {
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
-    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
-    try recorder.enqueue("\n", "", .{ .exited = 1 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
@@ -554,11 +551,89 @@ test "runtime.close: kills session after resource stop" {
     try proc_runner.expectCommandOrder(&recorder, "C-c", "down");
     try proc_runner.expectCommandOrder(&recorder, "down", "kill-session");
     try proc_runner.expectCommandArg(recorder.commands.items[kill_index], 1, "kill-session");
-    try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items.len);
-    try std.testing.expectEqual(waits.docker_ready_settle, recorder.sleeps.items[0].duration);
-    try std.testing.expectEqual(close_kill_settle, recorder.sleeps.items[1].duration);
-    try std.testing.expectEqual(kill_index, recorder.sleeps.items[1].commands_before);
+    try std.testing.expectEqual(@as(usize, 1), recorder.sleeps.items.len);
+    try std.testing.expectEqual(close_kill_settle, recorder.sleeps.items[0].duration);
+    try std.testing.expectEqual(kill_index, recorder.sleeps.items[0].commands_before);
     try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "runtime.close: skips stop polling before killing session" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    recorder.stdout = "0|0|12345|node\n";
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.closeUnlocked(&writer);
+
+    const kill_index = recorder.commands.items.len - 1;
+    try proc_runner.expectCommandOrder(&recorder, "C-c", "kill-session");
+    try proc_runner.expectCommandArg(recorder.commands.items[kill_index], 1, "kill-session");
+    try std.testing.expectEqual(@as(usize, 1), recorder.sleeps.items.len);
+    try std.testing.expectEqual(close_kill_settle, recorder.sleeps.items[0].duration);
+}
+
+test "runtime.close: kills session even when a service signal fails" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "error connecting to /tmp/tmux-501/default (Permission denied)", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.closeUnlocked(&writer);
+
+    const kill = recorder.commands.items[recorder.commands.items.len - 1];
+    try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "demo" });
+}
+
+test "runtime.close: kills session even when send-keys fails" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.closeUnlocked(&writer);
+
+    try proc_runner.expectCommandContaining(&recorder, "C-c");
+    const kill = recorder.commands.items[recorder.commands.items.len - 1];
+    try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "demo" });
 }
 
 test "runtime.attach: refreshes size hooks before switching client" {
