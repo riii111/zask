@@ -598,7 +598,7 @@ fn validateService(gpa: std.mem.Allocator, service: Value, path: []const u8, dia
     }
     _ = try checkRequiredString(gpa, service, keys.command, path, diags);
     try checkOptionalString(gpa, service, keys.dir, path, diags);
-    try checkOptionalString(gpa, service, keys.runtime, path, diags);
+    try checkOptionalRuntime(gpa, service, path, diags);
     if (service.object.get(keys.external)) |external| {
         if (external != .bool) try diags.add(try joinPath(gpa, path, "external"), "must be a boolean");
     }
@@ -777,6 +777,17 @@ fn checkOptionalString(gpa: std.mem.Allocator, node: Value, key: []const u8, pat
     }
 }
 
+fn checkOptionalRuntime(gpa: std.mem.Allocator, node: Value, path: []const u8, diags: *diagnostics.Diagnostics) !void {
+    const value = node.object.get(keys.runtime) orelse return;
+    const runtime_path = try joinPath(gpa, path, keys.runtime);
+    if (value != .string) {
+        try diags.add(runtime_path, "must be a string");
+        return;
+    }
+    if (value.string.len > 0 and !isAllowedRuntime(value.string))
+        try diags.addFmt(runtime_path, "unknown runtime '{s}'", .{value.string});
+}
+
 fn checkKeys(gpa: std.mem.Allocator, node: Value, path: []const u8, allowed: []const []const u8, diags: *diagnostics.Diagnostics) !void {
     var it = node.object.iterator();
     while (it.next()) |entry| {
@@ -926,7 +937,7 @@ test "config.commandPhaseCommand: resolves command phase profile overrides and f
     try std.testing.expectEqualStrings("fallback", try Config.commandPhaseCommand(phases[1], "all"));
 }
 
-test "config.resolveGroup: rejects unknown runtimes and missing services" {
+test "config.parse: rejects unknown service runtime" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -935,9 +946,21 @@ test "config.resolveGroup: rejects unknown runtimes and missing services" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
+
+    try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
+}
+
+test "config.resolveGroup: rejects missing services and groups" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const cfg = try parseTestConfig(&arena, json);
 
-    try std.testing.expectError(error.UnknownRuntime, Config.serviceStartCommand(arena.allocator(), try cfg.findService("api")));
     try std.testing.expectError(error.UnknownService, cfg.findService("missing"));
     try std.testing.expectError(error.UnknownGroup, cfg.resolveGroup(arena.allocator(), "missing"));
 }
@@ -1207,7 +1230,7 @@ test "config.validateAll: accumulates diagnostics with field paths" {
         \\{
         \\  "project": {"name":"bad name","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[
-        \\    {"name":"api.bad","dir":"../escape","command":"serve"}
+        \\    {"name":"api.bad","dir":"../escape","runtime":"unknown","command":"serve"}
         \\  ]}]
         \\}
     ;
@@ -1222,14 +1245,17 @@ test "config.validateAll: accumulates diagnostics with field paths" {
     var found_project_name = false;
     var found_service_name = false;
     var found_service_dir = false;
+    var found_service_runtime = false;
     for (diags.slice()) |diagnostic| {
         if (std.mem.eql(u8, diagnostic.path, "project.name")) found_project_name = true;
         if (std.mem.eql(u8, diagnostic.path, "groups[0].services[0].name")) found_service_name = true;
         if (std.mem.eql(u8, diagnostic.path, "groups[0].services[0].dir")) found_service_dir = true;
+        if (std.mem.eql(u8, diagnostic.path, "groups[0].services[0].runtime") and std.mem.eql(u8, diagnostic.message, "unknown runtime 'unknown'")) found_service_runtime = true;
     }
     try std.testing.expect(found_project_name);
     try std.testing.expect(found_service_name);
     try std.testing.expect(found_service_dir);
+    try std.testing.expect(found_service_runtime);
 }
 
 test "config.validateAll: rejects unresolved references" {
