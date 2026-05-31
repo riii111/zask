@@ -322,13 +322,18 @@ test "phases.runServicePhase: reports port readiness failure" {
 
     try std.testing.expectError(error.StartupFailed, runServicePhase(lifecycle, cfg.phases()[0], "all", &writer, .observe));
 
-    const out = writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, out, "Error: api did not become ready") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "phase: backend") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "expected: localhost:5432") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "waited: 120s") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "last log: Error: address already in use") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "zask --config 'config.json' logs api") != null);
+    try std.testing.expectEqualStrings(
+        \\Starting api...
+        \\Error: api did not become ready
+        \\  phase: backend
+        \\  expected: localhost:5432
+        \\  waited: 120s
+        \\  last log: Error: address already in use
+        \\
+        \\Next:
+        \\  zask --config 'config.json' logs api
+        \\
+    , writer.buffered());
 }
 
 test "phases.runServicePhase: reports unmatched port without service hints" {
@@ -356,11 +361,14 @@ test "phases.runServicePhase: reports unmatched port without service hints" {
 
     try std.testing.expectError(error.StartupFailed, runServicePhase(lifecycle, cfg.phases()[0], "all", &writer, .observe));
 
-    const out = writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, out, "Error: port 5432 did not become ready") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "phase: backend") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "last log:") == null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Next:") == null);
+    try std.testing.expectEqualStrings(
+        \\Starting api...
+        \\Error: port 5432 did not become ready
+        \\  phase: backend
+        \\  expected: localhost:5432
+        \\  waited: 120s
+        \\
+    , writer.buffered());
 }
 
 test "phases.phaseCwd: rejects path traversal" {

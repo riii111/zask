@@ -811,13 +811,19 @@ test "lifecycle.startAll: reports docker readiness failure" {
 
     try std.testing.expectError(error.StartupFailed, lifecycle.startAll("all", &writer, .observe));
 
-    const out = writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, out, "Error: Docker did not become ready") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "phase: docker") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "compose: unavailable") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "waited: 2s") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "last log: Cannot connect to Docker daemon") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "zask --config 'config.json' status") != null);
+    try std.testing.expectEqualStrings(
+        \\Starting Docker...
+        \\Waiting for Docker containers...
+        \\Error: Docker did not become ready
+        \\  phase: docker
+        \\  compose: unavailable
+        \\  waited: 2s
+        \\  last log: Cannot connect to Docker daemon
+        \\
+        \\Next:
+        \\  zask --config 'config.json' status
+        \\
+    , writer.buffered());
 }
 
 test "waits.ensureWindowReady: distinguishes missing windows from unavailable tmux" {
