@@ -181,7 +181,7 @@ pub const Runtime = struct {
         try self.attachExisting();
     }
 
-    pub fn close(self: Runtime, fast: bool, writer: *std.Io.Writer) !void {
+    pub fn close(self: Runtime, writer: *std.Io.Writer) !void {
         const guard = self.acquireLock() catch |err| switch (err) {
             error.LockBusy => switch (self.tmux().observeSession()) {
                 .unavailable => {
@@ -194,10 +194,10 @@ pub const Runtime = struct {
             else => return err,
         };
         defer guard.release();
-        try self.closeUnlocked(writer, fast);
+        try self.closeUnlocked(writer);
     }
 
-    fn closeUnlocked(self: Runtime, writer: *std.Io.Writer, fast: bool) !void {
+    fn closeUnlocked(self: Runtime, writer: *std.Io.Writer) !void {
         switch (self.tmux().observeSession()) {
             .active => {},
             .missing => {
@@ -210,7 +210,10 @@ pub const Runtime = struct {
                 return error.TmuxUnavailable;
             },
         }
-        if (fast) try self.lifecycle().stopAllFast(writer) else try self.lifecycle().stopAll(writer);
+        // close ends in kill-session, so a graceful stop wait would just delay a
+        // kill that stops everything anyway. Signal, brief grace, then kill.
+        // `stop --all` keeps the graceful poll, since it leaves the session up.
+        try self.lifecycle().stopAllFast(writer);
         self.runner().sleep(close_kill_settle);
         const tx = self.tmux();
         try tx.killSession();
@@ -237,9 +240,7 @@ pub const Runtime = struct {
             else => return err,
         };
         defer guard.release();
-        // re always kills and reopens, so the graceful stop wait before the kill
-        // is wasted, and the reopen can attach while resources come back up.
-        try self.closeUnlocked(writer, true);
+        try self.closeUnlocked(writer);
         try self.openUnlocked("all", writer, true);
     }
 
@@ -494,7 +495,7 @@ test "runtime.logs: reports tmux unavailable distinctly from missing session" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "tmux unavailable") != null);
 }
 
-test "runtime.close: kills session after service stop wait failure" {
+test "runtime.close: kills session after signaling services" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -507,18 +508,15 @@ test "runtime.close: kills session after service stop wait failure" {
     defer recorder.deinit();
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
-    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
-    try recorder.enqueue("", "", .{ .exited = 0 });
-    try recorder.enqueue("", "", .{ .exited = 1 });
-    try recorder.enqueue("", "", .{ .exited = 0 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     const runtime = testRuntime(arena.allocator(), run, cfg);
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.closeUnlocked(&writer, false);
+    try runtime.closeUnlocked(&writer);
 
+    try proc_runner.expectCommandOrder(&recorder, "C-c", "kill-session");
     const kill = recorder.commands.items[recorder.commands.items.len - 1];
     try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "demo" });
 }
@@ -538,8 +536,6 @@ test "runtime.close: kills session after resource stop" {
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
-    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
-    try recorder.enqueue("\n", "", .{ .exited = 1 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
@@ -550,7 +546,7 @@ test "runtime.close: kills session after resource stop" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.closeUnlocked(&writer, false);
+    try runtime.closeUnlocked(&writer);
 
     const kill_index = recorder.commands.items.len - 1;
     try proc_runner.expectCommandOrder(&recorder, "C-c", "down");
@@ -562,7 +558,7 @@ test "runtime.close: kills session after resource stop" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "runtime.close: fast path skips stop polling before killing session" {
+test "runtime.close: skips stop polling before killing session" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -580,7 +576,7 @@ test "runtime.close: fast path skips stop polling before killing session" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.closeUnlocked(&writer, true);
+    try runtime.closeUnlocked(&writer);
 
     const kill_index = recorder.commands.items.len - 1;
     try proc_runner.expectCommandOrder(&recorder, "C-c", "kill-session");
@@ -1147,7 +1143,7 @@ test "runtime.close: reports tmux unavailable when lock busy and tmux unreachabl
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectError(error.TmuxUnavailable, runtime.close(false, &writer));
+    try std.testing.expectError(error.TmuxUnavailable, runtime.close(&writer));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "tmux unavailable") != null);
 }
 

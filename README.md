@@ -136,11 +136,12 @@ zask <project> start <--all|svc|group|docker>
 zask <project> stop <--all|svc|group|docker>
 zask <project> restart <svc|group|docker>
 zask <project> re
-zask <project> close [--fast]
+zask <project> close
 ```
 
-`close --fast` skips the graceful per-service stop wait and kills the session
-after a short grace. Docker containers are still stopped with `compose down`.
+`close` signals each service, waits a short grace, then kills the session. It does
+not block on services stopping, since the kill stops them anyway; use `stop --all`
+when you want to wait for a graceful stop while keeping the workspace open.
 
 `open --fast` attaches without waiting for Docker readiness or port checks, so
 resources keep coming up in their windows after you are already attached. Use it
