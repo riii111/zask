@@ -108,11 +108,7 @@ pub const Lifecycle = struct {
                 if (std.mem.eql(u8, target, "--all")) return self.stopDocker(writer);
                 return sessionNotRunning(writer);
             },
-            .unavailable => {
-                try writer.writeAll("tmux unavailable\n");
-                try writer.flush();
-                return error.TmuxUnavailable;
-            },
+            .unavailable => return waits.reportTmuxUnavailable(writer),
         }
         if (std.mem.eql(u8, target, "--all")) return self.stopAll(writer);
         if (self.cfg.resolveGroup(self.gpa, target)) |services| {
@@ -236,11 +232,7 @@ pub const Lifecycle = struct {
                 try writer.flush();
                 return error.SessionNotRunning;
             },
-            .unavailable => {
-                try writer.writeAll("tmux unavailable\n");
-                try writer.flush();
-                return error.TmuxUnavailable;
-            },
+            .unavailable => return waits.reportTmuxUnavailable(writer),
         }
     }
 
@@ -360,10 +352,7 @@ fn sessionNotRunning(writer: *std.Io.Writer) !void {
     return error.SessionNotRunning;
 }
 
-fn writeProgress(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytype) !void {
-    try writer.print(fmt, args);
-    try writer.flush();
-}
+const writeProgress = waits.writeProgress;
 
 const StartDecision = enum {
     no_op,

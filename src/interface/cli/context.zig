@@ -65,6 +65,10 @@ pub fn isProjectAlias(argv0: []const u8) bool {
     return !std.mem.eql(u8, basename, "zask") and !std.mem.eql(u8, basename, "zask-debug");
 }
 
+pub fn parseSize(arg: []const u8) !u16 {
+    return std.fmt.parseUnsigned(u16, arg, 10) catch return error.InvalidArguments;
+}
+
 fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
     const io = context.io orelse return error.MissingIo;
     const resolved = try resolveConfigPath(context.gpa, io, context, parsed);

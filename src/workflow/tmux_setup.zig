@@ -19,7 +19,7 @@ pub fn applySessionOptions(gpa: std.mem.Allocator, tx: tmux_client.Client, opts:
     try tx.setOption("remain-on-exit", "on");
     try tx.setOption("automatic-rename", "off");
     try tx.setOption("status-format[0]", "#[align=left]#{T;=/#{status-left-length}:status-left}#[align=right]#{T;=/#{status-right-length}:status-right}");
-    try tx.setOption(tmux_options.dash_mode, "all");
+    try tx.setOption(tmux_options.dash_mode, tmux_options.dash_mode_all);
     try tx.setOption(tmux_options.zask_path, opts.zask_path);
     try tx.setOption(tmux_options.config_path, opts.config_path);
     try bindClientSizeHooks(gpa, tx);
@@ -38,13 +38,13 @@ pub fn bindControlKeys(gpa: std.mem.Allocator, tx: tmux_client.Client) !void {
     , .{ tmux_options.zask_path, tmux_options.config_path }));
     try tx.bindRunShell("m", try std.fmt.allocPrint(gpa,
         \\session="#{{session_name}}";
-        \\mode=$(tmux show-option -t "$session" -qv {s});
-        \\if [ "$mode" = "all" ]; then
-        \\  tmux set-option -t "$session" {s} bad;
+        \\mode=$(tmux show-option -t "$session" -qv {[opt]s});
+        \\if [ "$mode" = "{[all]s}" ]; then
+        \\  tmux set-option -t "$session" {[opt]s} {[bad]s};
         \\else
-        \\  tmux set-option -t "$session" {s} all;
+        \\  tmux set-option -t "$session" {[opt]s} {[all]s};
         \\fi
-    , .{ tmux_options.dash_mode, tmux_options.dash_mode, tmux_options.dash_mode }));
+    , .{ .opt = tmux_options.dash_mode, .all = tmux_options.dash_mode_all, .bad = tmux_options.dash_mode_bad }));
 }
 
 fn syncSizeCommand(gpa: std.mem.Allocator) ![]const u8 {
@@ -95,4 +95,19 @@ test "tmux_setup.bindClientSizeHooks: runs sync command when client becomes acti
     try proc_runner.expectCommandContaining(&recorder, "sync-size");
     try proc_runner.expectCommandContaining(&recorder, "#{client_width}");
     try proc_runner.expectCommandContaining(&recorder, "#{client_height}");
+}
+
+test "tmux_setup.applySessionOptions: seeds dash mode with the all constant" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const tx = tmux_client.Client{ .gpa = arena.allocator(), .runner = run, .session = "demo" };
+
+    try applySessionOptions(arena.allocator(), tx, .{ .project = "demo", .zask_path = "zask", .config_path = "/tmp/config.json" });
+
+    const dash = proc_runner.findCommandContaining(&recorder, tmux_options.dash_mode) orelse return error.MissingDashModeOption;
+    try proc_runner.expectCommandArg(dash, 4, tmux_options.dash_mode);
+    try proc_runner.expectCommandArg(dash, 5, tmux_options.dash_mode_all);
 }

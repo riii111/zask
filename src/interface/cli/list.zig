@@ -1,11 +1,6 @@
 const std = @import("std");
 const config = @import("../../model/config.zig");
-const docker_client = @import("../../platform/docker.zig");
-const env = @import("../../platform/env.zig");
-const proc_runner = @import("../../platform/runner.zig");
-const tmux_client = @import("../../platform/tmux.zig");
 const Context = @import("context.zig").Context;
-const Runtime = @import("../../workflow/runtime.zig").Runtime;
 
 pub const Options = struct {
     pub fn parse(args: []const []const u8) !Options {
@@ -46,6 +41,14 @@ test "list.Options: rejects arguments" {
 }
 
 test "list.run: prints services and docker section" {
+    // Imported test-locally so this command's production code carries no
+    // platform/runtime dependency it never uses at runtime.
+    const docker_client = @import("../../platform/docker.zig");
+    const env = @import("../../platform/env.zig");
+    const proc_runner = @import("../../platform/runner.zig");
+    const tmux_client = @import("../../platform/tmux.zig");
+    const Runtime = @import("../../workflow/runtime.zig").Runtime;
+
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},

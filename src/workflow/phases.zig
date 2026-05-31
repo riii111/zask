@@ -4,7 +4,7 @@ const config = @import("../model/config.zig");
 const config_value = @import("../model/config_value.zig");
 const lifecycle_mod = @import("lifecycle.zig");
 const pathing = @import("pathing.zig");
-const runner_mod = @import("../platform/runner.zig");
+const proc_runner = @import("../platform/runner.zig");
 const shell = @import("../platform/shell.zig");
 const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
@@ -167,7 +167,7 @@ fn parseTestConfig(gpa: std.mem.Allocator, json: []const u8) !config.Config {
     return config.Config.parse(gpa, json, "/home/me");
 }
 
-fn testLifecycle(gpa: std.mem.Allocator, run: runner_mod.Runner, cfg: config.Config) lifecycle_mod.Lifecycle {
+fn testLifecycle(gpa: std.mem.Allocator, run: proc_runner.Runner, cfg: config.Config) lifecycle_mod.Lifecycle {
     return .{
         .gpa = gpa,
         .cfg = cfg,
@@ -206,10 +206,10 @@ test "phases.runPrechecks: failure prints hint and preserves abort semantics" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var recorder = runner_mod.Recorder.init(arena.allocator());
+    var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
     try recorder.enqueue("", "missing", .{ .exited = 1 });
-    const run = runner_mod.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [128]u8 = undefined;
@@ -232,11 +232,11 @@ test "phases.runCommandPhase: warn continues and abort fails startup" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var recorder = runner_mod.Recorder.init(arena.allocator());
+    var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
     try recorder.enqueue("", "", .{ .exited = 1 });
     try recorder.enqueue("", "", .{ .exited = 1 });
-    const run = runner_mod.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [128]u8 = undefined;
@@ -246,11 +246,11 @@ test "phases.runCommandPhase: warn continues and abort fails startup" {
     try std.testing.expectError(error.CommandPhaseFailed, runCommandPhase(lifecycle, cfg.phases()[1], "all", &writer));
 
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: command phase failed") != null);
-    const warn_command = runner_mod.findCommandContaining(&recorder, "warn setup") orelse return error.CommandNotFound;
-    const abort_command = runner_mod.findCommandContaining(&recorder, "abort setup") orelse return error.CommandNotFound;
-    try runner_mod.expectCommandArg(warn_command, 2, "warn setup");
-    try runner_mod.expectCommandArg(abort_command, 2, "abort setup");
-    try runner_mod.expectNoRemainingResponses(&recorder);
+    const warn_command = proc_runner.findCommandContaining(&recorder, "warn setup") orelse return error.CommandNotFound;
+    const abort_command = proc_runner.findCommandContaining(&recorder, "abort setup") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArg(warn_command, 2, "warn setup");
+    try proc_runner.expectCommandArg(abort_command, 2, "abort setup");
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
 test "phases.runServicePhase: propagates window-not-ready as startup failure" {
@@ -263,10 +263,10 @@ test "phases.runServicePhase: propagates window-not-ready as startup failure" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var recorder = runner_mod.Recorder.init(arena.allocator());
+    var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
     recorder.term = .{ .exited = 1 };
-    const run = runner_mod.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [128]u8 = undefined;
@@ -286,14 +286,14 @@ test "phases.runServicePhase: honors wait_ports as a declared dependency" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var recorder = runner_mod.Recorder.init(arena.allocator());
+    var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("\n", "", .{ .exited = 1 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
-    const run = runner_mod.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [128]u8 = undefined;
@@ -301,10 +301,10 @@ test "phases.runServicePhase: honors wait_ports as a declared dependency" {
 
     try runServicePhase(lifecycle, cfg.phases()[0], "all", &writer, .observe);
 
-    const port_check = runner_mod.findCommandContaining(&recorder, "nc") orelse return error.PortCheckMissing;
-    try runner_mod.expectCommandArg(port_check, 3, "5432");
-    try runner_mod.expectCommandOrder(&recorder, "serve", "nc");
-    try runner_mod.expectNoRemainingResponses(&recorder);
+    const port_check = proc_runner.findCommandContaining(&recorder, "nc") orelse return error.PortCheckMissing;
+    try proc_runner.expectCommandArg(port_check, 3, "5432");
+    try proc_runner.expectCommandOrder(&recorder, "serve", "nc");
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
 test "phases.runServicePhase: reports port readiness failure" {
@@ -317,7 +317,7 @@ test "phases.runServicePhase: reports port readiness failure" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var recorder = runner_mod.Recorder.init(arena.allocator());
+    var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
@@ -325,7 +325,7 @@ test "phases.runServicePhase: reports port readiness failure" {
     try recorder.enqueue("", "", .{ .exited = 0 });
     recorder.stdout = "Error: address already in use\n";
     recorder.term = .{ .exited = 1 };
-    const run = runner_mod.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [512]u8 = undefined;
@@ -359,14 +359,14 @@ test "phases.runServicePhase: reports unmatched port without service hints" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var recorder = runner_mod.Recorder.init(arena.allocator());
+    var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("\n", "", .{ .exited = 1 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     recorder.term = .{ .exited = 1 };
-    const run = runner_mod.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [512]u8 = undefined;
@@ -395,9 +395,9 @@ test "phases.phaseCwd: rejects path traversal" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var recorder = runner_mod.Recorder.init(arena.allocator());
+    var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
-    const run = runner_mod.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
 

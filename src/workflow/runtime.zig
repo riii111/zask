@@ -36,11 +36,7 @@ pub const Runtime = struct {
                 try writer.print("Session '{s}' is not running\n", .{try self.cfg.sessionName()});
                 return;
             },
-            .unavailable => {
-                try writer.writeAll("tmux unavailable\n");
-                try writer.flush();
-                return error.TmuxUnavailable;
-            },
+            .unavailable => return waits.reportTmuxUnavailable(writer),
         }
         try writer.print("{s} Service Status\n", .{try self.cfg.projectName()});
         if (self.cfg.dockerEnabled()) {
@@ -64,11 +60,7 @@ pub const Runtime = struct {
                 try writer.flush();
                 return error.SessionNotRunning;
             },
-            .unavailable => {
-                try writer.writeAll("tmux unavailable\n");
-                try writer.flush();
-                return error.TmuxUnavailable;
-            },
+            .unavailable => return waits.reportTmuxUnavailable(writer),
         }
         try self.attachExistingWithRefreshedHooks();
     }
@@ -82,11 +74,7 @@ pub const Runtime = struct {
                 try writer.flush();
                 return error.SessionNotRunning;
             },
-            .unavailable => {
-                try writer.writeAll("tmux unavailable\n");
-                try writer.flush();
-                return error.TmuxUnavailable;
-            },
+            .unavailable => return waits.reportTmuxUnavailable(writer),
         }
         const tx = self.tmux();
         if (try self.inTmux()) {
@@ -134,11 +122,7 @@ pub const Runtime = struct {
             error.LockBusy => switch (self.tmux().observeSession()) {
                 .active => return self.attachExistingWithRefreshedHooks(),
                 .missing => return err,
-                .unavailable => {
-                    try writer.writeAll("tmux unavailable\n");
-                    try writer.flush();
-                    return error.TmuxUnavailable;
-                },
+                .unavailable => return waits.reportTmuxUnavailable(writer),
             },
             else => return err,
         };
@@ -163,11 +147,7 @@ pub const Runtime = struct {
                 return;
             },
             .missing => {},
-            .unavailable => {
-                try writer.writeAll("tmux unavailable\n");
-                try writer.flush();
-                return error.TmuxUnavailable;
-            },
+            .unavailable => return waits.reportTmuxUnavailable(writer),
         }
         try writer.writeAll("Opening workspace...\n");
         try writer.flush();
@@ -188,11 +168,7 @@ pub const Runtime = struct {
     pub fn close(self: Runtime, writer: *std.Io.Writer) !void {
         const guard = self.acquireLock() catch |err| switch (err) {
             error.LockBusy => switch (self.tmux().observeSession()) {
-                .unavailable => {
-                    try writer.writeAll("tmux unavailable\n");
-                    try writer.flush();
-                    return error.TmuxUnavailable;
-                },
+                .unavailable => return waits.reportTmuxUnavailable(writer),
                 else => return err,
             },
             else => return err,
@@ -211,11 +187,7 @@ pub const Runtime = struct {
                 try writer.writeAll("Session not running\n");
                 return;
             },
-            .unavailable => {
-                try writer.writeAll("tmux unavailable\n");
-                try writer.flush();
-                return error.TmuxUnavailable;
-            },
+            .unavailable => return waits.reportTmuxUnavailable(writer),
         }
         // kill-session below stops services regardless, so skip the graceful poll;
         // `stop --all` keeps it since it leaves the session running.
@@ -237,11 +209,7 @@ pub const Runtime = struct {
             error.LockBusy => switch (self.tmux().observeSession()) {
                 .active => return self.detachSingleClientForRe(),
                 .missing => return err,
-                .unavailable => {
-                    try writer.writeAll("tmux unavailable\n");
-                    try writer.flush();
-                    return error.TmuxUnavailable;
-                },
+                .unavailable => return waits.reportTmuxUnavailable(writer),
             },
             else => return err,
         };

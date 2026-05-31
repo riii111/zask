@@ -1,5 +1,7 @@
 const std = @import("std");
-const Context = @import("context.zig").Context;
+const context = @import("context.zig");
+const Context = context.Context;
+const parseSize = context.parseSize;
 
 pub const Options = struct {
     pane_id: []const u8,
@@ -23,10 +25,6 @@ pub const Options = struct {
 pub fn run(ctx: *Context, opts: Options) !void {
     const rt = try ctx.runtime();
     try rt.previewList(opts.pane_id, opts.client_width, opts.client_height);
-}
-
-fn parseSize(arg: []const u8) !u16 {
-    return std.fmt.parseUnsigned(u16, arg, 10) catch return error.InvalidArguments;
 }
 
 // -----------------------------------------------------------------------------

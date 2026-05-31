@@ -5,11 +5,11 @@ const env = @import("../../platform/env.zig");
 const monitor = @import("monitor.zig");
 const proc_runner = @import("../../platform/runner.zig");
 const tmux_client = @import("../../platform/tmux.zig");
-const Context = @import("context.zig").Context;
+const RenderContext = @import("context.zig").RenderContext;
 
 pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env.Map, cfg: config.Config, writer: *std.Io.Writer) !void {
     const run: proc_runner.Runner = .{ .gpa = gpa, .io = io };
-    const ctx: Context = .{ .gpa = gpa, .cfg = cfg, .runner = run, .tmux = .{ .gpa = gpa, .runner = run, .session = try cfg.sessionName() } };
+    const ctx: RenderContext = .{ .gpa = gpa, .cfg = cfg, .runner = run, .tmux = .{ .gpa = gpa, .runner = run, .session = try cfg.sessionName() } };
     try writer.writeAll(ansi.clear_screen);
     try renderLauncher(ctx, writer);
     try writer.flush();
@@ -32,17 +32,17 @@ const launcher_width = 46;
 const service_name_width = 15;
 const service_port_width = 6;
 
-fn renderLauncher(ctx: Context, writer: *std.Io.Writer) !void {
+fn renderLauncher(ctx: RenderContext, writer: *std.Io.Writer) !void {
     try writer.writeAll("\n");
     const title = try std.fmt.allocPrint(ctx.gpa, "{s} - Development TUI", .{try ctx.cfg.projectName()});
     try writer.print("{s}{s}", .{ bold, cyan });
-    try writeRule(writer, "╔", "═", "╗", launcher_width);
+    try ansi.writeRule(writer, "╔", "═", "╗", launcher_width);
     try writer.print("{s}\n", .{reset});
     try writer.print("{s}{s}║", .{ bold, cyan });
-    try writeCentered(writer, title, launcher_width);
+    try ansi.writeCentered(writer, title, launcher_width);
     try writer.print("║{s}\n", .{reset});
     try writer.print("{s}{s}", .{ bold, cyan });
-    try writeRule(writer, "╚", "═", "╝", launcher_width);
+    try ansi.writeRule(writer, "╚", "═", "╝", launcher_width);
     try writer.print("{s}\n\n", .{reset});
 
     try writer.print("{s}Navigate: {s}{s}Ctrl+q w{s}{s} (list) {s}{s}Ctrl+q '{s}{s} (number) {s}{s}Ctrl+q m{s}{s} (toggle){s}\n\n", .{ dim, reset, bold, reset, dim, reset, bold, reset, dim, reset, bold, reset, dim, reset });
@@ -50,9 +50,9 @@ fn renderLauncher(ctx: Context, writer: *std.Io.Writer) !void {
     if (ctx.cfg.dockerEnabled()) {
         try writer.print("{s}{s}[docker]{s}\n", .{ bold, blue, reset });
         try writer.print("  {s}", .{green});
-        try writePadded(writer, "docker", service_name_width);
+        try ansi.writePadded(writer, "docker", service_name_width);
         try writer.print("{s} {s}", .{ reset, dim });
-        try writePadded(writer, "compose", 7);
+        try ansi.writePadded(writer, "compose", 7);
         try writer.print("{s}  docker compose up\n\n", .{reset});
     }
 
@@ -66,13 +66,13 @@ fn renderLauncher(ctx: Context, writer: *std.Io.Writer) !void {
             const port = config.Config.servicePort(service);
             const command = try config.Config.serviceStartCommand(ctx.gpa, service);
             try writer.print("  {s}", .{green});
-            try writePadded(writer, name, service_name_width);
+            try ansi.writePadded(writer, name, service_name_width);
             try writer.print("{s} {s}", .{ reset, dim });
             if (port) |p| {
                 const port_text = try std.fmt.allocPrint(ctx.gpa, ":{d}", .{p});
-                try writePadded(writer, port_text, service_port_width);
+                try ansi.writePadded(writer, port_text, service_port_width);
             } else {
-                try writePadded(writer, ":N/A", service_port_width);
+                try ansi.writePadded(writer, ":N/A", service_port_width);
             }
             try writer.print("{s}  {s}\n", .{ reset, command });
         }
@@ -80,7 +80,7 @@ fn renderLauncher(ctx: Context, writer: *std.Io.Writer) !void {
     }
 
     try writer.print("{s}", .{dim});
-    try writeRule(writer, "", "─", "", launcher_width + 2);
+    try ansi.writeRule(writer, "", "─", "", launcher_width + 2);
     try writer.print("{s}\n", .{reset});
     try writer.print("{s}Commands:{s}\n", .{ bold, reset });
     const project = try ctx.cfg.projectName();
@@ -114,7 +114,7 @@ fn writeCommandHelp(writer: *std.Io.Writer) !void {
     const usage_width = launcherCommandWidth();
     for (launcher_commands) |command| {
         try writer.print("  {s}zask {s}{s}", .{ green, command.usage, reset });
-        try writeSpaces(writer, usage_width - "zask ".len - command.usage.len + 2);
+        try ansi.writeSpaces(writer, usage_width - "zask ".len - command.usage.len + 2);
         try writer.print("{s}\n", .{command.description});
     }
 }
@@ -127,7 +127,7 @@ fn launcherCommandWidth() usize {
     return width;
 }
 
-fn serviceGroups(ctx: Context) ![][]const u8 {
+fn serviceGroups(ctx: RenderContext) ![][]const u8 {
     var groups: std.ArrayList([]const u8) = .empty;
     errdefer groups.deinit(ctx.gpa);
     for (try ctx.cfg.services()) |service| {
@@ -142,36 +142,6 @@ fn serviceGroups(ctx: Context) ![][]const u8 {
         if (!seen) try groups.append(ctx.gpa, group);
     }
     return groups.toOwnedSlice(ctx.gpa);
-}
-
-fn writeCentered(writer: *std.Io.Writer, text: []const u8, width: usize) !void {
-    const text_width = text.len;
-    if (text_width >= width) {
-        try writer.writeAll(text);
-        return;
-    }
-    const left = (width - text_width) / 2;
-    const right = width - text_width - left;
-    try writeSpaces(writer, left);
-    try writer.writeAll(text);
-    try writeSpaces(writer, right);
-}
-
-fn writePadded(writer: *std.Io.Writer, text: []const u8, width: usize) !void {
-    try writer.writeAll(text);
-    if (text.len < width) try writeSpaces(writer, width - text.len);
-}
-
-fn writeSpaces(writer: *std.Io.Writer, count: usize) !void {
-    var i: usize = 0;
-    while (i < count) : (i += 1) try writer.writeByte(' ');
-}
-
-fn writeRule(writer: *std.Io.Writer, left: []const u8, fill: []const u8, right: []const u8, width: usize) !void {
-    try writer.writeAll(left);
-    var i: usize = 0;
-    while (i < width) : (i += 1) try writer.writeAll(fill);
-    try writer.writeAll(right);
 }
 
 test "dashboard.renderLauncher: renders launcher frame with grouped services" {
@@ -192,7 +162,7 @@ test "dashboard.renderLauncher: renders launcher frame with grouped services" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const ctx: Context = .{
+    const ctx: RenderContext = .{
         .gpa = arena.allocator(),
         .cfg = cfg,
         .runner = .{ .gpa = arena.allocator(), .io = undefined },

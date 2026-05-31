@@ -5,7 +5,7 @@ const docker_client = @import("../../platform/docker.zig");
 const observations = @import("../../model/observations.zig");
 const proc_runner = @import("../../platform/runner.zig");
 const tmux_options = @import("../../model/tmux_options.zig");
-const Context = @import("context.zig").Context;
+const RenderContext = @import("context.zig").RenderContext;
 
 const monitor_name_width = 12;
 const monitor_port_width = 6;
@@ -20,7 +20,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.
         defer frame_arena.deinit();
         const frame_gpa = frame_arena.allocator();
         const runner: proc_runner.Runner = .{ .gpa = frame_gpa, .io = io };
-        const ctx: Context = .{ .gpa = frame_gpa, .cfg = cfg, .runner = runner, .tmux = .{ .gpa = frame_gpa, .runner = runner, .session = try cfg.sessionName() } };
+        const ctx: RenderContext = .{ .gpa = frame_gpa, .cfg = cfg, .runner = runner, .tmux = .{ .gpa = frame_gpa, .runner = runner, .session = try cfg.sessionName() } };
         var frame: std.Io.Writer.Allocating = .init(frame_gpa);
         try render(ctx, &frame.writer);
         const output = frame.writer.buffered();
@@ -85,7 +85,7 @@ const MonitorRow = struct {
     port: []const u8,
 };
 
-fn render(ctx: Context, writer: *std.Io.Writer) !void {
+fn render(ctx: RenderContext, writer: *std.Io.Writer) !void {
     const mode = try dashboardMode(ctx);
     var live_count: usize = 0;
     var warn_count: usize = 0;
@@ -107,19 +107,19 @@ fn render(ctx: Context, writer: *std.Io.Writer) !void {
 
     try writer.print("{s}[zask-monitor]{s} {s}LIVE:{d}{s} {s}WARN:{d}{s} {s}DEAD:{d}{s}  {s}[{s}]{s}  {s}Ctrl+q m: toggle{s}\n\n", .{ ansi.bold, ansi.reset, ansi.green, live_count, ansi.reset, ansi.yellow, warn_count, ansi.reset, ansi.red, dead_count, ansi.reset, ansi.dim, mode, ansi.reset, ansi.dim, ansi.reset });
     for (rows.items) |row| {
-        if (std.mem.eql(u8, mode, "bad") and row.status == .live) continue;
-        try writeMonitorRow(ctx, writer, row, !std.mem.eql(u8, mode, "all") or row.status != .live);
+        if (std.mem.eql(u8, mode, tmux_options.dash_mode_bad) and row.status == .live) continue;
+        try writeMonitorRow(ctx, writer, row, !std.mem.eql(u8, mode, tmux_options.dash_mode_all) or row.status != .live);
         try writer.writeAll("\n");
     }
     try writer.print("\n{s}───────────────────────────────────────────────────────────────{s}\n", .{ ansi.dim, ansi.reset });
     try writer.print("{s}zask status | zask logs <service> | zask {s} <command>{s}", .{ ansi.dim, try ctx.cfg.projectName(), ansi.reset });
 }
 
-fn dashboardMode(ctx: Context) ![]const u8 {
-    return try ctx.tmux.showOption(tmux_options.dash_mode) orelse "all";
+fn dashboardMode(ctx: RenderContext) ![]const u8 {
+    return try ctx.tmux.showOption(tmux_options.dash_mode) orelse tmux_options.dash_mode_all;
 }
 
-fn serviceMonitorRow(ctx: Context, service: std.json.Value) !MonitorRow {
+fn serviceMonitorRow(ctx: RenderContext, service: std.json.Value) !MonitorRow {
     const name = try config.Config.serviceName(service);
     const observation = try observeService(ctx, service);
     const state = serviceMonitorStatus(observation);
@@ -132,7 +132,7 @@ fn serviceMonitorRow(ctx: Context, service: std.json.Value) !MonitorRow {
     };
 }
 
-fn dockerMonitorRow(ctx: Context) !MonitorRow {
+fn dockerMonitorRow(ctx: RenderContext) !MonitorRow {
     const pane = ctx.tmux.observePane("docker");
     const skipped = observations.ComposeObservation.empty(.empty);
     const compose = if (shouldObserveCompose(pane)) observeDocker(ctx) else skipped;
@@ -140,7 +140,7 @@ fn dockerMonitorRow(ctx: Context) !MonitorRow {
     return .{ .name = "docker", .status = dockerMonitorStatus(pane, compose), .exit_code = pane.exit_code, .command = pane.command, .port = "compose" };
 }
 
-fn observeService(ctx: Context, service: std.json.Value) !observations.ServiceObservation {
+fn observeService(ctx: RenderContext, service: std.json.Value) !observations.ServiceObservation {
     const name = try config.Config.serviceName(service);
     const pane = ctx.tmux.observePane(name);
     const health = if (shouldObserveHealth(pane)) try observeHealth(ctx, service) else observations.HealthObservation.no_check;
@@ -155,7 +155,7 @@ fn shouldObserveCompose(pane: observations.PaneObservation) bool {
     return pane.state == .busy;
 }
 
-fn observeHealth(ctx: Context, service: std.json.Value) !observations.HealthObservation {
+fn observeHealth(ctx: RenderContext, service: std.json.Value) !observations.HealthObservation {
     const port = config.Config.servicePort(service) orelse return .no_check;
     const result = proc_runner.captured(ctx.runner.run(&.{ "nc", "-z", "localhost", try std.fmt.allocPrint(ctx.gpa, "{d}", .{port}) }, .{}) catch return .waiting);
     defer ctx.gpa.free(result.stdout);
@@ -170,7 +170,7 @@ fn observeHealth(ctx: Context, service: std.json.Value) !observations.HealthObse
     return if (http.term == .exited and http.term.exited == 0) .ready else .degraded;
 }
 
-fn observeDocker(ctx: Context) observations.ComposeObservation {
+fn observeDocker(ctx: RenderContext) observations.ComposeObservation {
     return (docker_client.Compose{
         .gpa = ctx.gpa,
         .runner = ctx.runner,
@@ -211,7 +211,7 @@ fn healthMonitorStatus(health: observations.HealthObservation) MonitorStatus {
     };
 }
 
-fn writeMonitorRow(ctx: Context, writer: *std.Io.Writer, row: MonitorRow, show_log: bool) !void {
+fn writeMonitorRow(ctx: RenderContext, writer: *std.Io.Writer, row: MonitorRow, show_log: bool) !void {
     const color = row.status.color();
     try writer.print("{s}{s}{s} ", .{ color, row.status.icon(), ansi.reset });
     try ansi.writePadded(writer, ansi.truncate(row.name, monitor_name_width), monitor_name_width);
@@ -226,7 +226,7 @@ fn writeMonitorRow(ctx: Context, writer: *std.Io.Writer, row: MonitorRow, show_l
     }
 }
 
-fn lastLogLine(ctx: Context, window: []const u8) ![]const u8 {
+fn lastLogLine(ctx: RenderContext, window: []const u8) ![]const u8 {
     const pane = try ctx.tmux.capturePane(window);
     var lines = std.mem.splitScalar(u8, pane, '\n');
     var latest: []const u8 = "";
@@ -271,7 +271,7 @@ test "monitor.render: shows local and named command forms" {
     try recorder.enqueue("all\n", "", .{ .exited = 0 });
     const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const ctx: Context = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
 
@@ -298,7 +298,7 @@ test "monitor.service: skips health checks unless pane is busy" {
     try recorder.enqueue("", "", .{ .exited = 1 });
     const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const ctx: Context = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
 
     const row = try serviceMonitorRow(ctx, (try cfg.services())[0]);
 
@@ -324,7 +324,7 @@ test "monitor.service: checks health for busy shell panes" {
     try recorder.enqueue("", "", .{ .exited = 0 });
     const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const ctx: Context = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
 
     const row = try serviceMonitorRow(ctx, (try cfg.services())[0]);
 
@@ -350,7 +350,7 @@ test "monitor.docker: skips compose observation unless pane is busy" {
     try recorder.enqueue("", "", .{ .exited = 1 });
     const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const ctx: Context = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
 
     const row = try dockerMonitorRow(ctx);
 
@@ -376,7 +376,7 @@ test "monitor.docker: checks compose for busy shell panes" {
     try recorder.enqueue("api\n", "", .{ .exited = 0 });
     const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const ctx: Context = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
 
     const row = try dockerMonitorRow(ctx);
 
@@ -402,7 +402,7 @@ test "monitor.docker: runs compose from the root-relative subdir, not a doubled 
     try recorder.enqueue("api\n", "", .{ .exited = 0 });
     const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const ctx: Context = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
 
     const row = try dockerMonitorRow(ctx);
 

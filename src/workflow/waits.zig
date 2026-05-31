@@ -118,6 +118,14 @@ pub fn waitForPaneIdle(ctx: anytype, window: []const u8) PaneIdleWait {
     return .still_busy;
 }
 
+/// Single source for the `.unavailable` observe branch so every call site stays
+/// a one-line `return`; the message and error must not drift between callers.
+pub fn reportTmuxUnavailable(writer: *std.Io.Writer) !void {
+    try writer.writeAll("tmux unavailable\n");
+    try writer.flush();
+    return error.TmuxUnavailable;
+}
+
 pub fn windowReadyAttempts() usize {
     return window_ready_attempts;
 }
@@ -126,7 +134,7 @@ pub fn stopAttempts() usize {
     return stop_attempts;
 }
 
-fn writeProgress(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytype) !void {
+pub fn writeProgress(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytype) !void {
     try writer.print(fmt, args);
     try writer.flush();
 }
