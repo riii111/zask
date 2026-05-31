@@ -134,20 +134,9 @@ fn phaseLabel(ctx: anytype, phase: std.json.Value, profile: []const u8) []const 
 }
 
 fn writeLastLog(ctx: anytype, window: []const u8, writer: *std.Io.Writer) !void {
-    const pane = try ctx.tmux.capturePane(window);
-    defer ctx.gpa.free(pane);
-    const line = lastLogLine(pane);
+    const line = try ctx.tmux.captureLastLine(window);
+    defer ctx.gpa.free(line);
     if (line.len > 0) try writer.print("  last log: {s}\n", .{line});
-}
-
-fn lastLogLine(pane: []const u8) []const u8 {
-    var lines = std.mem.splitScalar(u8, pane, '\n');
-    var latest: []const u8 = "";
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r\n\x00");
-        if (trimmed.len > 0) latest = trimmed;
-    }
-    return latest;
 }
 
 fn writeLogsNext(ctx: anytype, service: []const u8, writer: *std.Io.Writer) !void {
