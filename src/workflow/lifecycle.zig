@@ -55,14 +55,10 @@ pub const Lifecycle = struct {
         try self.stopDocker(writer);
     }
 
-    /// Broadcasts C-c and tears down Docker without waiting for services to
-    /// settle. The caller is expected to kill the session right after, so the
-    /// grace before that kill is the only stop budget services get.
     pub fn stopAllFast(self: Lifecycle, writer: *std.Io.Writer) !void {
         const services = try self.cfg.services();
         if (services.len > 0) try writeProgress(writer, "Stopping services...\n", .{});
-        var signaled = try self.broadcastStop(services, writer);
-        signaled.deinit(self.gpa);
+        self.signalStop(services, writer);
         try self.stopDocker(writer);
     }
 
@@ -136,9 +132,8 @@ pub const Lifecycle = struct {
         try self.ensureServiceStopped(service, writer);
     }
 
-    /// Sends C-c to every running service without waiting and returns the signaled
-    /// set, so callers can poll them together instead of blocking on each in turn.
-    /// Services in reverse order keeps dependents stopped before their dependencies.
+    /// Reverse order so dependents stop before their dependencies; returns the
+    /// signaled set for the caller to poll together instead of one at a time.
     fn broadcastStop(self: Lifecycle, services: []const std.json.Value, writer: *std.Io.Writer) !std.ArrayList([]const u8) {
         var signaled: std.ArrayList([]const u8) = .empty;
         errdefer signaled.deinit(self.gpa);
@@ -161,6 +156,23 @@ pub const Lifecycle = struct {
             }
         }
         return signaled;
+    }
+
+    /// Swallows every signal failure so `close` still reaches Docker teardown and
+    /// kill-session; the kill stops services anyway.
+    fn signalStop(self: Lifecycle, services: []const std.json.Value, writer: *std.Io.Writer) void {
+        var i = services.len;
+        while (i > 0) {
+            i -= 1;
+            const name = config.Config.serviceName(services[i]) catch continue;
+            const pane = self.tmux.observePane(name);
+            defer pane.deinit(self.gpa);
+            switch (serviceStopDecision(pane.state)) {
+                .send_stop => self.tmux.sendKeys(name, &.{"C-c"}) catch {},
+                .no_op => writeProgress(writer, "  {s} ... already stopped\n", .{name}) catch {},
+                .tmux_unavailable => {},
+            }
+        }
     }
 
     fn startDockerAndWait(self: Lifecycle, writer: *std.Io.Writer) !void {

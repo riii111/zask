@@ -210,9 +210,8 @@ pub const Runtime = struct {
                 return error.TmuxUnavailable;
             },
         }
-        // close ends in kill-session, so a graceful stop wait would just delay a
-        // kill that stops everything anyway. Signal, brief grace, then kill.
-        // `stop --all` keeps the graceful poll, since it leaves the session up.
+        // kill-session below stops services anyway, so don't pay the graceful poll
+        // here; `stop --all` keeps it since it leaves the session up.
         try self.lifecycle().stopAllFast(writer);
         self.runner().sleep(close_kill_settle);
         const tx = self.tmux();
@@ -583,6 +582,31 @@ test "runtime.close: skips stop polling before killing session" {
     try proc_runner.expectCommandArg(recorder.commands.items[kill_index], 1, "kill-session");
     try std.testing.expectEqual(@as(usize, 1), recorder.sleeps.items.len);
     try std.testing.expectEqual(close_kill_settle, recorder.sleeps.items[0].duration);
+}
+
+test "runtime.close: kills session even when a service signal fails" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "error connecting to /tmp/tmux-501/default (Permission denied)", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.closeUnlocked(&writer);
+
+    const kill = recorder.commands.items[recorder.commands.items.len - 1];
+    try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "demo" });
 }
 
 test "runtime.attach: refreshes size hooks before switching client" {
