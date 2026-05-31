@@ -30,7 +30,6 @@ pub const Lifecycle = struct {
         if (std.mem.eql(u8, profile, "docker")) return self.startDockerAndWait(writer);
         const phase_list = self.cfg.phases();
         if (phase_list.len == 0) {
-            // No startup_order: Docker and services come up concurrently.
             const service_list = try self.cfg.services();
             if (self.cfg.dockerEnabled()) {
                 if (service_list.len > 0)
@@ -591,8 +590,6 @@ test "lifecycle.startAll: starts idle docker before service command" {
     try proc_runner.expectCommandOrder(&recorder, "docker compose", "serve");
     try proc_runner.expectNoTmuxSizingCommands(&recorder);
     try proc_runner.expectNoRemainingResponses(&recorder);
-    // No startup_order: services are not gated on Docker readiness, and the user
-    // is nudged toward declaring one.
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "startup_order") != null);
 }

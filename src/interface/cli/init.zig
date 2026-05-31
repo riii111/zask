@@ -350,7 +350,6 @@ test "init.config: renders service and docker config" {
     try std.testing.expectEqualStrings("compose.yaml", cfg.dockerComposeFile());
     try std.testing.expectEqualStrings("./infra", try cfg.dockerDir(arena.allocator()));
     try std.testing.expect(std.mem.indexOf(u8, json, "\"dir\": \".\"") == null);
-    // Docker + a service scaffolds an explicit order: Docker phase, then the group.
     try std.testing.expectEqual(@as(usize, 2), cfg.phases().len);
 }
 

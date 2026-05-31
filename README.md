@@ -139,9 +139,8 @@ zask <project> re
 zask <project> close
 ```
 
-`close` signals each service, waits a short grace, then kills the session. It does
-not block on services stopping, since the kill stops them anyway; use `stop --all`
-when you want to wait for a graceful stop while keeping the workspace open.
+`close` kills the session after a short grace without waiting for services to stop;
+use `stop --all` to wait for a graceful stop while keeping the workspace open.
 
 `open` brings resources up without blocking on Docker readiness, then attaches.
 To order startup — start Docker first, or wait for a port before the next group —

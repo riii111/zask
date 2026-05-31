@@ -68,9 +68,8 @@ pub fn waitForStopped(ctx: anytype, service: []const u8, writer: *std.Io.Writer)
     try writer.flush();
 }
 
-/// Polls every signaled service together so the total wait is the slowest single
-/// service, not the sum. Callers broadcast C-c first, then hand the signaled set
-/// here. Each service is reported as it settles.
+/// Polls every signaled service together, so the total wait is the slowest one,
+/// not the sum. Callers broadcast C-c first, then hand the signaled set here.
 pub fn waitForAllStopped(ctx: anytype, services: []const []const u8, writer: *std.Io.Writer) !void {
     if (services.len == 0) return;
     const stopped = try ctx.gpa.alloc(bool, services.len);

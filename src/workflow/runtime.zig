@@ -210,10 +210,8 @@ pub const Runtime = struct {
                 return error.TmuxUnavailable;
             },
         }
-        // Teardown contract: best-effort signal each service (failures swallowed),
-        // skip the graceful poll since the kill below stops them regardless, tear
-        // Docker down, then kill after a short grace. `stop --all` keeps the poll
-        // instead, because it leaves the session running.
+        // kill-session below stops services regardless, so skip the graceful poll;
+        // `stop --all` keeps it since it leaves the session running.
         try self.lifecycle().stopAllFast(writer);
         self.runner().sleep(close_kill_settle);
         const tx = self.tmux();
