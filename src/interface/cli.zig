@@ -122,12 +122,11 @@ pub fn run(init: std.process.Init) !void {
         },
         error.ConfigNotFound => {
             try stdout.writeAll("Error: config not found\n");
-            try renderDiscoveredConfig(stdout, err_ctx);
             try stdout.flush();
             std.process.exit(2);
         },
         error.AmbiguousConfig => {
-            try stdout.writeAll("Error: both zask.json and .zask.json found\n");
+            try stdout.writeAll("Error: multiple local config files found\n");
             try stdout.writeAll("Use --config <file> to choose one.\n");
             try stdout.flush();
             std.process.exit(2);
@@ -272,6 +271,7 @@ fn shouldUseNamedProject(context: CommandContext, args: []const []const u8) bool
     if (args.len < 2) return false;
     if (parseCommand(args[1], false) == null) return false;
     const io = context.io orelse return false;
+    // Named project configs intentionally keep priority over local discovery.
     const path = cli_context.projectConfigPath(context.gpa, context.environ, args[0]) catch return false;
     defer context.gpa.free(path);
     return paths.exists(io, path);

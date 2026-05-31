@@ -25,7 +25,9 @@ pub const ParsedArgs = struct {
 };
 
 pub const ErrorContext = struct {
+    /// Resolved absolute config path selected by runtime loading.
     config_path: ?[]const u8 = null,
+    /// Config source selected by runtime loading after parsing and discovery.
     config_source: ?ConfigSource = null,
 };
 
@@ -122,16 +124,17 @@ fn absoluteConfigPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]c
     };
 }
 
-fn discoverConfigPath(gpa: std.mem.Allocator, io: std.Io) ![]const u8 {
+fn discoverConfigPath(gpa: std.mem.Allocator, io: std.Io) ![:0]const u8 {
     const candidates = [_][]const u8{ "zask.json", ".zask.json" };
-    var found: ?[]const u8 = null;
+    var found: ?[:0]const u8 = null;
+    errdefer if (found) |path| gpa.free(path);
+
     for (candidates) |candidate| {
         const path = std.Io.Dir.cwd().realPathFileAlloc(io, candidate, gpa) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => return err,
         };
-        if (found) |existing| {
-            gpa.free(existing);
+        if (found != null) {
             gpa.free(path);
             return error.AmbiguousConfig;
         }
@@ -153,4 +156,75 @@ fn zaskExecutablePath(gpa: std.mem.Allocator, io: std.Io, argv0: []const u8) ![]
     if (std.mem.indexOfScalar(u8, argv0, '/') == null) return "zask";
     const sibling = try std.fs.path.join(gpa, &.{ std.fs.path.dirname(argv0) orelse ".", "zask" });
     return absoluteExePath(gpa, io, sibling);
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+fn testWithCwd(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![:0]u8 {
+    const previous = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", gpa);
+    errdefer gpa.free(previous);
+    try std.process.setCurrentPath(io, path);
+    return previous;
+}
+
+test "cli.context.discoverConfigPath: finds zask.json" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "zask.json", .data = "{}" });
+    const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(base);
+    const previous = try testWithCwd(gpa, io, base);
+    defer {
+        std.process.setCurrentPath(io, previous) catch unreachable;
+        gpa.free(previous);
+    }
+
+    const path = try discoverConfigPath(gpa, io);
+    defer gpa.free(path);
+
+    try std.testing.expectEqualStrings("zask.json", std.fs.path.basename(path));
+}
+
+test "cli.context.discoverConfigPath: rejects ambiguous local configs" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "zask.json", .data = "{}" });
+    try tmp.dir.writeFile(io, .{ .sub_path = ".zask.json", .data = "{}" });
+    const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(base);
+    const previous = try testWithCwd(gpa, io, base);
+    defer {
+        std.process.setCurrentPath(io, previous) catch unreachable;
+        gpa.free(previous);
+    }
+
+    try std.testing.expectError(error.AmbiguousConfig, discoverConfigPath(gpa, io));
+}
+
+test "cli.context.discoverConfigPath: rejects missing local config" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(base);
+    const previous = try testWithCwd(gpa, io, base);
+    defer {
+        std.process.setCurrentPath(io, previous) catch unreachable;
+        gpa.free(previous);
+    }
+
+    try std.testing.expectError(error.ConfigNotFound, discoverConfigPath(gpa, io));
 }

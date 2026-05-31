@@ -35,6 +35,75 @@ test "list: discovers zask.json in current project" {
     try std.testing.expect(std.mem.indexOf(u8, res.stdout, "- api [backend] :18080") != null);
 }
 
+test "list: discovers .zask.json in current project" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ws = try harness.Workspace.init(gpa, io);
+    defer ws.deinit(gpa);
+    try ws.writeProjectFile(io, ".zask.json", valid_config);
+
+    var res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.project,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{"list"});
+    defer res.deinit(gpa);
+
+    try std.testing.expect(res.exitedWith(0));
+    try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
+    try std.testing.expect(std.mem.startsWith(u8, res.stdout, "demo\n"));
+}
+
+test "list: reports missing local config for command form" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ws = try harness.Workspace.init(gpa, io);
+    defer ws.deinit(gpa);
+
+    var res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.project,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{"list"});
+    defer res.deinit(gpa);
+
+    try std.testing.expect(res.exitedWith(2));
+    try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "config not found") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "Config:") == null);
+}
+
+test "list: does not discover parent config" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ws = try harness.Workspace.init(gpa, io);
+    defer ws.deinit(gpa);
+    try ws.writeProjectFile(io, "zask.json", valid_config);
+    try ws.tmp.dir.createDirPath(io, "project/nested");
+    const nested = try std.fs.path.join(gpa, &.{ ws.project, "nested" });
+    defer gpa.free(nested);
+
+    var res = try harness.spawnZask(gpa, io, .{
+        .cwd = nested,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{"list"});
+    defer res.deinit(gpa);
+
+    try std.testing.expect(res.exitedWith(2));
+    try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "config not found") != null);
+}
+
 test "list: rejects ambiguous local config files" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
@@ -55,7 +124,7 @@ test "list: rejects ambiguous local config files" {
 
     try std.testing.expect(res.exitedWith(2));
     try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
-    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "both zask.json and .zask.json found") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "multiple local config files found") != null);
     try std.testing.expect(std.mem.indexOf(u8, res.stdout, "Use --config <file>") != null);
 }
 
