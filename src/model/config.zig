@@ -459,27 +459,31 @@ pub fn validateAll(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Di
     if (source.object.get("phases") != null)
         try diags.add("phases", "legacy phases are not supported; define startup_order instead");
 
-    var index = ValidationIndex.init(gpa);
-    defer index.deinit();
+    var refs = ValidationIndex.init(gpa);
+    defer refs.deinit();
 
     try checkKeys(gpa, source, "", &.{ keys.project, keys.docker, keys.startup_order, keys.prechecks, keys.start_profiles, keys.group_aliases, keys.groups }, diags);
     try validateProject(gpa, source, diags);
     try validateDocker(gpa, source, diags);
-    try validateGroups(gpa, source, diags, &index);
-    try index.collectAliases(source);
-    try validateStartupOrder(gpa, source, diags, index);
+    // Build the reference index before validating references: startup_order and
+    // profile overrides may point at groups or aliases declared later in the file.
+    try validateGroups(gpa, source, diags, &refs);
+    try refs.collectAliases(source);
+    try validateStartupOrder(gpa, source, diags, refs);
     try validatePrechecks(gpa, source, diags);
-    try validateStartProfiles(gpa, source, diags, index);
-    try validateGroupAliases(gpa, source, diags, index);
+    try validateStartProfiles(gpa, source, diags, refs);
+    try validateGroupAliases(gpa, source, diags, refs);
 }
 
 const ValidationIndex = struct {
+    declared_groups: std.StringHashMap(void),
     groups: std.StringHashMap(void),
     services: std.StringHashMap(void),
     aliases: std.StringHashMap(void),
 
     fn init(gpa: std.mem.Allocator) ValidationIndex {
         return .{
+            .declared_groups = std.StringHashMap(void).init(gpa),
             .groups = std.StringHashMap(void).init(gpa),
             .services = std.StringHashMap(void).init(gpa),
             .aliases = std.StringHashMap(void).init(gpa),
@@ -487,19 +491,22 @@ const ValidationIndex = struct {
     }
 
     fn deinit(self: *ValidationIndex) void {
+        self.declared_groups.deinit();
         self.groups.deinit();
         self.services.deinit();
         self.aliases.deinit();
     }
 
     fn collectAliases(self: *ValidationIndex, source: Value) !void {
+        // Alias names participate in group resolution before alias values are
+        // validated, so collect their keys separately from validateGroupAliases.
         const aliases = source.object.get(keys.group_aliases) orelse return;
         if (aliases != .object) return;
         var it = aliases.object.iterator();
         while (it.next()) |entry| try self.aliases.put(entry.key_ptr.*, {});
     }
 
-    fn containsGroupLike(self: ValidationIndex, name: []const u8) bool {
+    fn containsGroupOrAlias(self: ValidationIndex, name: []const u8) bool {
         return self.groups.contains(name) or self.aliases.contains(name);
     }
 };
@@ -540,7 +547,7 @@ fn validateDocker(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Dia
     }
 }
 
-fn validateGroups(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics, index: *ValidationIndex) !void {
+fn validateGroups(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics, refs: *ValidationIndex) !void {
     const groups = source.object.get(keys.groups) orelse {
         try diags.add("groups", "missing required array");
         return;
@@ -553,12 +560,14 @@ fn validateGroups(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Dia
         const gpath = try indexedPath(gpa, "groups", gi);
         if (!try expectObject(group, gpath, diags)) continue;
         try checkKeys(gpa, group, gpath, &.{ keys.name, keys.services }, diags);
+        var group_name: ?[]const u8 = null;
         if (try checkRequiredString(gpa, group, keys.name, gpath, diags)) |name| {
+            group_name = name;
             const name_path = try joinPath(gpa, gpath, "name");
             validate.identifier(name) catch try diags.add(name_path, "must be a valid identifier");
-            if (index.groups.contains(name)) {
+            if (refs.declared_groups.contains(name)) {
                 try diags.addFmt(name_path, "duplicate group '{s}'", .{name});
-            } else try index.groups.put(name, {});
+            } else try refs.declared_groups.put(name, {});
         }
         const services = group.object.get(keys.services) orelse {
             try diags.add(gpath, "missing required array 'services'");
@@ -569,22 +578,23 @@ fn validateGroups(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Dia
             try diags.add(services_path, "must be an array");
             continue;
         }
+        if (services.array.items.len > 0) if (group_name) |name| try refs.groups.put(name, {});
         for (services.array.items, 0..) |service, si| {
             const spath = try indexedPath(gpa, services_path, si);
-            try validateService(gpa, service, spath, diags, index);
+            try validateService(gpa, service, spath, diags, refs);
         }
     }
 }
 
-fn validateService(gpa: std.mem.Allocator, service: Value, path: []const u8, diags: *diagnostics.Diagnostics, index: *ValidationIndex) !void {
+fn validateService(gpa: std.mem.Allocator, service: Value, path: []const u8, diags: *diagnostics.Diagnostics, refs: *ValidationIndex) !void {
     if (!try expectObject(service, path, diags)) return;
     try checkKeys(gpa, service, path, &.{ keys.name, keys.dir, keys.runtime, keys.command, keys.external, keys.port, keys.healthcheck }, diags);
     if (try checkRequiredString(gpa, service, keys.name, path, diags)) |name| {
         const name_path = try joinPath(gpa, path, "name");
         validate.identifier(name) catch try diags.add(name_path, "must be a valid identifier");
-        if (index.services.contains(name)) {
+        if (refs.services.contains(name)) {
             try diags.addFmt(name_path, "duplicate service '{s}'", .{name});
-        } else try index.services.put(name, {});
+        } else try refs.services.put(name, {});
     }
     _ = try checkRequiredString(gpa, service, keys.command, path, diags);
     try checkOptionalString(gpa, service, keys.dir, path, diags);
@@ -613,18 +623,18 @@ fn checkServiceDir(gpa: std.mem.Allocator, service: Value, path: []const u8, dia
     validate.relativeSubPath(dir) catch try diags.add(try joinPath(gpa, path, "dir"), "must stay within the project root");
 }
 
-fn validateStartupOrder(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics, index: ValidationIndex) !void {
+fn validateStartupOrder(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics, refs: ValidationIndex) !void {
     const startup_order = source.object.get(keys.startup_order) orelse return;
     if (startup_order != .array) {
         try diags.add("startup_order", "must be an array");
         return;
     }
     for (startup_order.array.items, 0..) |step, i| {
-        try validateStartupStep(gpa, step, try indexedPath(gpa, "startup_order", i), diags, index);
+        try validateStartupStep(gpa, step, try indexedPath(gpa, "startup_order", i), diags, refs);
     }
 }
 
-fn validateStartupStep(gpa: std.mem.Allocator, step: Value, path: []const u8, diags: *diagnostics.Diagnostics, index: ValidationIndex) !void {
+fn validateStartupStep(gpa: std.mem.Allocator, step: Value, path: []const u8, diags: *diagnostics.Diagnostics, refs: ValidationIndex) !void {
     if (!try expectObject(step, path, diags)) return;
     try checkOptionalString(gpa, step, keys.name, path, diags);
     const has_docker = step.object.get(keys.docker) != null;
@@ -647,7 +657,7 @@ fn validateStartupStep(gpa: std.mem.Allocator, step: Value, path: []const u8, di
         const group = step.object.get(keys.group).?;
         if (group != .string) {
             try diags.add(group_path, "must be a string");
-        } else if (!index.containsGroupLike(group.string)) {
+        } else if (!refs.containsGroupOrAlias(group.string)) {
             try diags.addFmt(group_path, "unknown group '{s}'", .{group.string});
         }
         if (step.object.get(keys.wait_ports)) |wait_ports| {
@@ -685,7 +695,7 @@ fn validatePrechecks(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.
     }
 }
 
-fn validateStartProfiles(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics, index: ValidationIndex) !void {
+fn validateStartProfiles(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics, refs: ValidationIndex) !void {
     const profiles = source.object.get(keys.start_profiles) orelse return;
     if (!try expectObject(profiles, "start_profiles", diags)) return;
     var it = profiles.object.iterator();
@@ -697,11 +707,11 @@ fn validateStartProfiles(gpa: std.mem.Allocator, source: Value, diags: *diagnost
         _ = try checkRequiredString(gpa, profile, keys.profile, path, diags);
         try checkOptionalString(gpa, profile, keys.label, path, diags);
         if (profile.object.get(keys.group_overrides)) |overrides|
-            try checkGroupOverrideRefs(gpa, overrides, try joinPath(gpa, path, "group_overrides"), diags, index);
+            try checkGroupOverrideRefs(gpa, overrides, try joinPath(gpa, path, "group_overrides"), diags, refs);
     }
 }
 
-fn validateGroupAliases(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics, index: ValidationIndex) !void {
+fn validateGroupAliases(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics, refs: ValidationIndex) !void {
     const aliases = source.object.get(keys.group_aliases) orelse return;
     if (!try expectObject(aliases, "group_aliases", diags)) return;
     var it = aliases.object.iterator();
@@ -715,22 +725,23 @@ fn validateGroupAliases(gpa: std.mem.Allocator, source: Value, diags: *diagnosti
             const value_path = try indexedPath(gpa, path, i);
             if (value != .string) {
                 try diags.add(value_path, "must be a string");
-            } else if (!index.services.contains(value.string)) {
+            } else if (!refs.services.contains(value.string)) {
                 try diags.addFmt(value_path, "unknown service '{s}'", .{value.string});
             }
         }
     }
 }
 
-fn checkGroupOverrideRefs(gpa: std.mem.Allocator, value: Value, path: []const u8, diags: *diagnostics.Diagnostics, index: ValidationIndex) !void {
+fn checkGroupOverrideRefs(gpa: std.mem.Allocator, value: Value, path: []const u8, diags: *diagnostics.Diagnostics, refs: ValidationIndex) !void {
     if (!try expectObject(value, path, diags)) return;
     var it = value.object.iterator();
     while (it.next()) |entry| {
-        const value_path = try joinPath(gpa, path, entry.key_ptr.*);
+        const entry_path = try joinPath(gpa, path, entry.key_ptr.*);
+        if (!refs.containsGroupOrAlias(entry.key_ptr.*)) try diags.addFmt(entry_path, "unknown group '{s}'", .{entry.key_ptr.*});
         if (entry.value_ptr.* != .string) {
-            try diags.add(value_path, "must be a string");
-        } else if (!index.containsGroupLike(entry.value_ptr.string)) {
-            try diags.addFmt(value_path, "unknown group '{s}'", .{entry.value_ptr.string});
+            try diags.add(entry_path, "must be a string");
+        } else if (!refs.containsGroupOrAlias(entry.value_ptr.string)) {
+            try diags.addFmt(entry_path, "unknown group '{s}'", .{entry.value_ptr.string});
         }
     }
 }
@@ -1227,15 +1238,15 @@ test "config.validateAll: rejects unresolved references" {
         \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[
         \\    {"name":"api","command":"serve"}
-        \\  ]}],
+        \\  ]}, {"name":"empty","services":[]}],
         \\  "group_aliases": {"frontend":["web"]},
         \\  "start_profiles": {
         \\    "core": {
         \\      "profile": "core",
-        \\      "group_overrides": {"backend":"core-backend"}
+        \\      "group_overrides": {"backend":"core-backend", "workers":"backend"}
         \\    }
         \\  },
-        \\  "startup_order": [{"group":"workers"}]
+        \\  "startup_order": [{"group":"workers"}, {"group":"empty"}]
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1247,16 +1258,50 @@ test "config.validateAll: rejects unresolved references" {
     try validateAll(arena.allocator(), value, &diags);
 
     var found_startup_group = false;
+    var found_empty_group = false;
+    var found_profile_source = false;
     var found_profile_override = false;
     var found_alias_service = false;
     for (diags.slice()) |diagnostic| {
         if (std.mem.eql(u8, diagnostic.path, "startup_order[0].group") and std.mem.eql(u8, diagnostic.message, "unknown group 'workers'")) found_startup_group = true;
+        if (std.mem.eql(u8, diagnostic.path, "startup_order[1].group") and std.mem.eql(u8, diagnostic.message, "unknown group 'empty'")) found_empty_group = true;
+        if (std.mem.eql(u8, diagnostic.path, "start_profiles.core.group_overrides.workers") and std.mem.eql(u8, diagnostic.message, "unknown group 'workers'")) found_profile_source = true;
         if (std.mem.eql(u8, diagnostic.path, "start_profiles.core.group_overrides.backend") and std.mem.eql(u8, diagnostic.message, "unknown group 'core-backend'")) found_profile_override = true;
         if (std.mem.eql(u8, diagnostic.path, "group_aliases.frontend[0]") and std.mem.eql(u8, diagnostic.message, "unknown service 'web'")) found_alias_service = true;
     }
     try std.testing.expect(found_startup_group);
+    try std.testing.expect(found_empty_group);
+    try std.testing.expect(found_profile_source);
     try std.testing.expect(found_profile_override);
     try std.testing.expect(found_alias_service);
+}
+
+test "config.validateAll: accepts resolved references" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "startup_order": [{"group":"backend-alias"}],
+        \\  "start_profiles": {
+        \\    "core": {
+        \\      "profile": "core",
+        \\      "group_overrides": {"backend":"backend-alias"}
+        \\    }
+        \\  },
+        \\  "group_aliases": {"backend-alias":["api"]},
+        \\  "groups": [{"name":"backend","services":[
+        \\    {"name":"api","command":"serve"}
+        \\  ]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const value = try parseJsonBytes(arena.allocator(), json);
+    var diags = diagnostics.Diagnostics.init(arena.allocator());
+    defer diags.deinit();
+
+    try validateAll(arena.allocator(), value, &diags);
+
+    try std.testing.expect(diags.isEmpty());
 }
 
 test "config.loadPath: parses synthetic fixture" {
