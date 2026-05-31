@@ -139,14 +139,6 @@ zask <project> re
 zask <project> close
 ```
 
-`close` kills the session after a short grace without waiting for services to stop;
-use `stop --all` to wait for a graceful stop while keeping the workspace open.
-
-`open` brings resources up without blocking on Docker readiness, then attaches.
-To order startup — start Docker first, or wait for a port before the next group —
-declare a `startup_order` with `docker` / `wait_ports` steps; those waits are
-always honored.
-
 Use `zask --config <file> <command>` to run against an explicit config file.
 
 ## Requirements
