@@ -3,7 +3,7 @@ const config = @import("../../model/config.zig");
 const proc_runner = @import("../../platform/runner.zig");
 const tmux_client = @import("../../platform/tmux.zig");
 
-pub const Context = struct {
+pub const RenderContext = struct {
     gpa: std.mem.Allocator,
     cfg: config.Config,
     runner: proc_runner.Runner,

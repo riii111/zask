@@ -5,11 +5,11 @@ const env = @import("../../platform/env.zig");
 const monitor = @import("monitor.zig");
 const proc_runner = @import("../../platform/runner.zig");
 const tmux_client = @import("../../platform/tmux.zig");
-const Context = @import("context.zig").Context;
+const RenderContext = @import("context.zig").RenderContext;
 
 pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env.Map, cfg: config.Config, writer: *std.Io.Writer) !void {
     const run: proc_runner.Runner = .{ .gpa = gpa, .io = io };
-    const ctx: Context = .{ .gpa = gpa, .cfg = cfg, .runner = run, .tmux = .{ .gpa = gpa, .runner = run, .session = try cfg.sessionName() } };
+    const ctx: RenderContext = .{ .gpa = gpa, .cfg = cfg, .runner = run, .tmux = .{ .gpa = gpa, .runner = run, .session = try cfg.sessionName() } };
     try writer.writeAll(ansi.clear_screen);
     try renderLauncher(ctx, writer);
     try writer.flush();
@@ -32,7 +32,7 @@ const launcher_width = 46;
 const service_name_width = 15;
 const service_port_width = 6;
 
-fn renderLauncher(ctx: Context, writer: *std.Io.Writer) !void {
+fn renderLauncher(ctx: RenderContext, writer: *std.Io.Writer) !void {
     try writer.writeAll("\n");
     const title = try std.fmt.allocPrint(ctx.gpa, "{s} - Development TUI", .{try ctx.cfg.projectName()});
     try writer.print("{s}{s}", .{ bold, cyan });
@@ -126,7 +126,7 @@ fn launcherCommandWidth(project: []const u8) usize {
     return width;
 }
 
-fn serviceGroups(ctx: Context) ![][]const u8 {
+fn serviceGroups(ctx: RenderContext) ![][]const u8 {
     var groups: std.ArrayList([]const u8) = .empty;
     errdefer groups.deinit(ctx.gpa);
     for (try ctx.cfg.services()) |service| {
@@ -191,7 +191,7 @@ test "dashboard.renderLauncher: renders launcher frame with grouped services" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const ctx: Context = .{
+    const ctx: RenderContext = .{
         .gpa = arena.allocator(),
         .cfg = cfg,
         .runner = .{ .gpa = arena.allocator(), .io = undefined },
