@@ -45,6 +45,7 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ self.tmux_path, "detach-client", "-t", client_name, "-E", command }, .{ .check = true, .discard = true });
     }
 
+    /// Caller owns the returned slice; free it with freeClientInfos.
     pub fn listClients(self: Client) ![]ClientInfo {
         const result = runner.captured(try self.runner.run(&.{ self.tmux_path, "list-clients", "-t", self.session, "-F", "#{client_name}" }, .{ .check = true }));
         defer self.gpa.free(result.stdout);
@@ -94,6 +95,7 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ self.tmux_path, "new-window", "-d", "-a", "-t", target_window, "-n", window_name, "-c", cwd, command }, .{ .check = true, .discard = true });
     }
 
+    /// Caller owns the returned slice; free it with freeWindowSizes.
     pub fn listWindowSizes(self: Client) ![]WindowSize {
         const result = runner.captured(try self.runner.run(&.{ self.tmux_path, "list-windows", "-t", self.session, "-F", "#{window_id}|#{window_width}|#{window_height}" }, .{ .check = true }));
         defer self.gpa.free(result.stdout);
@@ -186,6 +188,8 @@ pub const Client = struct {
         return info.consumeIntoObservation(state);
     }
 
+    /// Returns pane fields owned by the result; caller must deinit, unless the
+    /// value is moved into an observation via consumeIntoObservation.
     pub fn paneInfo(self: Client, window: []const u8) !PaneInfo {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
@@ -211,6 +215,8 @@ pub const Client = struct {
         return PaneInfo.init(self.gpa, std.mem.eql(u8, dead, "1"), exit_code, pid, command);
     }
 
+    /// Caller owns the returned slice. Returns an empty slice when the pane
+    /// cannot be captured, which is indistinguishable from a genuinely empty pane.
     pub fn capturePane(self: Client, window: []const u8) ![]const u8 {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
@@ -245,6 +251,7 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ self.tmux_path, "set-hook", "-t", self.session, name, command }, .{ .check = true, .discard = true });
     }
 
+    /// Caller owns the returned slice when the result is non-null.
     pub fn showOption(self: Client, name: []const u8) !?[]const u8 {
         const result = runner.captured(self.runner.run(&.{ self.tmux_path, "show-option", "-t", self.session, "-qv", name }, .{}) catch return null);
         defer self.gpa.free(result.stdout);
