@@ -117,8 +117,8 @@ pub const Client = struct {
             const width_text = fields.next() orelse return error.InvalidWindowSizeOutput;
             const height_text = fields.next() orelse return error.InvalidWindowSizeOutput;
             if (fields.next() != null) return error.InvalidWindowSizeOutput;
-            const width = try std.fmt.parseUnsigned(u16, width_text, 10);
-            const height = try std.fmt.parseUnsigned(u16, height_text, 10);
+            const width = std.fmt.parseUnsigned(u16, width_text, 10) catch return error.InvalidWindowSizeOutput;
+            const height = std.fmt.parseUnsigned(u16, height_text, 10) catch return error.InvalidWindowSizeOutput;
             try windows.ensureUnusedCapacity(self.gpa, 1);
             const owned_id = try self.gpa.dupe(u8, id);
             windows.appendAssumeCapacity(.{
@@ -597,6 +597,24 @@ test "tmux.resizeWindow: sizing helpers record and parse argv" {
     try runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "resize-window", "-x", "120", "-y", "39", "-t", "@1" });
     try runner.expectCommandArgv(recorder.commands.items[2], &.{ "tmux", "set-option", "-w", "-t", "@1", "window-size", "latest" });
     try runner.expectCommandArgv(recorder.commands.items[3], &.{ "tmux", "choose-tree", "-Zw", "-t", "%1" });
+}
+
+test "tmux.listWindowSizes: rejects malformed fixed-format output" {
+    const cases = [_][]const u8{
+        "@1|120\n",
+        "@1|120|39|extra\n",
+        "@1|wide|39\n",
+        "@1|120|tall\n",
+    };
+
+    for (cases) |stdout| {
+        var recorder = runner.Recorder.init(std.testing.allocator);
+        defer recorder.deinit();
+        try recorder.enqueue(stdout, "", .{ .exited = 0 });
+        const client = testClient(&recorder);
+
+        try std.testing.expectError(error.InvalidWindowSizeOutput, client.listWindowSizes());
+    }
 }
 
 test "tmux.paneRunning: accepts direct non-shell process" {
