@@ -779,13 +779,12 @@ fn checkOptionalString(gpa: std.mem.Allocator, node: Value, key: []const u8, pat
 
 fn checkOptionalRuntime(gpa: std.mem.Allocator, node: Value, path: []const u8, diags: *diagnostics.Diagnostics) !void {
     const value = node.object.get(keys.runtime) orelse return;
-    const runtime_path = try joinPath(gpa, path, keys.runtime);
     if (value != .string) {
-        try diags.add(runtime_path, "must be a string");
+        try diags.add(try joinPath(gpa, path, keys.runtime), "must be a string");
         return;
     }
     if (value.string.len > 0 and !isAllowedRuntime(value.string))
-        try diags.addFmt(runtime_path, "unknown runtime '{s}'", .{value.string});
+        try diags.addFmt(try joinPath(gpa, path, keys.runtime), "unknown runtime '{s}'", .{value.string});
 }
 
 fn checkKeys(gpa: std.mem.Allocator, node: Value, path: []const u8, allowed: []const []const u8, diags: *diagnostics.Diagnostics) !void {
