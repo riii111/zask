@@ -3,3 +3,9 @@
 zig-out/
 result
 result-*
+
+# Local-only agent config (treated as out-of-git; see CLAUDE.md)
+# No trailing slash: in linked worktrees .claude is a symlink, not a dir.
+.claude
+/AGENTS.md
+/CLAUDE.md
