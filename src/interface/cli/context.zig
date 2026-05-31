@@ -10,11 +10,23 @@ const tmux_client = @import("../../platform/tmux.zig");
 const validate = @import("../../model/validate.zig");
 const Runtime = @import("../../workflow/runtime.zig").Runtime;
 
+pub const ConfigSource = enum {
+    explicit,
+    named,
+    discovered,
+};
+
 pub const ParsedArgs = struct {
     config_path: ?[]const u8 = null,
+    config_source: ?ConfigSource = null,
     project: ?[]const u8 = null,
     command: []const u8,
     args: []const []const u8,
+};
+
+pub const ErrorContext = struct {
+    config_path: ?[]const u8 = null,
+    config_source: ?ConfigSource = null,
 };
 
 pub const CommandContext = struct {
@@ -23,6 +35,7 @@ pub const CommandContext = struct {
     environ: ?*const env.Map = null,
     argv0: []const u8 = "zask",
     diagnostics: ?*diagnostics.Diagnostics = null,
+    error_context: ?*ErrorContext = null,
 };
 
 pub const Context = struct {
@@ -51,24 +64,49 @@ pub fn isProjectAlias(argv0: []const u8) bool {
 
 fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
     const io = context.io orelse return error.MissingIo;
-    const path = try absoluteConfigPath(context.gpa, io, if (parsed.config_path) |p| p else try projectConfigPath(context.gpa, context.environ, parsed.project orelse return error.ProjectRequired));
+    const resolved = try resolveConfigPath(context.gpa, io, context, parsed);
+    if (context.error_context) |err_ctx| {
+        err_ctx.config_path = resolved.path;
+        err_ctx.config_source = resolved.source;
+    }
     const home = try paths.home(context.environ);
     const cfg = if (context.diagnostics) |diags|
-        try config.loadPathWithDiagnostics(context.gpa, io, path, home, diags)
+        try config.loadPathWithDiagnostics(context.gpa, io, resolved.path, home, diags)
     else
-        try config.loadPath(context.gpa, io, path, home);
+        try config.loadPath(context.gpa, io, resolved.path, home);
     const runner: proc_runner.Runner = .{ .gpa = context.gpa, .io = io };
     return .{
         .gpa = context.gpa,
         .io = io,
         .environ = context.environ,
         .cfg = cfg,
-        .config_path = path,
+        .config_path = resolved.path,
         .zask_path = try zaskExecutablePath(context.gpa, io, context.argv0),
         .runner_impl = runner,
         .tmux_impl = tmux_client.Client{ .gpa = context.gpa, .runner = runner, .session = try cfg.sessionName() },
         .docker_impl = docker_client.Compose{ .gpa = context.gpa, .runner = runner, .dir = try cfg.dockerDir(context.gpa), .file = cfg.dockerComposeFile() },
     };
+}
+
+const ResolvedConfigPath = struct {
+    path: []const u8,
+    source: ConfigSource,
+};
+
+fn resolveConfigPath(gpa: std.mem.Allocator, io: std.Io, context: CommandContext, parsed: ParsedArgs) !ResolvedConfigPath {
+    if (parsed.config_path) |path| {
+        return .{
+            .path = try absoluteConfigPath(gpa, io, path),
+            .source = parsed.config_source orelse .explicit,
+        };
+    }
+    if (parsed.project) |project| {
+        return .{
+            .path = try absoluteConfigPath(gpa, io, try projectConfigPath(gpa, context.environ, project)),
+            .source = .named,
+        };
+    }
+    return .{ .path = try discoverConfigPath(gpa, io), .source = .discovered };
 }
 
 pub fn projectConfigPath(gpa: std.mem.Allocator, environ: ?*const env.Map, project: []const u8) ![]const u8 {
@@ -82,6 +120,24 @@ fn absoluteConfigPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]c
         error.FileNotFound => return error.ConfigNotFound,
         else => return err,
     };
+}
+
+fn discoverConfigPath(gpa: std.mem.Allocator, io: std.Io) ![]const u8 {
+    const candidates = [_][]const u8{ "zask.json", ".zask.json" };
+    var found: ?[]const u8 = null;
+    for (candidates) |candidate| {
+        const path = std.Io.Dir.cwd().realPathFileAlloc(io, candidate, gpa) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        if (found) |existing| {
+            gpa.free(existing);
+            gpa.free(path);
+            return error.AmbiguousConfig;
+        }
+        found = path;
+    }
+    return found orelse error.ConfigNotFound;
 }
 
 fn absoluteExePath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
