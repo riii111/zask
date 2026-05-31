@@ -84,7 +84,8 @@ fn renderLauncher(ctx: Context, writer: *std.Io.Writer) !void {
     try writer.print("{s}\n", .{reset});
     try writer.print("{s}Commands:{s}\n", .{ bold, reset });
     const project = try ctx.cfg.projectName();
-    try writeCommandHelp(writer, project);
+    try writeCommandHelp(writer);
+    try writer.print("  {s}zask {s} <command>{s}  Named project form\n", .{ green, project, reset });
     try writer.writeByte('\n');
 }
 
@@ -109,19 +110,19 @@ const launcher_commands = [_]LauncherCommand{
     .{ .usage = "status", .description = "Show all status" },
 };
 
-fn writeCommandHelp(writer: *std.Io.Writer, project: []const u8) !void {
-    const usage_width = launcherCommandWidth(project);
+fn writeCommandHelp(writer: *std.Io.Writer) !void {
+    const usage_width = launcherCommandWidth();
     for (launcher_commands) |command| {
-        try writer.print("  {s}{s} {s}{s}", .{ green, project, command.usage, reset });
-        try writeSpaces(writer, usage_width - project.len - 1 - command.usage.len + 2);
+        try writer.print("  {s}zask {s}{s}", .{ green, command.usage, reset });
+        try writeSpaces(writer, usage_width - "zask ".len - command.usage.len + 2);
         try writer.print("{s}\n", .{command.description});
     }
 }
 
-fn launcherCommandWidth(project: []const u8) usize {
+fn launcherCommandWidth() usize {
     var width: usize = 0;
     for (launcher_commands) |command| {
-        width = @max(width, project.len + 1 + command.usage.len);
+        width = @max(width, "zask ".len + command.usage.len);
     }
     return width;
 }
@@ -208,4 +209,6 @@ test "dashboard.renderLauncher: renders launcher frame with grouped services" {
     try std.testing.expect(std.mem.indexOf(u8, body, "api") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, ":18080") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "npm run dev") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "zask open") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "zask demo <command>") != null);
 }

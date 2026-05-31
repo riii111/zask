@@ -112,7 +112,7 @@ fn render(ctx: Context, writer: *std.Io.Writer) !void {
         try writer.writeAll("\n");
     }
     try writer.print("\n{s}───────────────────────────────────────────────────────────────{s}\n", .{ ansi.dim, ansi.reset });
-    try writer.print("{s}{s} status | {s} logs <service>{s}", .{ ansi.dim, try ctx.cfg.projectName(), try ctx.cfg.projectName(), ansi.reset });
+    try writer.print("{s}zask status | zask logs <service> | zask {s} <command>{s}", .{ ansi.dim, try ctx.cfg.projectName(), ansi.reset });
 }
 
 fn dashboardMode(ctx: Context) ![]const u8 {
@@ -255,6 +255,32 @@ fn recordedCommandCount(recorder: *const proc_runner.Recorder, name: []const u8)
         if (command.argv.len > 0 and std.mem.eql(u8, command.argv[0], name)) count += 1;
     }
     return count;
+}
+
+test "monitor.render: shows local and named command forms" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("all\n", "", .{ .exited = 0 });
+    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const ctx: Context = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    try render(ctx, &out.writer);
+    const body = out.writer.buffered();
+
+    try std.testing.expect(std.mem.indexOf(u8, body, "zask status") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "zask logs <service>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "zask demo <command>") != null);
 }
 
 test "monitor.service: skips health checks unless pane is busy" {

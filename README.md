@@ -135,7 +135,22 @@ zask demo stop --all
 ## Commands
 
 ```text
+zask <command>
+zask <project> <command>
+zask --config <file> <command>
+
 zask init [project] [--root <path>] [--force]
+zask open [--docker|--<profile>]
+zask attach
+zask list
+zask status
+zask logs <service>
+zask start <--all|svc|group|docker>
+zask stop <--all|svc|group|docker>
+zask restart <svc|group|docker>
+zask re
+zask close
+
 zask <project> open [--docker|--<profile>]
 zask <project> attach
 zask <project> list
