@@ -7,7 +7,7 @@ const clear_line = "\r\x1b[2K";
 const clear_previous_line = "\x1b[1A\r\x1b[2K";
 const reset = "\x1b[0m";
 const yellow = "\x1b[33m";
-const gray = "\x1b[90m";
+const subtle = "\x1b[2m";
 const default_width = 80;
 const detail_indent = "  ";
 const command_prefix = "  $ ";
@@ -222,7 +222,7 @@ pub const Progress = struct {
             try self.writer.writeAll(line);
             return;
         }
-        try self.writer.writeAll(gray);
+        try self.writer.writeAll(subtle);
         try self.writer.writeAll(command_prefix);
         try self.writer.writeAll(line);
         try self.writer.writeAll(reset);
@@ -234,7 +234,7 @@ pub const Progress = struct {
             try self.writer.writeAll(line);
             return;
         }
-        try self.writer.writeAll(gray);
+        try self.writer.writeAll(subtle);
         try self.writer.writeAll(detail_indent);
         try self.writer.writeAll(line);
         try self.writer.writeAll(reset);
@@ -402,6 +402,27 @@ test "command progress: transient command status and detail redraw region" {
         "\r\x1b[2KStarting api...\r\x1b[2KStarting api...\n  $ npm run dev\r\x1b[2K\x1b[1A\r\x1b[2KStarting api...\n  $ npm run dev\n  Waiting for localhost:3000...\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2KStarting api...\n  $ npm run dev\n  Waiting for localhost:3000...\n  db ready\n  api listening\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2Kapi ready",
         writer.buffered(),
     );
+}
+
+test "command progress: colored nested lines use terminal default foreground" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var progress: Progress = .{
+        .gpa = arena.allocator(),
+        .writer = &writer,
+        .transient = true,
+        .color = true,
+    };
+
+    try progress.step("Starting api...\n", .{});
+    try progress.command("npm run dev\n", .{});
+    try progress.detail(&.{"listening"});
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\x1b[2m  $ npm run dev\x1b[0m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\x1b[2m  listening\x1b[0m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\x1b[90m") == null);
 }
 
 test "command progress: transient detail clear counts wrapped rows" {
