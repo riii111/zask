@@ -128,10 +128,13 @@ test "tmux_setup.applySessionOptions: keeps global attach hook while refreshing 
     const session = try std.fmt.allocPrint(arena.allocator(), "zask-test-{d}-hooks", .{std.c.getpid()});
     const client = tmuxClient(arena.allocator(), io, session);
 
+    const before_global_hooks = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "show-hooks", "-g", "client-attached" });
+    defer std.testing.allocator.free(before_global_hooks.stdout);
+    defer std.testing.allocator.free(before_global_hooks.stderr);
+
     client.killSession() catch {};
     try client.newSession("dashboard", "/tmp", "sleep 60");
     defer client.killSession() catch {};
-    try runDiscard(arena.allocator(), io, &.{ build_options.tmux_path, "set-hook", "-g", "client-attached", "display-message global" });
 
     try zask.tmux_setup.applySessionOptions(arena.allocator(), client, .{
         .project = "demo",
@@ -139,10 +142,10 @@ test "tmux_setup.applySessionOptions: keeps global attach hook while refreshing 
         .config_path = "/tmp/config.json",
     });
 
-    const global_hooks = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "show-hooks", "-g" });
+    const global_hooks = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "show-hooks", "-g", "client-attached" });
     defer std.testing.allocator.free(global_hooks.stdout);
     defer std.testing.allocator.free(global_hooks.stderr);
-    try std.testing.expect(std.mem.indexOf(u8, global_hooks.stdout, "client-attached[0] display-message global") != null);
+    try std.testing.expectEqualStrings(before_global_hooks.stdout, global_hooks.stdout);
 
     const hooks = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "show-hooks", "-t", session });
     defer std.testing.allocator.free(hooks.stdout);
