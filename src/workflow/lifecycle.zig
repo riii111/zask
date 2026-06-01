@@ -284,7 +284,7 @@ pub const Lifecycle = struct {
             defer pane.deinit(self.gpa);
             switch (serviceStartDecision(pane)) {
                 .no_op => {
-                    try progress.warn("{s} already running\n", .{service});
+                    try progress.info("{s} already running\n", .{service});
                     return;
                 },
                 .send_start => {},
@@ -348,7 +348,7 @@ pub const Lifecycle = struct {
             defer compose.deinit(self.gpa);
             switch (compose.state) {
                 .running => {
-                    try progress.warn("Docker already running\n", .{});
+                    try progress.info("Docker already running\n", .{});
                     return true;
                 },
                 .empty => {
@@ -364,14 +364,14 @@ pub const Lifecycle = struct {
                             };
                         },
                         .still_busy => {
-                            try progress.warn("Docker already starting\n", .{});
+                            try progress.info("Docker already starting\n", .{});
                             return true;
                         },
                         .tmux_unavailable => return error.TmuxUnavailable,
                     }
                 },
                 .unavailable => {
-                    try progress.warn("Docker already starting\n", .{});
+                    try progress.info("Docker already starting\n", .{});
                     return true;
                 },
             }

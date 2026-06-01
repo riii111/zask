@@ -88,7 +88,7 @@ pub const Progress = struct {
         try self.details.ensureUnusedCapacity(self.gpa, lines.len);
         const detail_gpa = self.resetDetailAllocator();
         for (lines) |line| {
-            self.details.appendAssumeCapacity(try detail_gpa.dupe(u8, std.mem.trimEnd(u8, line, "\r\n")));
+            self.details.appendAssumeCapacity(try displayLine(detail_gpa, line));
         }
         try self.renderRegion();
     }
@@ -199,7 +199,7 @@ pub const Progress = struct {
 
     fn message(self: *Progress, comptime fmt: []const u8, args: anytype) ![]const u8 {
         const rendered = try std.fmt.allocPrint(self.gpa, fmt, args);
-        return std.mem.trimEnd(u8, rendered, "\r\n");
+        return displayLine(self.gpa, rendered);
     }
 
     fn resetDetailAllocator(self: *Progress) std.mem.Allocator {
@@ -260,6 +260,15 @@ fn stripWarningPrefix(text: []const u8) []const u8 {
     const prefix = "Warning: ";
     if (std.mem.startsWith(u8, text, prefix)) return text[prefix.len..];
     return text;
+}
+
+fn displayLine(gpa: std.mem.Allocator, text: []const u8) ![]const u8 {
+    const trimmed = std.mem.trimEnd(u8, text, "\r\n");
+    const normalized = try gpa.dupe(u8, trimmed);
+    for (normalized) |*byte| {
+        if (byte.* == '\r' or byte.* == '\n') byte.* = ' ';
+    }
+    return normalized;
 }
 
 fn terminalWidth(io: std.Io, file: std.Io.File) !usize {
@@ -407,6 +416,29 @@ test "command progress: transient command status and detail redraw region" {
     );
 }
 
+test "command progress: transient embedded newlines stay on one row" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var progress: Progress = .{
+        .gpa = arena.allocator(),
+        .writer = &writer,
+        .transient = true,
+        .color = false,
+    };
+
+    try progress.step("Starting api...\n", .{});
+    try progress.command("npm run dev\nnode server\n", .{});
+    try progress.detail(&.{"line one\nline two"});
+    try progress.step("api ready\n", .{});
+
+    try std.testing.expectEqualStrings(
+        "\r\x1b[2KStarting api...\r\x1b[2KStarting api...\n  $ npm run dev node server\r\x1b[2K\x1b[1A\r\x1b[2KStarting api...\n  $ npm run dev node server\n  line one line two\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2Kapi ready",
+        writer.buffered(),
+    );
+}
+
 test "command progress: colored nested lines use terminal default foreground" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -426,6 +458,27 @@ test "command progress: colored nested lines use terminal default foreground" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\x1b[2m  $ npm run dev\x1b[0m") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\x1b[2m  listening\x1b[0m") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\x1b[90m") == null);
+}
+
+test "command progress: transient info persists without warning label" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var progress: Progress = .{
+        .gpa = arena.allocator(),
+        .writer = &writer,
+        .transient = true,
+        .color = true,
+    };
+
+    try progress.step("Starting api...\n", .{});
+    try progress.info("api already running\n", .{});
+
+    try std.testing.expectEqualStrings(
+        "\r\x1b[2KStarting api...\r\x1b[2Kapi already running\n",
+        writer.buffered(),
+    );
 }
 
 test "command progress: transient detail clear counts wrapped rows" {
