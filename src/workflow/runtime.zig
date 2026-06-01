@@ -8,6 +8,7 @@ const observations = @import("../model/observations.zig");
 const paths = @import("../platform/paths.zig");
 const pathing = @import("pathing.zig");
 const proc_runner = @import("../platform/runner.zig");
+const progress_mod = @import("progress.zig");
 const session_layout = @import("session_layout.zig");
 const tmux_client = @import("../platform/tmux.zig");
 const tmux_setup = @import("tmux_setup.zig");
@@ -118,39 +119,46 @@ pub const Runtime = struct {
     }
 
     pub fn open(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
+        var progress = progress_mod.Line.init(writer);
+        try self.openWithProgress(profile, &progress);
+    }
+
+    pub fn openWithProgress(self: Runtime, profile: []const u8, progress: anytype) !void {
         const guard = self.acquireLock() catch |err| switch (err) {
             error.LockBusy => switch (self.tmux().observeSession()) {
                 .active => return self.attachExistingWithRefreshedHooks(),
                 .missing => return err,
-                .unavailable => return waits.reportTmuxUnavailable(writer),
+                .unavailable => return waits.reportTmuxUnavailable(progress.raw()),
             },
             else => return err,
         };
         defer guard.release();
-        try self.openUnlocked(profile, writer);
+        try self.openUnlockedWithProgress(profile, progress);
     }
 
     pub fn openUnlocked(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
+        var progress = progress_mod.Line.init(writer);
+        try self.openUnlockedWithProgress(profile, &progress);
+    }
+
+    pub fn openUnlockedWithProgress(self: Runtime, profile: []const u8, progress: anytype) !void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const scratch = arena.allocator();
         switch (self.tmux().observeSession()) {
             .active => {
-                try writer.writeAll("Workspace already open. Starting resources...\n");
-                try writer.flush();
+                try progress.info("Workspace already open. Starting resources...\n", .{});
                 try self.installSessionOptions(scratch);
                 try tmux_setup.bindControlKeys(scratch, self.tmux());
-                try self.lifecycle().startAll(profile, writer, .observe);
-                try writer.writeAll("Attaching to workspace...\n");
-                try writer.flush();
+                try self.lifecycle().startAllWithProgress(profile, progress, .observe);
+                try progress.step("Attaching to workspace...\n", .{});
                 try self.attachExisting();
                 return;
             },
             .missing => {},
-            .unavailable => return waits.reportTmuxUnavailable(writer),
+            .unavailable => return waits.reportTmuxUnavailable(progress.raw()),
         }
-        try writer.writeAll("Opening workspace...\n");
-        try writer.flush();
+        try progress.step("Opening workspace...\n", .{});
         const tx = self.tmux();
         try self.openSessionWithDashboardWindow(scratch);
         errdefer tx.killSession() catch {};
@@ -159,9 +167,8 @@ pub const Runtime = struct {
         try self.appendServiceAndDockerWindows(scratch);
         try self.focusDashboard();
         try tmux_setup.bindControlKeys(scratch, tx);
-        try self.lifecycle().startAll(profile, writer, .prime);
-        try writer.writeAll("Attaching to workspace...\n");
-        try writer.flush();
+        try self.lifecycle().startAllWithProgress(profile, progress, .prime);
+        try progress.step("Attaching to workspace...\n", .{});
         try self.attachExisting();
     }
 

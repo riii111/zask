@@ -5,6 +5,7 @@ const config_value = @import("../model/config_value.zig");
 const lifecycle_mod = @import("lifecycle.zig");
 const pathing = @import("pathing.zig");
 const proc_runner = @import("../platform/runner.zig");
+const progress_mod = @import("progress.zig");
 const shell = @import("../platform/shell.zig");
 const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
@@ -62,21 +63,26 @@ pub fn runCommandPhase(ctx: anytype, phase: std.json.Value, profile: []const u8,
 }
 
 pub fn runServicePhase(ctx: anytype, phase: std.json.Value, profile: []const u8, writer: *std.Io.Writer, mode: lifecycle_mod.StartMode) !void {
+    var progress = progress_mod.Line.init(writer);
+    try runServicePhaseWithProgress(ctx, phase, profile, &progress, mode);
+}
+
+pub fn runServicePhaseWithProgress(ctx: anytype, phase: std.json.Value, profile: []const u8, progress: anytype, mode: lifecycle_mod.StartMode) !void {
     if (phase.object.get("groups")) |groups| if (groups == .array) {
         for (groups.array.items) |group_value| {
             if (group_value != .string) continue;
             const group = ctx.cfg.resolvePhaseGroup(profile, group_value.string);
             const svcs = try ctx.cfg.resolveGroup(ctx.gpa, group);
             defer ctx.gpa.free(svcs);
-            for (svcs) |svc| try ctx.startService(svc, writer, mode);
+            for (svcs) |svc| try ctx.startServiceWithProgress(svc, progress, mode);
         }
     };
     if (phase.object.get("wait_ports")) |ports| if (ports == .array) {
         for (ports.array.items) |port_value| if (port_value == .integer) {
-            try writePortWait(ctx, phase, profile, port_value.integer, writer);
+            try writePortWait(ctx, phase, profile, port_value.integer, progress);
             waits.waitForPort(ctx, port_value.integer, port_wait_timeout_seconds) catch |err| switch (err) {
                 error.PortNotReady => {
-                    try writePortFailure(ctx, phase, profile, port_value.integer, port_wait_timeout_seconds, writer);
+                    try writePortFailure(ctx, phase, profile, port_value.integer, port_wait_timeout_seconds, progress);
                     return error.StartupFailed;
                 },
                 else => return err,
@@ -91,16 +97,17 @@ fn phaseCwd(ctx: anytype, dir: []const u8) ![]const u8 {
     return pathing.absolute(ctx.gpa, ctx.runner.io, try std.fs.path.join(ctx.gpa, &.{ try ctx.cfg.projectRoot(ctx.gpa), dir }));
 }
 
-fn writePortWait(ctx: anytype, phase: std.json.Value, profile: []const u8, port: i64, writer: *std.Io.Writer) !void {
+fn writePortWait(ctx: anytype, phase: std.json.Value, profile: []const u8, port: i64, progress: anytype) !void {
     if (try serviceForPort(ctx, phase, profile, port)) |name| {
-        try writer.print("Waiting for {s} on localhost:{d}...\n", .{ name, port });
+        try progress.step("Waiting for {s} on localhost:{d}...\n", .{ name, port });
     } else {
-        try writer.print("Waiting for localhost:{d}...\n", .{port});
+        try progress.step("Waiting for localhost:{d}...\n", .{port});
     }
-    try writer.flush();
 }
 
-fn writePortFailure(ctx: anytype, phase: std.json.Value, profile: []const u8, port: i64, timeout: i64, writer: *std.Io.Writer) !void {
+fn writePortFailure(ctx: anytype, phase: std.json.Value, profile: []const u8, port: i64, timeout: i64, progress: anytype) !void {
+    try progress.failContext();
+    const writer = progress.raw();
     const service = try serviceForPort(ctx, phase, profile, port);
     const phase_label = phaseLabel(ctx, phase, profile);
     try writer.writeByte('\n');
