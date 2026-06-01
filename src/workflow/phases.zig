@@ -49,13 +49,19 @@ pub fn runPrechecks(ctx: anytype, writer: *std.Io.Writer) !void {
 }
 
 pub fn runCommandPhase(ctx: anytype, phase: std.json.Value, profile: []const u8, writer: *std.Io.Writer) !void {
+    var progress = progress_mod.Line.init(writer);
+    try runCommandPhaseWithProgress(ctx, phase, profile, &progress);
+}
+
+pub fn runCommandPhaseWithProgress(ctx: anytype, phase: std.json.Value, profile: []const u8, progress: anytype) !void {
     const command = try config.Config.commandPhaseCommand(phase, profile);
     const dir = config_value.optionalObjectString(phase, "dir", "");
     const cwd = try phaseCwd(ctx, dir);
+    try progress.beforeInteractive();
     _ = ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd, .interactive = true, .check = true }) catch |err| switch (err) {
         error.CommandFailed => {
             if (std.mem.eql(u8, config_value.optionalObjectString(phase, "on_fail", "abort"), "abort")) return error.CommandPhaseFailed;
-            try writer.writeAll("Warning: command phase failed\n");
+            try progress.warn("Warning: command phase failed\n", .{});
             return;
         },
         else => return err,

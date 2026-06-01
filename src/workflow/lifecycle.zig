@@ -58,7 +58,7 @@ pub const Lifecycle = struct {
             if (phase != .object) continue;
             switch (phases.phaseKind(phase)) {
                 .docker => try self.startDockerAndWaitWithProgress(progress),
-                .command => try phases.runCommandPhase(self, phase, profile, progress.raw()),
+                .command => try phases.runCommandPhaseWithProgress(self, phase, profile, progress),
                 .services => try phases.runServicePhaseWithProgress(self, phase, profile, progress, mode),
             }
         }
@@ -210,21 +210,10 @@ pub const Lifecycle = struct {
         return .{ .signaled = signaled, .failed = failed };
     }
 
-    fn startDockerAndWait(self: Lifecycle, writer: *std.Io.Writer) !void {
-        if (!self.cfg.dockerEnabled()) return;
-        var progress = progress_mod.Line.init(writer);
-        try self.startDockerAndWaitWithProgress(&progress);
-    }
-
     fn startDockerAndWaitWithProgress(self: Lifecycle, progress: anytype) !void {
         if (!self.cfg.dockerEnabled()) return;
         try self.ensureDockerStartedWithProgress(progress);
         try self.waitForDockerReadyWithProgress(progress);
-    }
-
-    fn waitForDockerReady(self: Lifecycle, writer: *std.Io.Writer) !void {
-        var progress = progress_mod.Line.init(writer);
-        try self.waitForDockerReadyWithProgress(&progress);
     }
 
     fn waitForDockerReadyWithProgress(self: Lifecycle, progress: anytype) !void {
@@ -331,12 +320,6 @@ pub const Lifecycle = struct {
         }
         try self.tmux.sendKeys(service, &.{"C-c"});
         try waits.waitForStopped(self, service, writer);
-    }
-
-    fn ensureDockerStarted(self: Lifecycle, writer: *std.Io.Writer) !void {
-        if (!self.cfg.dockerEnabled()) return;
-        var progress = progress_mod.Line.init(writer);
-        try self.ensureDockerStartedWithProgress(&progress);
     }
 
     fn ensureDockerStartedWithProgress(self: Lifecycle, progress: anytype) !void {
@@ -883,8 +866,9 @@ test "waits.ensureDockerReady: times out when compose never reports running" {
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
+    var progress = progress_mod.Line.init(&writer);
 
-    try std.testing.expectError(error.DockerNotReady, waits.ensureDockerReady(lifecycle, &writer));
+    try std.testing.expectError(error.DockerNotReady, waits.ensureDockerReadyWithProgress(lifecycle, &progress));
     try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items.len);
 }
 

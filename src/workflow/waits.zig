@@ -8,18 +8,12 @@ pub const docker_ready_interval = std.Io.Duration.fromSeconds(1);
 pub const docker_ready_settle = std.Io.Duration.fromSeconds(2);
 const port_wait_interval_seconds = 2;
 const port_wait_interval = std.Io.Duration.fromSeconds(port_wait_interval_seconds);
-const progress_mod = @import("progress.zig");
 
 pub const PaneIdleWait = enum {
     idle,
     still_busy,
     tmux_unavailable,
 };
-
-pub fn ensureDockerReady(ctx: anytype, writer: *std.Io.Writer) !void {
-    var progress = progress_mod.Line.init(writer);
-    try ensureDockerReadyWithProgress(ctx, &progress);
-}
 
 pub fn ensureDockerReadyWithProgress(ctx: anytype, progress: anytype) !void {
     try progress.step("Waiting for Docker containers...\n", .{});

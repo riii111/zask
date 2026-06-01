@@ -1,5 +1,10 @@
 const std = @import("std");
 
+/// Progress-compatible writers expose this small surface:
+/// `raw`, `step`, `info`, `warn`, `beforeInteractive`, `failContext`,
+/// `finishSuccess`, and `finishError`. Workflow code stays generic so it can
+/// use plain line output in tests/non-TTY paths and richer CLI rendering in
+/// interactive commands without importing interface code.
 pub const Line = struct {
     writer: *std.Io.Writer,
 
@@ -22,6 +27,10 @@ pub const Line = struct {
 
     pub fn warn(self: *Line, comptime fmt: []const u8, args: anytype) !void {
         try self.step(fmt, args);
+    }
+
+    pub fn beforeInteractive(self: *Line) !void {
+        try self.writer.flush();
     }
 
     pub fn failContext(self: *Line) !void {
