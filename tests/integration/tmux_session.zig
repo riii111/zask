@@ -128,9 +128,8 @@ test "tmux_setup.applySessionOptions: keeps global attach hook while refreshing 
     const session = try std.fmt.allocPrint(arena.allocator(), "zask-test-{d}-hooks", .{std.c.getpid()});
     const client = tmuxClient(arena.allocator(), io, session);
 
-    const before_global_hooks = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "show-hooks", "-g" });
-    defer std.testing.allocator.free(before_global_hooks.stdout);
-    defer std.testing.allocator.free(before_global_hooks.stderr);
+    const before_global_hooks = try optionalOutput(std.testing.allocator, io, &.{ build_options.tmux_path, "show-hooks", "-g" });
+    defer std.testing.allocator.free(before_global_hooks);
 
     client.killSession() catch {};
     try client.newSession("dashboard", "/tmp", "sleep 60");
@@ -142,10 +141,9 @@ test "tmux_setup.applySessionOptions: keeps global attach hook while refreshing 
         .config_path = "/tmp/config.json",
     });
 
-    const global_hooks = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "show-hooks", "-g" });
-    defer std.testing.allocator.free(global_hooks.stdout);
-    defer std.testing.allocator.free(global_hooks.stderr);
-    try std.testing.expectEqualStrings(before_global_hooks.stdout, global_hooks.stdout);
+    const global_hooks = try optionalOutput(std.testing.allocator, io, &.{ build_options.tmux_path, "show-hooks", "-g" });
+    defer std.testing.allocator.free(global_hooks);
+    try std.testing.expectEqualStrings(before_global_hooks, global_hooks);
 
     const hooks = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "show-hooks", "-t", session });
     defer std.testing.allocator.free(hooks.stdout);
@@ -349,6 +347,20 @@ fn run(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8) !std.proces
         return error.CommandFailed;
     }
     return result;
+}
+
+fn optionalOutput(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8) ![]const u8 {
+    const result = try std.process.run(gpa, io, .{
+        .argv = argv,
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
+    });
+    defer gpa.free(result.stderr);
+    if (result.term != .exited or result.term.exited != 0) {
+        gpa.free(result.stdout);
+        return gpa.dupe(u8, "");
+    }
+    return result.stdout;
 }
 
 fn runDiscard(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8) !void {
