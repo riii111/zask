@@ -227,14 +227,24 @@ pub const Client = struct {
         return result.stdout;
     }
 
+    /// Caller owns the returned tail; call `deinit` to free every line. Capture
+    /// failures are reported as an empty tail so startup diagnostics can still
+    /// render the surrounding context.
+    pub fn captureTail(self: Client, window: []const u8, max_lines: usize) !PaneTail {
+        const pane = try self.capturePane(window);
+        defer self.gpa.free(pane);
+        return try tailNonEmptyLines(self.gpa, pane, max_lines);
+    }
+
     /// Caller owns the returned slice. Capture failures are reported as an empty
     /// line so startup diagnostics can still render the surrounding context.
     /// The returned line is display-safe, but it may still contain sensitive log
     /// text; callers should keep it brief.
     pub fn captureLastLine(self: Client, window: []const u8) ![]const u8 {
-        const pane = try self.capturePane(window);
-        defer self.gpa.free(pane);
-        return try lastNonEmptyLine(self.gpa, pane);
+        const tail = try self.captureTail(window, 1);
+        defer tail.deinit(self.gpa);
+        if (tail.lines.len == 0) return self.gpa.dupe(u8, "");
+        return try self.gpa.dupe(u8, tail.lines[0]);
     }
 
     pub fn sendKeys(self: Client, window: []const u8, keys: []const []const u8) !void {
@@ -308,14 +318,39 @@ fn serverUnavailable(stderr: []const u8) bool {
         std.ascii.indexOfIgnoreCase(stderr, "operation not permitted") != null;
 }
 
-fn lastNonEmptyLine(gpa: std.mem.Allocator, pane: []const u8) ![]const u8 {
+fn tailNonEmptyLines(gpa: std.mem.Allocator, pane: []const u8, max_lines: usize) !PaneTail {
+    if (max_lines == 0) return .{ .lines = try gpa.alloc([]const u8, 0) };
+    const slots = try gpa.alloc([]const u8, max_lines);
+    defer gpa.free(slots);
+    var count: usize = 0;
+    var next: usize = 0;
+    errdefer {
+        var i: usize = 0;
+        while (i < count) : (i += 1) gpa.free(slots[i]);
+    }
+
     var lines = std.mem.splitScalar(u8, pane, '\n');
-    var latest: []const u8 = "";
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r\n\x00");
-        if (trimmed.len > 0) latest = trimmed;
+        if (trimmed.len == 0) continue;
+        const sanitized = try sanitizeLogLine(gpa, trimmed);
+        if (count < max_lines) {
+            slots[count] = sanitized;
+            count += 1;
+            continue;
+        }
+        gpa.free(slots[next]);
+        slots[next] = sanitized;
+        next = (next + 1) % max_lines;
     }
-    return sanitizeLogLine(gpa, latest);
+
+    const out = try gpa.alloc([]const u8, count);
+    errdefer gpa.free(out);
+    const start = if (count == max_lines) next else 0;
+    for (out, 0..) |*line, index| {
+        line.* = slots[(start + index) % max_lines];
+    }
+    return .{ .lines = out };
 }
 
 fn sanitizeLogLine(gpa: std.mem.Allocator, line: []const u8) ![]const u8 {
@@ -358,6 +393,15 @@ pub fn freeClientInfos(gpa: std.mem.Allocator, clients: []ClientInfo) void {
     for (clients) |client| client.deinit(gpa);
     gpa.free(clients);
 }
+
+pub const PaneTail = struct {
+    lines: []const []const u8,
+
+    pub fn deinit(self: PaneTail, gpa: std.mem.Allocator) void {
+        for (self.lines) |line| gpa.free(line);
+        gpa.free(self.lines);
+    }
+};
 
 pub const PaneInfo = struct {
     dead: bool,
@@ -775,6 +819,32 @@ test "tmux.captureLastLine: returns last non-empty pane line" {
     defer std.testing.allocator.free(line);
 
     try std.testing.expectEqualStrings("last error", line);
+}
+
+test "tmux.captureTail: returns last display-safe pane lines" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("first\nsecond\nbad\x1b[2J\rsecret\x07\n", "", .{ .exited = 0 });
+    const client = testClient(&recorder);
+
+    const tail = try client.captureTail("api", 2);
+    defer tail.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), tail.lines.len);
+    try std.testing.expectEqualStrings("second", tail.lines[0]);
+    try std.testing.expectEqualStrings("bad?[2J?secret?", tail.lines[1]);
+}
+
+test "tmux.captureTail: returns empty tail when no lines are requested" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("first\nsecond\n", "", .{ .exited = 0 });
+    const client = testClient(&recorder);
+
+    const tail = try client.captureTail("api", 0);
+    defer tail.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), tail.lines.len);
 }
 
 test "tmux.captureLastLine: replaces control bytes in pane output" {
