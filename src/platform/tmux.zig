@@ -842,6 +842,20 @@ test "tmux.captureTail: returns last display-safe pane lines" {
     try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "capture-pane", "-t", "demo:api", "-p", "-S", "-2" });
 }
 
+test "tmux.captureTail: keeps order after multiple ring wraps" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("one\ntwo\nthree\nfour\nfive\n", "", .{ .exited = 0 });
+    const client = testClient(&recorder);
+
+    const tail = try client.captureTail("api", 2);
+    defer tail.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), tail.lines.len);
+    try std.testing.expectEqualStrings("four", tail.lines[0]);
+    try std.testing.expectEqualStrings("five", tail.lines[1]);
+}
+
 test "tmux.captureTail: returns empty tail when no lines are requested" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();

@@ -14,6 +14,8 @@ const command_prefix = "  $ ";
 
 /// Stores transient step history in the command arena. It intentionally has no
 /// deinit; callers must pass an allocator whose lifetime covers the command.
+/// Detail lines use a nested arena so repeated live-tail redraws reuse memory
+/// instead of growing with every polling iteration.
 /// This is the TTY implementation of the workflow progress surface documented
 /// in `workflow/progress.zig`.
 pub const Progress = struct {
@@ -23,6 +25,7 @@ pub const Progress = struct {
     color: bool,
     history: std.ArrayList([]const u8) = .empty,
     details: std.ArrayList([]const u8) = .empty,
+    detail_arena: ?std.heap.ArenaAllocator = null,
     current_step: []const u8 = "",
     current_command: []const u8 = "",
     current_status: []const u8 = "",
@@ -55,7 +58,11 @@ pub const Progress = struct {
 
     pub fn info(self: *Progress, comptime fmt: []const u8, args: anytype) !void {
         if (!self.transient) return self.writePlain(fmt, args);
-        try self.persist(.info, fmt, args);
+        try self.clearRegion();
+        const text = try self.message(fmt, args);
+        try self.writer.writeAll(text);
+        try self.writer.writeByte('\n');
+        try self.writer.flush();
     }
 
     pub fn focus(self: *Progress, comptime fmt: []const u8, args: anytype) !void {
@@ -79,15 +86,16 @@ pub const Progress = struct {
         if (!self.transient) return;
         self.details.items.len = 0;
         try self.details.ensureUnusedCapacity(self.gpa, lines.len);
+        const detail_gpa = self.resetDetailAllocator();
         for (lines) |line| {
-            self.details.appendAssumeCapacity(try self.gpa.dupe(u8, std.mem.trimEnd(u8, line, "\r\n")));
+            self.details.appendAssumeCapacity(try detail_gpa.dupe(u8, std.mem.trimEnd(u8, line, "\r\n")));
         }
         try self.renderRegion();
     }
 
     pub fn warn(self: *Progress, comptime fmt: []const u8, args: anytype) !void {
         if (!self.transient) return self.writePlain(fmt, args);
-        try self.persist(.warn, fmt, args);
+        try self.persist(fmt, args);
     }
 
     pub fn beforeInteractive(self: *Progress) !void {
@@ -141,20 +149,16 @@ pub const Progress = struct {
         self.current_command = "";
         self.current_status = "";
         self.details.items.len = 0;
+        if (self.detail_arena) |*arena| _ = arena.reset(.retain_capacity);
         try self.renderRegion();
     }
 
-    fn persist(self: *Progress, level: Level, comptime fmt: []const u8, args: anytype) !void {
+    fn persist(self: *Progress, comptime fmt: []const u8, args: anytype) !void {
         try self.clearRegion();
         const text = try self.message(fmt, args);
-        if (level == .warn) {
-            try self.writeLabel(.warn);
-            try self.writer.writeAll(stripWarningPrefix(text));
-            try self.writer.writeByte('\n');
-        } else {
-            try self.writer.writeAll(text);
-            try self.writer.writeByte('\n');
-        }
+        try self.writeWarnLabel();
+        try self.writer.writeAll(stripWarningPrefix(text));
+        try self.writer.writeByte('\n');
         try self.writer.flush();
     }
 
@@ -198,20 +202,24 @@ pub const Progress = struct {
         return std.mem.trimEnd(u8, rendered, "\r\n");
     }
 
-    fn writeLabel(self: *Progress, level: Level) !void {
-        const text = switch (level) {
-            .warn => "WARN ",
-            .info => unreachable,
-        };
+    fn resetDetailAllocator(self: *Progress) std.mem.Allocator {
+        if (self.detail_arena == null) {
+            self.detail_arena = std.heap.ArenaAllocator.init(self.gpa);
+        }
+        if (self.detail_arena) |*arena| {
+            _ = arena.reset(.retain_capacity);
+            return arena.allocator();
+        }
+        unreachable;
+    }
+
+    fn writeWarnLabel(self: *Progress) !void {
+        const text = "WARN ";
         if (!self.color) {
             try self.writer.writeAll(text);
             return;
         }
-        const color = switch (level) {
-            .warn => yellow,
-            .info => unreachable,
-        };
-        try self.writer.writeAll(color);
+        try self.writer.writeAll(yellow);
         try self.writer.writeAll(text);
         try self.writer.writeAll(reset);
     }
@@ -239,11 +247,6 @@ pub const Progress = struct {
         try self.writer.writeAll(line);
         try self.writer.writeAll(reset);
     }
-};
-
-const Level = enum {
-    info,
-    warn,
 };
 
 fn colorEnabled(environ: ?*const env.Map) bool {

@@ -34,17 +34,6 @@ pub fn ensureDockerReadyWithProgress(ctx: anytype, progress: anytype) !void {
     return error.DockerNotReady;
 }
 
-pub fn waitForPort(ctx: anytype, port: i64, timeout: i64) !void {
-    const port_text = try std.fmt.allocPrint(ctx.gpa, "{d}", .{port});
-    defer ctx.gpa.free(port_text);
-    var elapsed: i64 = 0;
-    while (elapsed < timeout) : (elapsed += port_wait_interval_seconds) {
-        if (ctx.runner.run(&.{ "nc", "-z", "localhost", port_text }, .{ .check = true, .discard = true })) |_| return else |_| {}
-        ctx.runner.sleep(port_wait_interval);
-    }
-    return error.PortNotReady;
-}
-
 pub fn waitForPortWithProgress(ctx: anytype, port: i64, timeout: i64, service: ?[]const u8, progress: anytype) !void {
     const port_text = try std.fmt.allocPrint(ctx.gpa, "{d}", .{port});
     defer ctx.gpa.free(port_text);

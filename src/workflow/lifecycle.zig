@@ -199,7 +199,7 @@ pub const Lifecycle = struct {
                 .send_stop => if (self.tmux.sendKeys(name, &.{"C-c"})) |_| {
                     signaled.appendAssumeCapacity(name);
                     try progress.step("Stopping {s}...\n", .{name});
-                    try progress.command("C-c\n", .{});
+                    try progress.status("sending C-c\n", .{});
                     try waits.writePaneTail(self, name, progress);
                 } else |_| failed.appendAssumeCapacity(name),
                 .no_op => progress.step("  {s} ... already stopped\n", .{name}) catch {},
@@ -845,8 +845,9 @@ test "waits: report port and stop timeouts" {
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
+    var progress = progress_mod.Line.init(&writer);
 
-    try std.testing.expectError(error.PortNotReady, waits.waitForPort(lifecycle, 5432, 2));
+    try std.testing.expectError(error.PortNotReady, waits.waitForPortWithProgress(lifecycle, 5432, 2, null, &progress));
     try waits.waitForStopped(lifecycle, "api", &writer);
 
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api ... warning: may not have stopped") != null);
