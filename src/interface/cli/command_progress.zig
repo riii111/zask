@@ -9,17 +9,17 @@ const reset = "\x1b[0m";
 const yellow = "\x1b[33m";
 const subtle = "\x1b[2m";
 const default_width = 80;
-const detail_indent = "  ";
+const status_prefix = "  ";
+const detail_prefix = "  > ";
 const command_prefix = "  $ ";
 
-/// Command-lifetime state: success clears it, failure replays it.
+/// Command-lifetime state: success clears it, failure replays the current step.
 /// Detail redraws use a nested arena so long waits do not grow memory.
 pub const Progress = struct {
     gpa: std.mem.Allocator,
     writer: *std.Io.Writer,
     transient: bool,
     color: bool,
-    history: std.ArrayList([]const u8) = .empty,
     details: std.ArrayList([]const u8) = .empty,
     detail_arena: ?std.heap.ArenaAllocator = null,
     current_step: []const u8 = "",
@@ -103,8 +103,8 @@ pub const Progress = struct {
     pub fn failContext(self: *Progress) !void {
         if (!self.transient or self.failure_replayed) return;
         try self.clearRegion();
-        for (self.history.items) |item| {
-            try self.writer.writeAll(item);
+        if (self.current_step.len > 0) {
+            try self.writer.writeAll(self.current_step);
             try self.writer.writeByte('\n');
         }
         if (self.current_command.len > 0) {
@@ -112,7 +112,7 @@ pub const Progress = struct {
             try self.writer.writeByte('\n');
         }
         if (self.current_status.len > 0) {
-            try self.writeDetailLine(self.current_status);
+            try self.writeStatusLine(self.current_status);
             try self.writer.writeByte('\n');
         }
         for (self.details.items) |line| {
@@ -140,7 +140,6 @@ pub const Progress = struct {
 
     fn setStep(self: *Progress, comptime fmt: []const u8, args: anytype) !void {
         const text = try self.message(fmt, args);
-        try self.history.append(self.gpa, text);
         self.current_step = text;
         self.current_command = "";
         self.current_status = "";
@@ -172,13 +171,13 @@ pub const Progress = struct {
         }
         if (self.current_status.len > 0) {
             if (rows > 0) try self.writer.writeByte('\n');
-            try self.writeDetailLine(self.current_status);
-            rows += displayRows(detail_indent.len, self.current_status, self.width);
+            try self.writeStatusLine(self.current_status);
+            rows += displayRows(status_prefix.len, self.current_status, self.width);
         }
         for (self.details.items) |line| {
             if (rows > 0) try self.writer.writeByte('\n');
             try self.writeDetailLine(line);
-            rows += displayRows(detail_indent.len, line, self.width);
+            rows += displayRows(detail_prefix.len, line, self.width);
         }
         self.rendered_rows = rows;
         try self.writer.flush();
@@ -232,14 +231,26 @@ pub const Progress = struct {
         try self.writer.writeAll(reset);
     }
 
-    fn writeDetailLine(self: *Progress, line: []const u8) !void {
+    fn writeStatusLine(self: *Progress, line: []const u8) !void {
         if (!self.color) {
-            try self.writer.writeAll(detail_indent);
+            try self.writer.writeAll(status_prefix);
             try self.writer.writeAll(line);
             return;
         }
         try self.writer.writeAll(subtle);
-        try self.writer.writeAll(detail_indent);
+        try self.writer.writeAll(status_prefix);
+        try self.writer.writeAll(line);
+        try self.writer.writeAll(reset);
+    }
+
+    fn writeDetailLine(self: *Progress, line: []const u8) !void {
+        if (!self.color) {
+            try self.writer.writeAll(detail_prefix);
+            try self.writer.writeAll(line);
+            return;
+        }
+        try self.writer.writeAll(subtle);
+        try self.writer.writeAll(detail_prefix);
         try self.writer.writeAll(line);
         try self.writer.writeAll(reset);
     }
@@ -343,7 +354,7 @@ test "command progress: non-tty keeps line output" {
     , writer.buffered());
 }
 
-test "command progress: failure replays transient history" {
+test "command progress: failure replays current transient context" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var buffer: [256]u8 = undefined;
@@ -361,7 +372,7 @@ test "command progress: failure replays transient history" {
     try progress.raw().writeAll("Error: api did not become ready\n");
 
     try std.testing.expectEqualStrings(
-        "\r\x1b[2KStarting api...\r\x1b[2KWaiting for api...\r\x1b[2KStarting api...\nWaiting for api...\nError: api did not become ready\n",
+        "\r\x1b[2KStarting api...\r\x1b[2KWaiting for api...\r\x1b[2KWaiting for api...\nError: api did not become ready\n",
         writer.buffered(),
     );
 }
@@ -407,7 +418,7 @@ test "command progress: transient command status and detail redraw region" {
     try progress.step("api ready\n", .{});
 
     try std.testing.expectEqualStrings(
-        "\r\x1b[2KStarting api...\r\x1b[2KStarting api...\n  $ npm run dev\r\x1b[2K\x1b[1A\r\x1b[2KStarting api...\n  $ npm run dev\n  Waiting for localhost:3000...\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2KStarting api...\n  $ npm run dev\n  Waiting for localhost:3000...\n  db ready\n  api listening\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2Kapi ready",
+        "\r\x1b[2KStarting api...\r\x1b[2KStarting api...\n  $ npm run dev\r\x1b[2K\x1b[1A\r\x1b[2KStarting api...\n  $ npm run dev\n  Waiting for localhost:3000...\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2KStarting api...\n  $ npm run dev\n  Waiting for localhost:3000...\n  > db ready\n  > api listening\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2Kapi ready",
         writer.buffered(),
     );
 }
@@ -430,7 +441,7 @@ test "command progress: transient embedded newlines stay on one row" {
     try progress.step("api ready\n", .{});
 
     try std.testing.expectEqualStrings(
-        "\r\x1b[2KStarting api...\r\x1b[2KStarting api...\n  $ npm run dev node server\r\x1b[2K\x1b[1A\r\x1b[2KStarting api...\n  $ npm run dev node server\n  line one line two\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2Kapi ready",
+        "\r\x1b[2KStarting api...\r\x1b[2KStarting api...\n  $ npm run dev node server\r\x1b[2K\x1b[1A\r\x1b[2KStarting api...\n  $ npm run dev node server\n  > line one line two\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2Kapi ready",
         writer.buffered(),
     );
 }
@@ -452,7 +463,7 @@ test "command progress: colored nested lines use terminal default foreground" {
     try progress.detail(&.{"listening"});
 
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\x1b[2m  $ npm run dev\x1b[0m") != null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\x1b[2m  listening\x1b[0m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\x1b[2m  > listening\x1b[0m") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\x1b[90m") == null);
 }
 
@@ -495,7 +506,7 @@ test "command progress: transient detail clear counts wrapped rows" {
     try progress.finishSuccess();
 
     try std.testing.expectEqualStrings(
-        "\r\x1b[2KWait\r\x1b[2KWait\n  1234567890123\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K",
+        "\r\x1b[2KWait\r\x1b[2KWait\n  > 1234567890123\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K",
         writer.buffered(),
     );
 }
