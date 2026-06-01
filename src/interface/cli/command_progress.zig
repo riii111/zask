@@ -6,9 +6,10 @@ const clear_line = "\r\x1b[2K";
 const clear_previous_line = "\x1b[1A\r\x1b[2K";
 const reset = "\x1b[0m";
 const yellow = "\x1b[33m";
-const cyan = "\x1b[36m";
 const gray = "\x1b[90m";
 const default_width = 80;
+const detail_indent = "  ";
+const command_prefix = "  $ ";
 
 /// Stores transient step history in the command arena. It intentionally has no
 /// deinit; callers must pass an allocator whose lifetime covers the command.
@@ -20,6 +21,8 @@ pub const Progress = struct {
     history: std.ArrayList([]const u8) = .empty,
     details: std.ArrayList([]const u8) = .empty,
     current_step: []const u8 = "",
+    current_command: []const u8 = "",
+    current_status: []const u8 = "",
     rendered_rows: usize = 0,
     width: usize = default_width,
     failure_replayed: bool = false,
@@ -43,16 +46,29 @@ pub const Progress = struct {
 
     pub fn step(self: *Progress, comptime fmt: []const u8, args: anytype) !void {
         if (!self.transient) return self.writePlain(fmt, args);
-        const text = try self.message(fmt, args);
-        try self.history.append(self.gpa, text);
-        self.current_step = text;
-        self.details.items.len = 0;
-        try self.renderRegion();
+        try self.setStep(fmt, args);
     }
 
     pub fn info(self: *Progress, comptime fmt: []const u8, args: anytype) !void {
         if (!self.transient) return self.writePlain(fmt, args);
         try self.persist(.info, fmt, args);
+    }
+
+    pub fn focus(self: *Progress, comptime fmt: []const u8, args: anytype) !void {
+        if (!self.transient) return;
+        try self.setStep(fmt, args);
+    }
+
+    pub fn command(self: *Progress, comptime fmt: []const u8, args: anytype) !void {
+        if (!self.transient) return;
+        self.current_command = try self.message(fmt, args);
+        try self.renderRegion();
+    }
+
+    pub fn status(self: *Progress, comptime fmt: []const u8, args: anytype) !void {
+        if (!self.transient) return self.writePlain(fmt, args);
+        self.current_status = try self.message(fmt, args);
+        try self.renderRegion();
     }
 
     pub fn detail(self: *Progress, lines: []const []const u8) !void {
@@ -80,8 +96,15 @@ pub const Progress = struct {
         if (!self.transient or self.failure_replayed) return;
         try self.clearRegion();
         for (self.history.items) |item| {
-            try self.writeLabel(.info);
             try self.writer.writeAll(item);
+            try self.writer.writeByte('\n');
+        }
+        if (self.current_command.len > 0) {
+            try self.writeCommandLine(self.current_command);
+            try self.writer.writeByte('\n');
+        }
+        if (self.current_status.len > 0) {
+            try self.writeDetailLine(self.current_status);
             try self.writer.writeByte('\n');
         }
         for (self.details.items) |line| {
@@ -107,15 +130,26 @@ pub const Progress = struct {
         try self.writer.flush();
     }
 
+    fn setStep(self: *Progress, comptime fmt: []const u8, args: anytype) !void {
+        const text = try self.message(fmt, args);
+        try self.history.append(self.gpa, text);
+        self.current_step = text;
+        self.current_command = "";
+        self.current_status = "";
+        self.details.items.len = 0;
+        try self.renderRegion();
+    }
+
     fn persist(self: *Progress, level: Level, comptime fmt: []const u8, args: anytype) !void {
         try self.clearRegion();
-        try self.writeLabel(level);
+        const text = try self.message(fmt, args);
         if (level == .warn) {
-            const text = try self.message(fmt, args);
+            try self.writeLabel(.warn);
             try self.writer.writeAll(stripWarningPrefix(text));
             try self.writer.writeByte('\n');
         } else {
-            try self.writer.print(fmt, args);
+            try self.writer.writeAll(text);
+            try self.writer.writeByte('\n');
         }
         try self.writer.flush();
     }
@@ -124,14 +158,23 @@ pub const Progress = struct {
         try self.clearRegion();
         var rows: usize = 0;
         if (self.current_step.len > 0) {
-            try self.writeLabel(.info);
             try self.writer.writeAll(self.current_step);
-            rows += displayRows("INFO ".len + self.current_step.len, self.width);
+            rows += displayRows(self.current_step.len, self.width);
+        }
+        if (self.current_command.len > 0) {
+            if (rows > 0) try self.writer.writeByte('\n');
+            try self.writeCommandLine(self.current_command);
+            rows += displayRows(command_prefix.len + self.current_command.len, self.width);
+        }
+        if (self.current_status.len > 0) {
+            if (rows > 0) try self.writer.writeByte('\n');
+            try self.writeDetailLine(self.current_status);
+            rows += displayRows(detail_indent.len + self.current_status.len, self.width);
         }
         for (self.details.items) |line| {
             if (rows > 0) try self.writer.writeByte('\n');
             try self.writeDetailLine(line);
-            rows += displayRows("> ".len + line.len, self.width);
+            rows += displayRows(detail_indent.len + line.len, self.width);
         }
         self.rendered_rows = rows;
         try self.writer.flush();
@@ -153,30 +196,42 @@ pub const Progress = struct {
 
     fn writeLabel(self: *Progress, level: Level) !void {
         const text = switch (level) {
-            .info => "INFO ",
             .warn => "WARN ",
+            .info => unreachable,
         };
         if (!self.color) {
             try self.writer.writeAll(text);
             return;
         }
         const color = switch (level) {
-            .info => cyan,
             .warn => yellow,
+            .info => unreachable,
         };
         try self.writer.writeAll(color);
         try self.writer.writeAll(text);
         try self.writer.writeAll(reset);
     }
 
-    fn writeDetailLine(self: *Progress, line: []const u8) !void {
+    fn writeCommandLine(self: *Progress, line: []const u8) !void {
         if (!self.color) {
-            try self.writer.writeAll("> ");
+            try self.writer.writeAll(command_prefix);
             try self.writer.writeAll(line);
             return;
         }
         try self.writer.writeAll(gray);
-        try self.writer.writeAll("> ");
+        try self.writer.writeAll(command_prefix);
+        try self.writer.writeAll(line);
+        try self.writer.writeAll(reset);
+    }
+
+    fn writeDetailLine(self: *Progress, line: []const u8) !void {
+        if (!self.color) {
+            try self.writer.writeAll(detail_indent);
+            try self.writer.writeAll(line);
+            return;
+        }
+        try self.writer.writeAll(gray);
+        try self.writer.writeAll(detail_indent);
         try self.writer.writeAll(line);
         try self.writer.writeAll(reset);
     }
@@ -255,7 +310,7 @@ test "command progress: failure replays transient history" {
     try progress.raw().writeAll("Error: api did not become ready\n");
 
     try std.testing.expectEqualStrings(
-        "\r\x1b[2KINFO Starting api...\r\x1b[2KINFO Waiting for api...\r\x1b[2KINFO Starting api...\nINFO Waiting for api...\nError: api did not become ready\n",
+        "\r\x1b[2KStarting api...\r\x1b[2KWaiting for api...\r\x1b[2KStarting api...\nWaiting for api...\nError: api did not become ready\n",
         writer.buffered(),
     );
 }
@@ -277,12 +332,12 @@ test "command progress: transient success clears final step" {
     try progress.finishSuccess();
 
     try std.testing.expectEqualStrings(
-        "\r\x1b[2KINFO Opening workspace...\r\x1b[2KINFO Starting api...\r\x1b[2K",
+        "\r\x1b[2KOpening workspace...\r\x1b[2KStarting api...\r\x1b[2K",
         writer.buffered(),
     );
 }
 
-test "command progress: transient detail redraws multi-line region" {
+test "command progress: transient command status and detail redraw region" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var buffer: [512]u8 = undefined;
@@ -294,12 +349,14 @@ test "command progress: transient detail redraws multi-line region" {
         .color = false,
     };
 
-    try progress.step("Waiting for api...\n", .{});
+    try progress.step("Starting api...\n", .{});
+    try progress.command("npm run dev\n", .{});
+    try progress.status("Waiting for localhost:3000...\n", .{});
     try progress.detail(&.{ "db ready", "api listening" });
     try progress.step("api ready\n", .{});
 
     try std.testing.expectEqualStrings(
-        "\r\x1b[2KINFO Waiting for api...\r\x1b[2KINFO Waiting for api...\n> db ready\n> api listening\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2KINFO api ready",
+        "\r\x1b[2KStarting api...\r\x1b[2KStarting api...\n  $ npm run dev\r\x1b[2K\x1b[1A\r\x1b[2KStarting api...\n  $ npm run dev\n  Waiting for localhost:3000...\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2KStarting api...\n  $ npm run dev\n  Waiting for localhost:3000...\n  db ready\n  api listening\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2Kapi ready",
         writer.buffered(),
     );
 }
@@ -322,7 +379,7 @@ test "command progress: transient detail clear counts wrapped rows" {
     try progress.finishSuccess();
 
     try std.testing.expectEqualStrings(
-        "\r\x1b[2KINFO Wait\r\x1b[2KINFO Wait\n> 1234567890123\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K",
+        "\r\x1b[2KWait\r\x1b[2KWait\n  1234567890123\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K",
         writer.buffered(),
     );
 }
@@ -364,7 +421,7 @@ test "command progress: clears transient line before interactive command" {
     try progress.raw().writeAll("command output\n");
 
     try std.testing.expectEqualStrings(
-        "\r\x1b[2KINFO Docker containers ready\r\x1b[2Kcommand output\n",
+        "\r\x1b[2KDocker containers ready\r\x1b[2Kcommand output\n",
         writer.buffered(),
     );
 }

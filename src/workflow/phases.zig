@@ -86,7 +86,7 @@ pub fn runServicePhaseWithProgress(ctx: anytype, phase: std.json.Value, profile:
     if (phase.object.get("wait_ports")) |ports| if (ports == .array) {
         for (ports.array.items) |port_value| if (port_value == .integer) {
             const service = try serviceForPort(ctx, phase, profile, port_value.integer);
-            try writePortWait(port_value.integer, service, progress);
+            try writePortWait(ctx, port_value.integer, service, progress);
             waits.waitForPortWithProgress(ctx, port_value.integer, port_wait_timeout_seconds, service, progress) catch |err| switch (err) {
                 error.PortNotReady => {
                     try writePortFailure(ctx, phase, profile, port_value.integer, port_wait_timeout_seconds, progress);
@@ -104,11 +104,16 @@ fn phaseCwd(ctx: anytype, dir: []const u8) ![]const u8 {
     return pathing.absolute(ctx.gpa, ctx.runner.io, try std.fs.path.join(ctx.gpa, &.{ try ctx.cfg.projectRoot(ctx.gpa), dir }));
 }
 
-fn writePortWait(port: i64, service: ?[]const u8, progress: anytype) !void {
+fn writePortWait(ctx: anytype, port: i64, service: ?[]const u8, progress: anytype) !void {
     if (service) |name| {
-        try progress.step("Waiting for {s} on localhost:{d}...\n", .{ name, port });
+        const value = try ctx.cfg.findService(name);
+        const command = try config.Config.serviceStartCommand(ctx.gpa, value);
+        try progress.focus("Starting {s}...\n", .{name});
+        try progress.command("{s}\n", .{command});
+        try progress.status("Waiting for {s} on localhost:{d}...\n", .{ name, port });
     } else {
-        try progress.step("Waiting for localhost:{d}...\n", .{port});
+        try progress.step("Checking localhost:{d}\n", .{port});
+        try progress.status("Waiting for localhost:{d}...\n", .{port});
     }
 }
 
@@ -391,6 +396,7 @@ test "phases.runServicePhase: reports unmatched port without service hints" {
 
     try std.testing.expectEqualStrings(
         \\Starting api...
+        \\Checking localhost:5432
         \\Waiting for localhost:5432...
         \\
         \\Error: port 5432 did not become ready

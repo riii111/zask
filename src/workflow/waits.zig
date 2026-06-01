@@ -17,7 +17,7 @@ pub const PaneIdleWait = enum {
 };
 
 pub fn ensureDockerReadyWithProgress(ctx: anytype, progress: anytype) !void {
-    try progress.step("Waiting for Docker containers...\n", .{});
+    try progress.status("Waiting for Docker containers...\n", .{});
     var attempt: i64 = 0;
     const max_attempts = ctx.cfg.dockerWaitTimeout();
     while (attempt < max_attempts) : (attempt += 1) {
@@ -26,7 +26,7 @@ pub fn ensureDockerReadyWithProgress(ctx: anytype, progress: anytype) !void {
         try writePaneTail(ctx, "docker", progress);
         if (compose.state == .running) {
             ctx.runner.sleep(docker_ready_settle);
-            try progress.step("Docker containers ready\n", .{});
+            try progress.status("Docker containers ready\n", .{});
             return;
         }
         ctx.runner.sleep(docker_ready_interval);

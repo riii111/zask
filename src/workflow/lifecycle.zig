@@ -161,6 +161,7 @@ pub const Lifecycle = struct {
     pub fn stopDockerWithProgress(self: Lifecycle, progress: anytype) !void {
         if (!self.cfg.dockerEnabled()) return;
         try progress.step("Stopping Docker...\n", .{});
+        try progress.command("docker compose down\n", .{});
         // Interrupt the pane's `compose up` so the window returns to a shell, but
         // do not wait for it: `compose down` cleanly stops containers regardless
         // of the attached `up`, so the old settle before it was dead time.
@@ -202,7 +203,8 @@ pub const Lifecycle = struct {
             switch (serviceStopDecision(pane.state)) {
                 .send_stop => if (self.tmux.sendKeys(name, &.{"C-c"})) |_| {
                     signaled.appendAssumeCapacity(name);
-                    try progress.step("  {s} ... stopping\n", .{name});
+                    try progress.step("Stopping {s}...\n", .{name});
+                    try progress.command("C-c\n", .{});
                     try waits.writePaneTail(self, name, progress);
                 } else |_| failed.appendAssumeCapacity(name),
                 .no_op => progress.step("  {s} ... already stopped\n", .{name}) catch {},
@@ -302,6 +304,7 @@ pub const Lifecycle = struct {
         const service_dir = try pathing.absolute(self.gpa, self.runner.io, try self.cfg.serviceDir(self.gpa, value));
         const start_command = try config.Config.serviceStartCommand(self.gpa, value);
         try progress.step("Starting {s}...\n", .{service});
+        try progress.command("{s}\n", .{start_command});
         try self.tmux.respawnPane(service, service_dir, start_command);
     }
 
@@ -332,6 +335,7 @@ pub const Lifecycle = struct {
         const docker_dir = try pathing.absolute(self.gpa, self.runner.io, try self.cfg.dockerDir(self.gpa));
         const compose_file = try shell.quote(self.gpa, self.cfg.dockerComposeFile());
         const cmd = try std.fmt.allocPrint(self.gpa, "COMPOSE_MENU=false docker compose -f {s} up", .{compose_file});
+        try progress.command("{s}\n", .{cmd});
         try self.tmux.respawnPane("docker", docker_dir, cmd);
     }
 
