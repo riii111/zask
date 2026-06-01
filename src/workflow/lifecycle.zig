@@ -83,14 +83,19 @@ pub const Lifecycle = struct {
     }
 
     pub fn teardownResources(self: Lifecycle, writer: *std.Io.Writer) !void {
+        var progress = progress_mod.Line.init(writer);
+        try self.teardownResourcesWithProgress(&progress);
+    }
+
+    pub fn teardownResourcesWithProgress(self: Lifecycle, progress: anytype) !void {
         const services = try self.cfg.services();
-        if (services.len > 0) try writeProgress(writer, "Stopping services...\n", .{});
+        if (services.len > 0) try progress.step("Stopping services...\n", .{});
         // close kills the session right after, so skip the wait and ignore failed
         // signals (the kill stops whatever is left) — unlike stopAll, which keeps
         // the session and must confirm.
-        var broadcast = try self.broadcastStop(services, writer);
+        var broadcast = try self.broadcastStopWithProgress(services, progress);
         broadcast.deinit(self.gpa);
-        try self.stopDocker(writer);
+        try self.stopDockerWithProgress(progress);
     }
 
     pub fn startTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
@@ -149,8 +154,13 @@ pub const Lifecycle = struct {
     }
 
     pub fn stopDocker(self: Lifecycle, writer: *std.Io.Writer) !void {
+        var progress = progress_mod.Line.init(writer);
+        try self.stopDockerWithProgress(&progress);
+    }
+
+    pub fn stopDockerWithProgress(self: Lifecycle, progress: anytype) !void {
         if (!self.cfg.dockerEnabled()) return;
-        try writeProgress(writer, "Stopping Docker...\n", .{});
+        try progress.step("Stopping Docker...\n", .{});
         // Interrupt the pane's `compose up` so the window returns to a shell, but
         // do not wait for it: `compose down` cleanly stops containers regardless
         // of the attached `up`, so the old settle before it was dead time.
@@ -158,7 +168,7 @@ pub const Lifecycle = struct {
             self.tmux.sendKeys("docker", &.{"C-c"}) catch {};
         }
         self.docker.down() catch {
-            try writeProgress(writer, "Warning: docker compose down failed\n", .{});
+            try progress.warn("Warning: docker compose down failed\n", .{});
         };
     }
 
@@ -171,6 +181,11 @@ pub const Lifecycle = struct {
     /// front so a record can never be lost to an allocation failure mid-loop.
     /// Reverse order stops dependents first; the caller owns and frees both lists.
     fn broadcastStop(self: Lifecycle, services: []const std.json.Value, writer: *std.Io.Writer) !StopBroadcast {
+        var progress = progress_mod.Line.init(writer);
+        return self.broadcastStopWithProgress(services, &progress);
+    }
+
+    fn broadcastStopWithProgress(self: Lifecycle, services: []const std.json.Value, progress: anytype) !StopBroadcast {
         var signaled: std.ArrayList([]const u8) = .empty;
         errdefer signaled.deinit(self.gpa);
         try signaled.ensureTotalCapacity(self.gpa, services.len);
@@ -188,7 +203,7 @@ pub const Lifecycle = struct {
                     signaled.appendAssumeCapacity(name)
                 else |_|
                     failed.appendAssumeCapacity(name),
-                .no_op => writeProgress(writer, "  {s} ... already stopped\n", .{name}) catch {},
+                .no_op => progress.step("  {s} ... already stopped\n", .{name}) catch {},
                 .tmux_unavailable => failed.appendAssumeCapacity(name),
             }
         }

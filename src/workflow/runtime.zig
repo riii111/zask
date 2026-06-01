@@ -173,38 +173,53 @@ pub const Runtime = struct {
     }
 
     pub fn close(self: Runtime, writer: *std.Io.Writer) !void {
+        var progress = progress_mod.Line.init(writer);
+        try self.closeWithProgress(&progress);
+    }
+
+    pub fn closeWithProgress(self: Runtime, progress: anytype) !void {
         const guard = self.acquireLock() catch |err| switch (err) {
             error.LockBusy => switch (self.tmux().observeSession()) {
-                .unavailable => return waits.reportTmuxUnavailable(writer),
+                .unavailable => return waits.reportTmuxUnavailable(progress.raw()),
                 else => return err,
             },
             else => return err,
         };
         defer guard.release();
-        try self.closeUnlocked(writer);
+        try self.closeUnlockedWithProgress(progress);
     }
 
     /// Teardown order is load-bearing: stop services and docker first so their
     /// stop signals reach the live panes, let them settle, then kill the tmux
     /// session. Killing the session first would orphan those resources.
     fn closeUnlocked(self: Runtime, writer: *std.Io.Writer) !void {
+        var progress = progress_mod.Line.init(writer);
+        try self.closeUnlockedWithProgress(&progress);
+    }
+
+    fn closeUnlockedWithProgress(self: Runtime, progress: anytype) !void {
         switch (self.tmux().observeSession()) {
             .active => {},
             .missing => {
-                try writer.writeAll("Session not running\n");
+                try progress.raw().writeAll("Session not running\n");
                 return;
             },
-            .unavailable => return waits.reportTmuxUnavailable(writer),
+            .unavailable => return waits.reportTmuxUnavailable(progress.raw()),
         }
         // kill-session below stops services regardless, so skip the graceful poll;
         // `stop --all` keeps it since it leaves the session running.
-        try self.lifecycle().teardownResources(writer);
+        try self.lifecycle().teardownResourcesWithProgress(progress);
         self.runner().sleep(close_kill_settle);
         const tx = self.tmux();
         try tx.killSession();
     }
 
     pub fn re(self: Runtime, writer: *std.Io.Writer) !void {
+        var progress = progress_mod.Line.init(writer);
+        try self.reWithProgress(&progress);
+    }
+
+    pub fn reWithProgress(self: Runtime, progress: anytype) !void {
         if (try self.inTmux()) {
             const tx = self.tmux();
             const command = try zask_command.invoke(self.gpa, self.zask_path, self.config_path, "re");
@@ -216,13 +231,13 @@ pub const Runtime = struct {
             error.LockBusy => switch (self.tmux().observeSession()) {
                 .active => return self.detachSingleClientForRe(),
                 .missing => return err,
-                .unavailable => return waits.reportTmuxUnavailable(writer),
+                .unavailable => return waits.reportTmuxUnavailable(progress.raw()),
             },
             else => return err,
         };
         defer guard.release();
-        try self.closeUnlocked(writer);
-        try self.openUnlocked("all", writer);
+        try self.closeUnlockedWithProgress(progress);
+        try self.openUnlockedWithProgress("all", progress);
     }
 
     pub fn start(self: Runtime, target: []const u8, writer: *std.Io.Writer) !void {

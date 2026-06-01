@@ -1,4 +1,5 @@
 const std = @import("std");
+const command_progress = @import("command_progress.zig");
 const Context = @import("context.zig").Context;
 
 pub const Options = struct {
@@ -15,7 +16,12 @@ pub const Options = struct {
 pub fn run(ctx: *Context, opts: Options) !void {
     _ = opts;
     const rt = try ctx.runtime();
-    try rt.close(ctx.writer);
+    var progress = command_progress.Progress.init(ctx.base.gpa, rt.io, ctx.base.environ, ctx.writer);
+    rt.closeWithProgress(&progress) catch |err| {
+        try progress.finishError();
+        return err;
+    };
+    try progress.finishSuccess();
 }
 
 // -----------------------------------------------------------------------------
