@@ -152,6 +152,7 @@ pub const Runtime = struct {
                 try tmux_setup.bindControlKeys(scratch, self.tmux());
                 try self.lifecycle().startAllWithProgress(profile, progress, .observe);
                 try progress.step("Attaching to workspace...\n", .{});
+                try progress.beforeInteractive();
                 try self.attachExisting();
                 return;
             },
@@ -169,6 +170,7 @@ pub const Runtime = struct {
         try tmux_setup.bindControlKeys(scratch, tx);
         try self.lifecycle().startAllWithProgress(profile, progress, .prime);
         try progress.step("Attaching to workspace...\n", .{});
+        try progress.beforeInteractive();
         try self.attachExisting();
     }
 
@@ -897,6 +899,90 @@ test "runtime.open: creates session without tmuxp" {
     try proc_runner.expectCommandContaining(&recorder, "preview-list");
     try proc_runner.expectCommandOrder(&recorder, "bind-key", "attach-session");
     try proc_runner.expectNoTmuxSizingCommands(&recorder);
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "runtime.open: clears progress before attaching" {
+    const ProgressSpy = struct {
+        writer: *std.Io.Writer,
+        recorder: *const proc_runner.Recorder,
+        before_interactive_count: usize = 0,
+
+        pub fn raw(self: *@This()) *std.Io.Writer {
+            return self.writer;
+        }
+
+        pub fn step(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
+            try self.writer.print(fmt, args);
+        }
+
+        pub fn info(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
+            try self.step(fmt, args);
+        }
+
+        pub fn focus(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
+            try self.step(fmt, args);
+        }
+
+        pub fn command(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
+            _ = self;
+            _ = fmt;
+            _ = args;
+        }
+
+        pub fn status(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
+            try self.step(fmt, args);
+        }
+
+        pub fn detail(self: *@This(), lines: []const []const u8) !void {
+            _ = self;
+            _ = lines;
+        }
+
+        pub fn warn(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
+            try self.step(fmt, args);
+        }
+
+        pub fn beforeInteractive(self: *@This()) !void {
+            if (proc_runner.findCommandContaining(self.recorder, "attach-session") != null) return error.AttachBeforeInteractive;
+            self.before_interactive_count += 1;
+        }
+
+        pub fn failContext(self: *@This()) !void {
+            _ = self;
+        }
+
+        pub fn finishSuccess(self: *@This()) !void {
+            _ = self;
+        }
+
+        pub fn finishError(self: *@This()) !void {
+            _ = self;
+        }
+    };
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    var runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var progress = ProgressSpy{ .writer = &writer, .recorder = &recorder };
+
+    try runtime.openUnlockedWithProgress("all", &progress);
+
+    try std.testing.expectEqual(@as(usize, 1), progress.before_interactive_count);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Attaching to workspace") != null);
+    try proc_runner.expectCommandOrder(&recorder, "bind-key", "attach-session");
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 

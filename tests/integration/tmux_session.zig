@@ -151,6 +151,11 @@ test "tmux_setup.applySessionOptions: keeps global attach hook while refreshing 
     try std.testing.expect(std.mem.indexOf(u8, hooks.stdout, "sync-size") != null);
     try std.testing.expect(std.mem.indexOf(u8, hooks.stdout, "#{client_width}") != null);
     try std.testing.expect(std.mem.indexOf(u8, hooks.stdout, "#{client_height}") != null);
+
+    const prefix = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "show-option", "-t", session, "-qv", "prefix" });
+    defer std.testing.allocator.free(prefix.stdout);
+    defer std.testing.allocator.free(prefix.stderr);
+    try std.testing.expectEqualStrings("C-q\n", prefix.stdout);
 }
 
 test "runtime: open, status, close build, report, then remove workspace" {
