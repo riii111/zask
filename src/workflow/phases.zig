@@ -85,8 +85,9 @@ pub fn runServicePhaseWithProgress(ctx: anytype, phase: std.json.Value, profile:
     };
     if (phase.object.get("wait_ports")) |ports| if (ports == .array) {
         for (ports.array.items) |port_value| if (port_value == .integer) {
-            try writePortWait(ctx, phase, profile, port_value.integer, progress);
-            waits.waitForPort(ctx, port_value.integer, port_wait_timeout_seconds) catch |err| switch (err) {
+            const service = try serviceForPort(ctx, phase, profile, port_value.integer);
+            try writePortWait(port_value.integer, service, progress);
+            waits.waitForPortWithProgress(ctx, port_value.integer, port_wait_timeout_seconds, service, progress) catch |err| switch (err) {
                 error.PortNotReady => {
                     try writePortFailure(ctx, phase, profile, port_value.integer, port_wait_timeout_seconds, progress);
                     return error.StartupFailed;
@@ -103,8 +104,8 @@ fn phaseCwd(ctx: anytype, dir: []const u8) ![]const u8 {
     return pathing.absolute(ctx.gpa, ctx.runner.io, try std.fs.path.join(ctx.gpa, &.{ try ctx.cfg.projectRoot(ctx.gpa), dir }));
 }
 
-fn writePortWait(ctx: anytype, phase: std.json.Value, profile: []const u8, port: i64, progress: anytype) !void {
-    if (try serviceForPort(ctx, phase, profile, port)) |name| {
+fn writePortWait(port: i64, service: ?[]const u8, progress: anytype) !void {
+    if (service) |name| {
         try progress.step("Waiting for {s} on localhost:{d}...\n", .{ name, port });
     } else {
         try progress.step("Waiting for localhost:{d}...\n", .{port});

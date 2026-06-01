@@ -166,6 +166,7 @@ pub const Lifecycle = struct {
         // of the attached `up`, so the old settle before it was dead time.
         if (self.tmux.observeSession() == .active) {
             self.tmux.sendKeys("docker", &.{"C-c"}) catch {};
+            try waits.writePaneTail(self, "docker", progress);
         }
         self.docker.down() catch {
             try progress.warn("Warning: docker compose down failed\n", .{});
@@ -199,10 +200,11 @@ pub const Lifecycle = struct {
             const pane = self.tmux.observePane(name);
             defer pane.deinit(self.gpa);
             switch (serviceStopDecision(pane.state)) {
-                .send_stop => if (self.tmux.sendKeys(name, &.{"C-c"})) |_|
-                    signaled.appendAssumeCapacity(name)
-                else |_|
-                    failed.appendAssumeCapacity(name),
+                .send_stop => if (self.tmux.sendKeys(name, &.{"C-c"})) |_| {
+                    signaled.appendAssumeCapacity(name);
+                    try progress.step("  {s} ... stopping\n", .{name});
+                    try waits.writePaneTail(self, name, progress);
+                } else |_| failed.appendAssumeCapacity(name),
                 .no_op => progress.step("  {s} ... already stopped\n", .{name}) catch {},
                 .tmux_unavailable => failed.appendAssumeCapacity(name),
             }
@@ -668,6 +670,7 @@ test "lifecycle.stopAll: a failed signal still waits, tears down docker, and sur
     defer recorder.deinit();
     try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("web stopping\n", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 1 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
@@ -1380,6 +1383,7 @@ test "lifecycle.restartTarget: docker restart runs compose down before compose u
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("docker stopping\n", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });

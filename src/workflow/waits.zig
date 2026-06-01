@@ -8,6 +8,7 @@ pub const docker_ready_interval = std.Io.Duration.fromSeconds(1);
 pub const docker_ready_settle = std.Io.Duration.fromSeconds(2);
 const port_wait_interval_seconds = 2;
 const port_wait_interval = std.Io.Duration.fromSeconds(port_wait_interval_seconds);
+const live_tail_lines = 6;
 
 pub const PaneIdleWait = enum {
     idle,
@@ -27,6 +28,7 @@ pub fn ensureDockerReadyWithProgress(ctx: anytype, progress: anytype) !void {
             try progress.step("Docker containers ready\n", .{});
             return;
         }
+        try writePaneTail(ctx, "docker", progress);
         ctx.runner.sleep(docker_ready_interval);
     }
     return error.DockerNotReady;
@@ -43,6 +45,18 @@ pub fn waitForPort(ctx: anytype, port: i64, timeout: i64) !void {
     return error.PortNotReady;
 }
 
+pub fn waitForPortWithProgress(ctx: anytype, port: i64, timeout: i64, service: ?[]const u8, progress: anytype) !void {
+    const port_text = try std.fmt.allocPrint(ctx.gpa, "{d}", .{port});
+    defer ctx.gpa.free(port_text);
+    var elapsed: i64 = 0;
+    while (elapsed < timeout) : (elapsed += port_wait_interval_seconds) {
+        if (ctx.runner.run(&.{ "nc", "-z", "localhost", port_text }, .{ .check = true, .discard = true })) |_| return else |_| {}
+        if (service) |name| try writePaneTail(ctx, name, progress);
+        ctx.runner.sleep(port_wait_interval);
+    }
+    return error.PortNotReady;
+}
+
 pub fn ensureWindowReady(ctx: anytype, window: []const u8) !void {
     var attempt: usize = 0;
     while (attempt < window_ready_attempts) : (attempt += 1) {
@@ -54,6 +68,12 @@ pub fn ensureWindowReady(ctx: anytype, window: []const u8) !void {
         ctx.runner.sleep(window_ready_interval);
     }
     return error.WindowNotReady;
+}
+
+pub fn writePaneTail(ctx: anytype, window: []const u8, progress: anytype) !void {
+    const tail = try ctx.tmux.captureTail(window, live_tail_lines);
+    defer tail.deinit(ctx.gpa);
+    try progress.detail(tail.lines);
 }
 
 pub fn waitForStopped(ctx: anytype, service: []const u8, writer: *std.Io.Writer) !void {
