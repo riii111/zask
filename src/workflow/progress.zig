@@ -1,7 +1,7 @@
 const std = @import("std");
 
 /// Progress-compatible writers expose this small surface:
-/// `raw`, `step`, `info`, `warn`, `beforeInteractive`, `failContext`,
+/// `raw`, `step`, `detail`, `info`, `warn`, `beforeInteractive`, `failContext`,
 /// `finishSuccess`, and `finishError`. Workflow code stays generic so it can
 /// use plain line output in tests/non-TTY paths and richer CLI rendering in
 /// interactive commands without importing interface code.
@@ -23,6 +23,11 @@ pub const Line = struct {
 
     pub fn info(self: *Line, comptime fmt: []const u8, args: anytype) !void {
         try self.step(fmt, args);
+    }
+
+    pub fn detail(self: *Line, lines: []const []const u8) !void {
+        _ = self;
+        _ = lines;
     }
 
     pub fn warn(self: *Line, comptime fmt: []const u8, args: anytype) !void {

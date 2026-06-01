@@ -3,9 +3,12 @@ const std = @import("std");
 const env = @import("../../platform/env.zig");
 
 const clear_line = "\r\x1b[2K";
+const clear_previous_line = "\x1b[1A\r\x1b[2K";
 const reset = "\x1b[0m";
 const yellow = "\x1b[33m";
 const cyan = "\x1b[36m";
+const gray = "\x1b[90m";
+const default_width = 80;
 
 /// Stores transient step history in the command arena. It intentionally has no
 /// deinit; callers must pass an allocator whose lifetime covers the command.
@@ -15,6 +18,10 @@ pub const Progress = struct {
     transient: bool,
     color: bool,
     history: std.ArrayList([]const u8) = .empty,
+    details: std.ArrayList([]const u8) = .empty,
+    current_step: []const u8 = "",
+    rendered_rows: usize = 0,
+    width: usize = default_width,
     failure_replayed: bool = false,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env.Map, writer: *std.Io.Writer) Progress {
@@ -38,15 +45,24 @@ pub const Progress = struct {
         if (!self.transient) return self.writePlain(fmt, args);
         const text = try self.message(fmt, args);
         try self.history.append(self.gpa, text);
-        try self.clearLine();
-        try self.writeLabel(.info);
-        try self.writer.writeAll(text);
-        try self.writer.flush();
+        self.current_step = text;
+        self.details.items.len = 0;
+        try self.renderRegion();
     }
 
     pub fn info(self: *Progress, comptime fmt: []const u8, args: anytype) !void {
         if (!self.transient) return self.writePlain(fmt, args);
         try self.persist(.info, fmt, args);
+    }
+
+    pub fn detail(self: *Progress, lines: []const []const u8) !void {
+        if (!self.transient) return;
+        self.details.items.len = 0;
+        try self.details.ensureUnusedCapacity(self.gpa, lines.len);
+        for (lines) |line| {
+            self.details.appendAssumeCapacity(try self.gpa.dupe(u8, std.mem.trimEnd(u8, line, "\r\n")));
+        }
+        try self.renderRegion();
     }
 
     pub fn warn(self: *Progress, comptime fmt: []const u8, args: anytype) !void {
@@ -56,16 +72,20 @@ pub const Progress = struct {
 
     pub fn beforeInteractive(self: *Progress) !void {
         if (!self.transient) return self.writer.flush();
-        try self.clearLine();
+        try self.clearRegion();
         try self.writer.flush();
     }
 
     pub fn failContext(self: *Progress) !void {
         if (!self.transient or self.failure_replayed) return;
-        try self.clearLine();
+        try self.clearRegion();
         for (self.history.items) |item| {
             try self.writeLabel(.info);
             try self.writer.writeAll(item);
+            try self.writer.writeByte('\n');
+        }
+        for (self.details.items) |line| {
+            try self.writeDetailLine(line);
             try self.writer.writeByte('\n');
         }
         self.failure_replayed = true;
@@ -74,7 +94,7 @@ pub const Progress = struct {
 
     pub fn finishSuccess(self: *Progress) !void {
         if (!self.transient) return;
-        try self.clearLine();
+        try self.clearRegion();
         try self.writer.flush();
     }
 
@@ -88,7 +108,7 @@ pub const Progress = struct {
     }
 
     fn persist(self: *Progress, level: Level, comptime fmt: []const u8, args: anytype) !void {
-        try self.clearLine();
+        try self.clearRegion();
         try self.writeLabel(level);
         if (level == .warn) {
             const text = try self.message(fmt, args);
@@ -100,8 +120,30 @@ pub const Progress = struct {
         try self.writer.flush();
     }
 
-    fn clearLine(self: *Progress) !void {
+    fn renderRegion(self: *Progress) !void {
+        try self.clearRegion();
+        var rows: usize = 0;
+        if (self.current_step.len > 0) {
+            try self.writeLabel(.info);
+            try self.writer.writeAll(self.current_step);
+            rows += displayRows("INFO ".len + self.current_step.len, self.width);
+        }
+        for (self.details.items) |line| {
+            if (rows > 0) try self.writer.writeByte('\n');
+            try self.writeDetailLine(line);
+            rows += displayRows("> ".len + line.len, self.width);
+        }
+        self.rendered_rows = rows;
+        try self.writer.flush();
+    }
+
+    fn clearRegion(self: *Progress) !void {
         try self.writer.writeAll(clear_line);
+        var row: usize = 1;
+        while (row < self.rendered_rows) : (row += 1) {
+            try self.writer.writeAll(clear_previous_line);
+        }
+        self.rendered_rows = 0;
     }
 
     fn message(self: *Progress, comptime fmt: []const u8, args: anytype) ![]const u8 {
@@ -124,6 +166,18 @@ pub const Progress = struct {
         };
         try self.writer.writeAll(color);
         try self.writer.writeAll(text);
+        try self.writer.writeAll(reset);
+    }
+
+    fn writeDetailLine(self: *Progress, line: []const u8) !void {
+        if (!self.color) {
+            try self.writer.writeAll("> ");
+            try self.writer.writeAll(line);
+            return;
+        }
+        try self.writer.writeAll(gray);
+        try self.writer.writeAll("> ");
+        try self.writer.writeAll(line);
         try self.writer.writeAll(reset);
     }
 };
@@ -149,6 +203,12 @@ fn stripWarningPrefix(text: []const u8) []const u8 {
     const prefix = "Warning: ";
     if (std.mem.startsWith(u8, text, prefix)) return text[prefix.len..];
     return text;
+}
+
+fn displayRows(visible_len: usize, width: usize) usize {
+    const safe_width = @max(width, 1);
+    if (visible_len == 0) return 1;
+    return ((visible_len - 1) / safe_width) + 1;
 }
 
 // -----------------------------------------------------------------------------
@@ -218,6 +278,51 @@ test "command progress: transient success clears final step" {
 
     try std.testing.expectEqualStrings(
         "\r\x1b[2KINFO Opening workspace...\r\x1b[2KINFO Starting api...\r\x1b[2K",
+        writer.buffered(),
+    );
+}
+
+test "command progress: transient detail redraws multi-line region" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var progress: Progress = .{
+        .gpa = arena.allocator(),
+        .writer = &writer,
+        .transient = true,
+        .color = false,
+    };
+
+    try progress.step("Waiting for api...\n", .{});
+    try progress.detail(&.{ "db ready", "api listening" });
+    try progress.step("api ready\n", .{});
+
+    try std.testing.expectEqualStrings(
+        "\r\x1b[2KINFO Waiting for api...\r\x1b[2KINFO Waiting for api...\n> db ready\n> api listening\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2KINFO api ready",
+        writer.buffered(),
+    );
+}
+
+test "command progress: transient detail clear counts wrapped rows" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var progress: Progress = .{
+        .gpa = arena.allocator(),
+        .writer = &writer,
+        .transient = true,
+        .color = false,
+        .width = 10,
+    };
+
+    try progress.step("Wait\n", .{});
+    try progress.detail(&.{"1234567890123"});
+    try progress.finishSuccess();
+
+    try std.testing.expectEqualStrings(
+        "\r\x1b[2KINFO Wait\r\x1b[2KINFO Wait\n> 1234567890123\r\x1b[2K\x1b[1A\r\x1b[2K\x1b[1A\r\x1b[2K",
         writer.buffered(),
     );
 }
