@@ -294,7 +294,7 @@ test "phases.runServicePhase: honors wait_ports as a declared dependency" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}],
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":5432}]}],
         \\  "startup_order": [{"name":"backend","group":"backend","wait_ports":[5432]}]
         \\}
     ;
@@ -318,6 +318,7 @@ test "phases.runServicePhase: honors wait_ports as a declared dependency" {
     const port_check = proc_runner.findCommandContaining(&recorder, "nc") orelse return error.PortCheckMissing;
     try proc_runner.expectCommandArg(port_check, 3, "5432");
     try proc_runner.expectCommandOrder(&recorder, "serve", "nc");
+    try proc_runner.expectCommandOrder(&recorder, "capture-pane", "nc");
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 

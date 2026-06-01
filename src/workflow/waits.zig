@@ -23,12 +23,12 @@ pub fn ensureDockerReadyWithProgress(ctx: anytype, progress: anytype) !void {
     while (attempt < max_attempts) : (attempt += 1) {
         const compose = ctx.docker.observe();
         defer compose.deinit(ctx.gpa);
+        try writePaneTail(ctx, "docker", progress);
         if (compose.state == .running) {
             ctx.runner.sleep(docker_ready_settle);
             try progress.step("Docker containers ready\n", .{});
             return;
         }
-        try writePaneTail(ctx, "docker", progress);
         ctx.runner.sleep(docker_ready_interval);
     }
     return error.DockerNotReady;
@@ -50,8 +50,8 @@ pub fn waitForPortWithProgress(ctx: anytype, port: i64, timeout: i64, service: ?
     defer ctx.gpa.free(port_text);
     var elapsed: i64 = 0;
     while (elapsed < timeout) : (elapsed += port_wait_interval_seconds) {
-        if (ctx.runner.run(&.{ "nc", "-z", "localhost", port_text }, .{ .check = true, .discard = true })) |_| return else |_| {}
         if (service) |name| try writePaneTail(ctx, name, progress);
+        if (ctx.runner.run(&.{ "nc", "-z", "localhost", port_text }, .{ .check = true, .discard = true })) |_| return else |_| {}
         ctx.runner.sleep(port_wait_interval);
     }
     return error.PortNotReady;

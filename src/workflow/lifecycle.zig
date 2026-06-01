@@ -780,6 +780,7 @@ test "lifecycle.startAll: honors docker startup order step" {
     try recorder.enqueue("\n", "", .{ .exited = 1 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("api\n", "", .{ .exited = 0 });
+    try recorder.enqueue("docker ready\n", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("\n", "", .{ .exited = 1 });
@@ -873,6 +874,7 @@ test "waits.ensureDockerReady: times out when compose never reports running" {
 
     try std.testing.expectError(error.DockerNotReady, waits.ensureDockerReadyWithProgress(lifecycle, &progress));
     try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items.len);
+    try proc_runner.expectCommandOrder(&recorder, "compose", "capture-pane");
 }
 
 test "lifecycle.startAll: reports docker readiness failure" {
