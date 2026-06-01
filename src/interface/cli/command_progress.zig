@@ -12,12 +12,8 @@ const default_width = 80;
 const detail_indent = "  ";
 const command_prefix = "  $ ";
 
-/// Stores transient step history in the command arena. It intentionally has no
-/// deinit; callers must pass an allocator whose lifetime covers the command.
-/// Detail lines use a nested arena so repeated live-tail redraws reuse memory
-/// instead of growing with every polling iteration.
-/// This is the TTY implementation of the workflow progress surface documented
-/// in `workflow/progress.zig`.
+/// Command-lifetime state: success clears it, failure replays it.
+/// Detail redraws use a nested arena so long waits do not grow memory.
 pub const Progress = struct {
     gpa: std.mem.Allocator,
     writer: *std.Io.Writer,

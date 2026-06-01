@@ -1,11 +1,7 @@
 const std = @import("std");
 
-/// Progress-compatible writers expose this small surface:
-/// `raw`, `step`, `focus`, `command`, `status`, `detail`, `info`, `warn`,
-/// `beforeInteractive`, `failContext`, `finishSuccess`, and `finishError`.
-/// Workflow code stays generic so it can use plain line output in tests/non-TTY
-/// paths and richer CLI rendering in interactive commands without importing
-/// interface code.
+/// Non-TTY implementation of the progress surface used by workflow code.
+/// Keep this method set in sync with the CLI TTY renderer.
 pub const Line = struct {
     writer: *std.Io.Writer,
 
