@@ -1,7 +1,7 @@
 const std = @import("std");
+const command_progress = @import("command_progress.zig");
 const config = @import("../../model/config.zig");
 const Context = @import("context.zig").Context;
-const open_progress = @import("open_progress.zig");
 
 pub const Options = struct {
     profile_arg: ?[]const u8 = null,
@@ -18,7 +18,7 @@ pub const Options = struct {
 
 pub fn run(ctx: *Context, opts: Options) !void {
     const rt = try ctx.runtime();
-    var progress = open_progress.Progress.init(ctx.base.gpa, rt.io, ctx.base.environ, ctx.writer);
+    var progress = command_progress.Progress.init(ctx.base.gpa, rt.io, ctx.base.environ, ctx.writer);
     rt.openWithProgress(try resolveProfile(rt.cfg, opts), &progress) catch |err| {
         try progress.finishError();
         return err;

@@ -133,7 +133,7 @@ fn colorEnabled(environ: ?*const env.Map) bool {
 // Tests
 // -----------------------------------------------------------------------------
 
-test "open progress: non-tty keeps line output" {
+test "command progress: non-tty keeps line output" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var buffer: [128]u8 = undefined;
@@ -155,7 +155,7 @@ test "open progress: non-tty keeps line output" {
     , writer.buffered());
 }
 
-test "open progress: failure replays transient history" {
+test "command progress: failure replays transient history" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var buffer: [256]u8 = undefined;
