@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const env = @import("../../platform/env.zig");
 
@@ -13,6 +14,8 @@ const command_prefix = "  $ ";
 
 /// Stores transient step history in the command arena. It intentionally has no
 /// deinit; callers must pass an allocator whose lifetime covers the command.
+/// This is the TTY implementation of the workflow progress surface documented
+/// in `workflow/progress.zig`.
 pub const Progress = struct {
     gpa: std.mem.Allocator,
     writer: *std.Io.Writer,
@@ -37,6 +40,7 @@ pub const Progress = struct {
             .writer = writer,
             .transient = tty,
             .color = color,
+            .width = terminalWidth(io, stdout) catch default_width,
         };
     }
 
@@ -159,22 +163,22 @@ pub const Progress = struct {
         var rows: usize = 0;
         if (self.current_step.len > 0) {
             try self.writer.writeAll(self.current_step);
-            rows += displayRows(self.current_step.len, self.width);
+            rows += displayRows(0, self.current_step, self.width);
         }
         if (self.current_command.len > 0) {
             if (rows > 0) try self.writer.writeByte('\n');
             try self.writeCommandLine(self.current_command);
-            rows += displayRows(command_prefix.len + self.current_command.len, self.width);
+            rows += displayRows(command_prefix.len, self.current_command, self.width);
         }
         if (self.current_status.len > 0) {
             if (rows > 0) try self.writer.writeByte('\n');
             try self.writeDetailLine(self.current_status);
-            rows += displayRows(detail_indent.len + self.current_status.len, self.width);
+            rows += displayRows(detail_indent.len, self.current_status, self.width);
         }
         for (self.details.items) |line| {
             if (rows > 0) try self.writer.writeByte('\n');
             try self.writeDetailLine(line);
-            rows += displayRows(detail_indent.len + line.len, self.width);
+            rows += displayRows(detail_indent.len, line, self.width);
         }
         self.rendered_rows = rows;
         try self.writer.flush();
@@ -246,11 +250,6 @@ fn colorEnabled(environ: ?*const env.Map) bool {
     if (env.get(environ, "NO_COLOR")) |value| {
         if (value.len > 0) return false;
     }
-    // NO_COLOR wins. CLICOLOR_FORCE only controls color choice; transient
-    // rendering itself is still limited to TTY output.
-    if (env.get(environ, "CLICOLOR_FORCE")) |value| {
-        if (value.len > 0 and !std.mem.eql(u8, value, "0")) return true;
-    }
     return true;
 }
 
@@ -260,10 +259,54 @@ fn stripWarningPrefix(text: []const u8) []const u8 {
     return text;
 }
 
-fn displayRows(visible_len: usize, width: usize) usize {
+fn terminalWidth(io: std.Io, file: std.Io.File) !usize {
+    if (builtin.os.tag == .windows) return default_width;
+    var winsize: std.posix.winsize = .{
+        .row = 0,
+        .col = 0,
+        .xpixel = 0,
+        .ypixel = 0,
+    };
+    const err = (try io.operate(.{ .device_io_control = .{
+        .file = file,
+        .code = std.posix.T.IOCGWINSZ,
+        .arg = &winsize,
+    } })).device_io_control;
+    if (err < 0 or winsize.col == 0) return default_width;
+    return winsize.col;
+}
+
+fn displayRows(prefix_width: usize, text: []const u8, width: usize) usize {
     const safe_width = @max(width, 1);
+    const visible_len = prefix_width + visibleWidth(text);
     if (visible_len == 0) return 1;
     return ((visible_len - 1) / safe_width) + 1;
+}
+
+fn visibleWidth(text: []const u8) usize {
+    var width: usize = 0;
+    var index: usize = 0;
+    while (index < text.len) {
+        const byte = text[index];
+        if (byte < 0x80) {
+            width += 1;
+            index += 1;
+            continue;
+        }
+        const sequence_len = std.unicode.utf8ByteSequenceLength(byte) catch {
+            width += 1;
+            index += 1;
+            continue;
+        };
+        if (index + sequence_len > text.len) {
+            width += 1;
+            index += 1;
+            continue;
+        }
+        width += 2;
+        index += sequence_len;
+    }
+    return width;
 }
 
 // -----------------------------------------------------------------------------
@@ -384,6 +427,13 @@ test "command progress: transient detail clear counts wrapped rows" {
     );
 }
 
+test "command progress: display rows count unicode conservatively" {
+    try std.testing.expectEqual(@as(usize, 1), displayRows(2, "abc", 10));
+    try std.testing.expectEqual(@as(usize, 2), displayRows(2, "123456789", 10));
+    try std.testing.expectEqual(@as(usize, 2), displayRows(2, "日本語", 6));
+    try std.testing.expectEqual(@as(usize, 2), displayRows(2, "✔ ok", 6));
+}
+
 test "command progress: transient warning strips duplicate prefix" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -433,6 +483,8 @@ test "command progress: color preference honors NO_COLOR first" {
 
     try std.testing.expect(colorEnabled(null));
     try environ.put("CLICOLOR_FORCE", "1");
+    try std.testing.expect(colorEnabled(&environ));
+    try environ.put("CLICOLOR_FORCE", "0");
     try std.testing.expect(colorEnabled(&environ));
     try environ.put("NO_COLOR", "1");
     try std.testing.expect(!colorEnabled(&environ));

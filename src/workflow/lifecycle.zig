@@ -82,11 +82,6 @@ pub const Lifecycle = struct {
         }
     }
 
-    pub fn teardownResources(self: Lifecycle, writer: *std.Io.Writer) !void {
-        var progress = progress_mod.Line.init(writer);
-        try self.teardownResourcesWithProgress(&progress);
-    }
-
     pub fn teardownResourcesWithProgress(self: Lifecycle, progress: anytype) !void {
         const services = try self.cfg.services();
         if (services.len > 0) try progress.step("Stopping services...\n", .{});

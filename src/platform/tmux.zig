@@ -231,9 +231,15 @@ pub const Client = struct {
     /// failures are reported as an empty tail so startup diagnostics can still
     /// render the surrounding context.
     pub fn captureTail(self: Client, window: []const u8, max_lines: usize) !PaneTail {
-        const pane = try self.capturePane(window);
-        defer self.gpa.free(pane);
-        return try tailNonEmptyLines(self.gpa, pane, max_lines);
+        if (max_lines == 0) return .{ .lines = try self.gpa.alloc([]const u8, 0) };
+        const pane_target = try self.target(window);
+        defer self.gpa.free(pane_target);
+        const start = try std.fmt.allocPrint(self.gpa, "-{d}", .{max_lines});
+        defer self.gpa.free(start);
+        const result = runner.captured(self.runner.run(&.{ self.tmux_path, "capture-pane", "-t", pane_target, "-p", "-S", start }, .{}) catch return .{ .lines = try self.gpa.alloc([]const u8, 0) });
+        defer self.gpa.free(result.stdout);
+        defer self.gpa.free(result.stderr);
+        return try tailNonEmptyLines(self.gpa, result.stdout, max_lines);
     }
 
     /// Caller owns the returned slice. Capture failures are reported as an empty
@@ -833,6 +839,7 @@ test "tmux.captureTail: returns last display-safe pane lines" {
     try std.testing.expectEqual(@as(usize, 2), tail.lines.len);
     try std.testing.expectEqualStrings("second", tail.lines[0]);
     try std.testing.expectEqualStrings("bad?[2J?secret?", tail.lines[1]);
+    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "capture-pane", "-t", "demo:api", "-p", "-S", "-2" });
 }
 
 test "tmux.captureTail: returns empty tail when no lines are requested" {

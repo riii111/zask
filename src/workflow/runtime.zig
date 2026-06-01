@@ -189,14 +189,14 @@ pub const Runtime = struct {
         try self.closeUnlockedWithProgress(progress);
     }
 
-    /// Teardown order is load-bearing: stop services and docker first so their
-    /// stop signals reach the live panes, let them settle, then kill the tmux
-    /// session. Killing the session first would orphan those resources.
     fn closeUnlocked(self: Runtime, writer: *std.Io.Writer) !void {
         var progress = progress_mod.Line.init(writer);
         try self.closeUnlockedWithProgress(&progress);
     }
 
+    /// Teardown order is load-bearing: stop services and docker first so their
+    /// stop signals reach the live panes, let them settle, then kill the tmux
+    /// session. Killing the session first would orphan those resources.
     fn closeUnlockedWithProgress(self: Runtime, progress: anytype) !void {
         switch (self.tmux().observeSession()) {
             .active => {},
