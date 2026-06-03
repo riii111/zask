@@ -46,11 +46,24 @@ Unlike plain tmux session managers, zask knows about service groups, startup ord
 
 ## Installation
 
-Download a prebuilt binary from GitHub Releases and place it on your `PATH`:
+Install the latest release:
 
 ```bash
-tar -xf zask-<target>.tar.gz
+curl -fsSL https://raw.githubusercontent.com/riii111/zask/main/install.sh | sh
+```
+
+Or download a prebuilt binary from GitHub Releases and place it on your `PATH`:
+
+```bash
+mkdir -p ~/.local/bin
+tar -xzf zask-<target>.tar.gz
 install -m 0755 zask ~/.local/bin/zask
+```
+
+You can choose a different install directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/riii111/zask/main/install.sh | INSTALL_DIR=/usr/local/bin sh
 ```
 
 Or build from source:

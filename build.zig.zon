@@ -7,6 +7,7 @@
     .paths = .{
         "LICENSE",
         "README.md",
+        "install.sh",
         "build.zig",
         "build.zig.zon",
         "src",
