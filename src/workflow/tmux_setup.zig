@@ -97,7 +97,7 @@ test "tmux_setup.bindClientSizeHooks: runs sync command when client becomes acti
     try proc_runner.expectCommandContaining(&recorder, "#{client_height}");
 }
 
-test "tmux_setup.applySessionOptions: seeds dash mode with the all constant" {
+test "tmux_setup.applySessionOptions: seeds prefix and dash mode" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());
@@ -107,6 +107,9 @@ test "tmux_setup.applySessionOptions: seeds dash mode with the all constant" {
 
     try applySessionOptions(arena.allocator(), tx, .{ .project = "demo", .zask_path = "zask", .config_path = "/tmp/config.json" });
 
+    const prefix = proc_runner.findCommandContaining(&recorder, "prefix") orelse return error.MissingPrefixOption;
+    try proc_runner.expectCommandArg(prefix, 4, "prefix");
+    try proc_runner.expectCommandArg(prefix, 5, "C-q");
     const dash = proc_runner.findCommandContaining(&recorder, tmux_options.dash_mode) orelse return error.MissingDashModeOption;
     try proc_runner.expectCommandArg(dash, 4, tmux_options.dash_mode);
     try proc_runner.expectCommandArg(dash, 5, tmux_options.dash_mode_all);

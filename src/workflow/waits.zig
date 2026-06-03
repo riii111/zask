@@ -8,6 +8,7 @@ pub const docker_ready_interval = std.Io.Duration.fromSeconds(1);
 pub const docker_ready_settle = std.Io.Duration.fromSeconds(2);
 const port_wait_interval_seconds = 2;
 const port_wait_interval = std.Io.Duration.fromSeconds(port_wait_interval_seconds);
+const live_tail_lines = 6;
 
 pub const PaneIdleWait = enum {
     idle,
@@ -15,16 +16,17 @@ pub const PaneIdleWait = enum {
     tmux_unavailable,
 };
 
-pub fn ensureDockerReady(ctx: anytype, writer: *std.Io.Writer) !void {
-    try writer.writeAll("Waiting for Docker containers...\n");
+pub fn ensureDockerReadyWithProgress(ctx: anytype, progress: anytype) !void {
+    try progress.status("Waiting for Docker containers...\n", .{});
     var attempt: i64 = 0;
     const max_attempts = ctx.cfg.dockerWaitTimeout();
     while (attempt < max_attempts) : (attempt += 1) {
         const compose = ctx.docker.observe();
         defer compose.deinit(ctx.gpa);
+        try writePaneTail(ctx, "docker", progress);
         if (compose.state == .running) {
             ctx.runner.sleep(docker_ready_settle);
-            try writer.writeAll("Docker containers ready\n");
+            try progress.status("Docker containers ready\n", .{});
             return;
         }
         ctx.runner.sleep(docker_ready_interval);
@@ -32,11 +34,12 @@ pub fn ensureDockerReady(ctx: anytype, writer: *std.Io.Writer) !void {
     return error.DockerNotReady;
 }
 
-pub fn waitForPort(ctx: anytype, port: i64, timeout: i64) !void {
+pub fn waitForPortWithProgress(ctx: anytype, port: i64, timeout: i64, service: ?[]const u8, progress: anytype) !void {
     const port_text = try std.fmt.allocPrint(ctx.gpa, "{d}", .{port});
     defer ctx.gpa.free(port_text);
     var elapsed: i64 = 0;
     while (elapsed < timeout) : (elapsed += port_wait_interval_seconds) {
+        if (service) |name| try writePaneTail(ctx, name, progress);
         if (ctx.runner.run(&.{ "nc", "-z", "localhost", port_text }, .{ .check = true, .discard = true })) |_| return else |_| {}
         ctx.runner.sleep(port_wait_interval);
     }
@@ -54,6 +57,12 @@ pub fn ensureWindowReady(ctx: anytype, window: []const u8) !void {
         ctx.runner.sleep(window_ready_interval);
     }
     return error.WindowNotReady;
+}
+
+pub fn writePaneTail(ctx: anytype, window: []const u8, progress: anytype) !void {
+    const tail = try ctx.tmux.captureTail(window, live_tail_lines);
+    defer tail.deinit(ctx.gpa);
+    try progress.detail(tail.lines);
 }
 
 pub fn waitForStopped(ctx: anytype, service: []const u8, writer: *std.Io.Writer) !void {

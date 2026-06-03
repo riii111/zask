@@ -5,6 +5,7 @@ const observations = @import("../model/observations.zig");
 const phases = @import("phases.zig");
 const pathing = @import("pathing.zig");
 const proc_runner = @import("../platform/runner.zig");
+const progress_mod = @import("progress.zig");
 const shell = @import("../platform/shell.zig");
 const tmux_client = @import("../platform/tmux.zig");
 const waits = @import("waits.zig");
@@ -35,25 +36,30 @@ pub const Lifecycle = struct {
     docker: docker_client.Compose,
 
     pub fn startAll(self: Lifecycle, profile: []const u8, writer: *std.Io.Writer, mode: StartMode) !void {
-        try phases.runPrechecks(self, writer);
-        if (std.mem.eql(u8, profile, "docker")) return self.startDockerAndWait(writer);
+        var progress = progress_mod.Line.init(writer);
+        try self.startAllWithProgress(profile, &progress, mode);
+    }
+
+    pub fn startAllWithProgress(self: Lifecycle, profile: []const u8, progress: anytype, mode: StartMode) !void {
+        try phases.runPrechecks(self, progress.raw());
+        if (std.mem.eql(u8, profile, "docker")) return self.startDockerAndWaitWithProgress(progress);
         const phase_list = self.cfg.phases();
         if (phase_list.len == 0) {
             const service_list = try self.cfg.services();
             if (self.cfg.dockerEnabled()) {
                 if (service_list.len > 0)
-                    try writeProgress(writer, "Tip: add startup_order to start Docker before services.\n", .{});
-                try self.ensureDockerStarted(writer);
+                    try progress.info("Tip: add startup_order to start Docker before services.\n", .{});
+                try self.ensureDockerStartedWithProgress(progress);
             }
-            for (service_list) |service| try self.startService(try config.Config.serviceName(service), writer, mode);
+            for (service_list) |service| try self.startServiceWithProgress(try config.Config.serviceName(service), progress, mode);
             return;
         }
         for (phase_list) |phase| {
             if (phase != .object) continue;
             switch (phases.phaseKind(phase)) {
-                .docker => try self.startDockerAndWait(writer),
-                .command => try phases.runCommandPhase(self, phase, profile, writer),
-                .services => try phases.runServicePhase(self, phase, profile, writer, mode),
+                .docker => try self.startDockerAndWaitWithProgress(progress),
+                .command => try phases.runCommandPhaseWithProgress(self, phase, profile, progress),
+                .services => try phases.runServicePhaseWithProgress(self, phase, profile, progress, mode),
             }
         }
     }
@@ -76,23 +82,24 @@ pub const Lifecycle = struct {
         }
     }
 
-    pub fn teardownResources(self: Lifecycle, writer: *std.Io.Writer) !void {
+    pub fn teardownResourcesWithProgress(self: Lifecycle, progress: anytype) !void {
         const services = try self.cfg.services();
-        if (services.len > 0) try writeProgress(writer, "Stopping services...\n", .{});
+        if (services.len > 0) try progress.step("Stopping services...\n", .{});
         // close kills the session right after, so skip the wait and ignore failed
         // signals (the kill stops whatever is left) — unlike stopAll, which keeps
         // the session and must confirm.
-        var broadcast = try self.broadcastStop(services, writer);
+        var broadcast = try self.broadcastStopWithProgress(services, progress);
         broadcast.deinit(self.gpa);
-        try self.stopDocker(writer);
+        try self.stopDockerWithProgress(progress);
     }
 
     pub fn startTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
         try self.ensureSessionActive(writer);
         if (std.mem.eql(u8, target, "--all")) return self.startAll("all", writer, .observe);
         if (std.mem.eql(u8, target, "docker")) {
-            try self.ensureDockerStarted(writer);
-            return self.waitForDockerReady(writer);
+            var progress = progress_mod.Line.init(writer);
+            try self.ensureDockerStartedWithProgress(&progress);
+            return self.waitForDockerReadyWithProgress(&progress);
         }
         if (self.cfg.resolveGroup(self.gpa, target)) |services| {
             defer self.gpa.free(services);
@@ -121,8 +128,9 @@ pub const Lifecycle = struct {
         if (std.mem.eql(u8, target, "docker")) {
             try self.ensureSessionActive(writer);
             try self.stopDocker(writer);
-            try self.ensureDockerStarted(writer);
-            return self.waitForDockerReady(writer);
+            var progress = progress_mod.Line.init(writer);
+            try self.ensureDockerStartedWithProgress(&progress);
+            return self.waitForDockerReadyWithProgress(&progress);
         }
         try self.ensureSessionActive(writer);
         if (self.cfg.resolveGroup(self.gpa, target)) |services| {
@@ -132,20 +140,32 @@ pub const Lifecycle = struct {
     }
 
     pub fn startService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer, mode: StartMode) !void {
-        try self.ensureServiceRunning(service, writer, mode);
+        var progress = progress_mod.Line.init(writer);
+        try self.startServiceWithProgress(service, &progress, mode);
+    }
+
+    pub fn startServiceWithProgress(self: Lifecycle, service: []const u8, progress: anytype, mode: StartMode) !void {
+        try self.ensureServiceRunning(service, progress, mode);
     }
 
     pub fn stopDocker(self: Lifecycle, writer: *std.Io.Writer) !void {
+        var progress = progress_mod.Line.init(writer);
+        try self.stopDockerWithProgress(&progress);
+    }
+
+    pub fn stopDockerWithProgress(self: Lifecycle, progress: anytype) !void {
         if (!self.cfg.dockerEnabled()) return;
-        try writeProgress(writer, "Stopping Docker...\n", .{});
+        try progress.step("Stopping Docker...\n", .{});
+        try progress.command("docker compose down\n", .{});
         // Interrupt the pane's `compose up` so the window returns to a shell, but
         // do not wait for it: `compose down` cleanly stops containers regardless
         // of the attached `up`, so the old settle before it was dead time.
         if (self.tmux.observeSession() == .active) {
             self.tmux.sendKeys("docker", &.{"C-c"}) catch {};
+            try waits.writePaneTail(self, "docker", progress);
         }
         self.docker.down() catch {
-            try writeProgress(writer, "Warning: docker compose down failed\n", .{});
+            try progress.warn("Warning: docker compose down failed\n", .{});
         };
     }
 
@@ -158,6 +178,11 @@ pub const Lifecycle = struct {
     /// front so a record can never be lost to an allocation failure mid-loop.
     /// Reverse order stops dependents first; the caller owns and frees both lists.
     fn broadcastStop(self: Lifecycle, services: []const std.json.Value, writer: *std.Io.Writer) !StopBroadcast {
+        var progress = progress_mod.Line.init(writer);
+        return self.broadcastStopWithProgress(services, &progress);
+    }
+
+    fn broadcastStopWithProgress(self: Lifecycle, services: []const std.json.Value, progress: anytype) !StopBroadcast {
         var signaled: std.ArrayList([]const u8) = .empty;
         errdefer signaled.deinit(self.gpa);
         try signaled.ensureTotalCapacity(self.gpa, services.len);
@@ -171,34 +196,38 @@ pub const Lifecycle = struct {
             const pane = self.tmux.observePane(name);
             defer pane.deinit(self.gpa);
             switch (serviceStopDecision(pane.state)) {
-                .send_stop => if (self.tmux.sendKeys(name, &.{"C-c"})) |_|
-                    signaled.appendAssumeCapacity(name)
-                else |_|
-                    failed.appendAssumeCapacity(name),
-                .no_op => writeProgress(writer, "  {s} ... already stopped\n", .{name}) catch {},
+                .send_stop => if (self.tmux.sendKeys(name, &.{"C-c"})) |_| {
+                    signaled.appendAssumeCapacity(name);
+                    try progress.step("Stopping {s}...\n", .{name});
+                    try progress.status("sending C-c\n", .{});
+                    try waits.writePaneTail(self, name, progress);
+                } else |_| failed.appendAssumeCapacity(name),
+                .no_op => progress.step("  {s} ... already stopped\n", .{name}) catch {},
                 .tmux_unavailable => failed.appendAssumeCapacity(name),
             }
         }
         return .{ .signaled = signaled, .failed = failed };
     }
 
-    fn startDockerAndWait(self: Lifecycle, writer: *std.Io.Writer) !void {
+    fn startDockerAndWaitWithProgress(self: Lifecycle, progress: anytype) !void {
         if (!self.cfg.dockerEnabled()) return;
-        try self.ensureDockerStarted(writer);
-        try self.waitForDockerReady(writer);
+        try self.ensureDockerStartedWithProgress(progress);
+        try self.waitForDockerReadyWithProgress(progress);
     }
 
-    fn waitForDockerReady(self: Lifecycle, writer: *std.Io.Writer) !void {
-        waits.ensureDockerReady(self, writer) catch |err| switch (err) {
+    fn waitForDockerReadyWithProgress(self: Lifecycle, progress: anytype) !void {
+        waits.ensureDockerReadyWithProgress(self, progress) catch |err| switch (err) {
             error.DockerNotReady => {
-                try self.writeDockerFailure(writer);
+                try self.writeDockerFailure(progress);
                 return error.StartupFailed;
             },
             else => return err,
         };
     }
 
-    fn writeDockerFailure(self: Lifecycle, writer: *std.Io.Writer) !void {
+    fn writeDockerFailure(self: Lifecycle, progress: anytype) !void {
+        try progress.failContext();
+        const writer = progress.raw();
         const compose = self.docker.observe();
         defer compose.deinit(self.gpa);
         try writer.writeAll("Error: Docker did not become ready\n");
@@ -236,16 +265,18 @@ pub const Lifecycle = struct {
         }
     }
 
-    fn ensureServiceRunning(self: Lifecycle, service: []const u8, writer: *std.Io.Writer, mode: StartMode) !void {
+    fn ensureServiceRunning(self: Lifecycle, service: []const u8, progress: anytype, mode: StartMode) !void {
         const value = try self.cfg.findService(service);
         if (mode == .observe) {
             waits.ensureWindowReady(self, service) catch |err| switch (err) {
                 error.WindowNotReady => {
-                    try writeProgress(writer, "Warning: window for {s} not ready\n", .{service});
+                    try progress.failContext();
+                    try progress.warn("Warning: window for {s} not ready\n", .{service});
                     return error.WindowNotReady;
                 },
                 error.TmuxUnavailable => {
-                    try writeProgress(writer, "Warning: tmux unavailable for {s}\n", .{service});
+                    try progress.failContext();
+                    try progress.warn("Warning: tmux unavailable for {s}\n", .{service});
                     return error.TmuxUnavailable;
                 },
             };
@@ -253,20 +284,22 @@ pub const Lifecycle = struct {
             defer pane.deinit(self.gpa);
             switch (serviceStartDecision(pane)) {
                 .no_op => {
-                    try writeProgress(writer, "{s} already running\n", .{service});
+                    try progress.info("{s} already running\n", .{service});
                     return;
                 },
                 .send_start => {},
                 .window_not_ready => return error.WindowNotReady,
                 .tmux_unavailable => {
-                    try writeProgress(writer, "Warning: tmux unavailable for {s}\n", .{service});
+                    try progress.failContext();
+                    try progress.warn("Warning: tmux unavailable for {s}\n", .{service});
                     return error.TmuxUnavailable;
                 },
             }
         }
         const service_dir = try pathing.absolute(self.gpa, self.runner.io, try self.cfg.serviceDir(self.gpa, value));
         const start_command = try config.Config.serviceStartCommand(self.gpa, value);
-        try writeProgress(writer, "Starting {s}...\n", .{service});
+        try progress.step("Starting {s}...\n", .{service});
+        try progress.command("{s}\n", .{start_command});
         try self.tmux.respawnPane(service, service_dir, start_command);
     }
 
@@ -289,18 +322,19 @@ pub const Lifecycle = struct {
         try waits.waitForStopped(self, service, writer);
     }
 
-    fn ensureDockerStarted(self: Lifecycle, writer: *std.Io.Writer) !void {
+    fn ensureDockerStartedWithProgress(self: Lifecycle, progress: anytype) !void {
         if (!self.cfg.dockerEnabled()) return;
         try waits.ensureWindowReady(self, "docker");
-        if (try self.dockerStartAlreadyHandled(writer)) return;
-        try writeProgress(writer, "Starting Docker...\n", .{});
+        if (try self.dockerStartAlreadyHandled(progress)) return;
+        try progress.step("Starting Docker...\n", .{});
         const docker_dir = try pathing.absolute(self.gpa, self.runner.io, try self.cfg.dockerDir(self.gpa));
         const compose_file = try shell.quote(self.gpa, self.cfg.dockerComposeFile());
         const cmd = try std.fmt.allocPrint(self.gpa, "COMPOSE_MENU=false docker compose -f {s} up", .{compose_file});
+        try progress.command("{s}\n", .{cmd});
         try self.tmux.respawnPane("docker", docker_dir, cmd);
     }
 
-    fn dockerStartAlreadyHandled(self: Lifecycle, writer: *std.Io.Writer) !bool {
+    fn dockerStartAlreadyHandled(self: Lifecycle, progress: anytype) !bool {
         var pane = self.tmux.observePane("docker");
         defer pane.deinit(self.gpa);
         switch (dockerStartDecision(pane)) {
@@ -314,7 +348,7 @@ pub const Lifecycle = struct {
             defer compose.deinit(self.gpa);
             switch (compose.state) {
                 .running => {
-                    try writeProgress(writer, "Docker already running\n", .{});
+                    try progress.info("Docker already running\n", .{});
                     return true;
                 },
                 .empty => {
@@ -330,14 +364,14 @@ pub const Lifecycle = struct {
                             };
                         },
                         .still_busy => {
-                            try writeProgress(writer, "Docker already starting\n", .{});
+                            try progress.info("Docker already starting\n", .{});
                             return true;
                         },
                         .tmux_unavailable => return error.TmuxUnavailable,
                     }
                 },
                 .unavailable => {
-                    try writeProgress(writer, "Docker already starting\n", .{});
+                    try progress.info("Docker already starting\n", .{});
                     return true;
                 },
             }
@@ -635,6 +669,7 @@ test "lifecycle.stopAll: a failed signal still waits, tears down docker, and sur
     defer recorder.deinit();
     try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("web stopping\n", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 1 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
@@ -744,6 +779,7 @@ test "lifecycle.startAll: honors docker startup order step" {
     try recorder.enqueue("\n", "", .{ .exited = 1 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("api\n", "", .{ .exited = 0 });
+    try recorder.enqueue("docker ready\n", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("\n", "", .{ .exited = 1 });
@@ -809,8 +845,9 @@ test "waits: report port and stop timeouts" {
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
+    var progress = progress_mod.Line.init(&writer);
 
-    try std.testing.expectError(error.PortNotReady, waits.waitForPort(lifecycle, 5432, 2));
+    try std.testing.expectError(error.PortNotReady, waits.waitForPortWithProgress(lifecycle, 5432, 2, null, &progress));
     try waits.waitForStopped(lifecycle, "api", &writer);
 
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api ... warning: may not have stopped") != null);
@@ -833,9 +870,11 @@ test "waits.ensureDockerReady: times out when compose never reports running" {
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
+    var progress = progress_mod.Line.init(&writer);
 
-    try std.testing.expectError(error.DockerNotReady, waits.ensureDockerReady(lifecycle, &writer));
+    try std.testing.expectError(error.DockerNotReady, waits.ensureDockerReadyWithProgress(lifecycle, &progress));
     try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items.len);
+    try proc_runner.expectCommandOrder(&recorder, "compose", "capture-pane");
 }
 
 test "lifecycle.startAll: reports docker readiness failure" {
@@ -1346,6 +1385,7 @@ test "lifecycle.restartTarget: docker restart runs compose down before compose u
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("docker stopping\n", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });

@@ -5,6 +5,7 @@ const config_value = @import("../model/config_value.zig");
 const lifecycle_mod = @import("lifecycle.zig");
 const pathing = @import("pathing.zig");
 const proc_runner = @import("../platform/runner.zig");
+const progress_mod = @import("progress.zig");
 const shell = @import("../platform/shell.zig");
 const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
@@ -48,13 +49,19 @@ pub fn runPrechecks(ctx: anytype, writer: *std.Io.Writer) !void {
 }
 
 pub fn runCommandPhase(ctx: anytype, phase: std.json.Value, profile: []const u8, writer: *std.Io.Writer) !void {
+    var progress = progress_mod.Line.init(writer);
+    try runCommandPhaseWithProgress(ctx, phase, profile, &progress);
+}
+
+pub fn runCommandPhaseWithProgress(ctx: anytype, phase: std.json.Value, profile: []const u8, progress: anytype) !void {
     const command = try config.Config.commandPhaseCommand(phase, profile);
     const dir = config_value.optionalObjectString(phase, "dir", "");
     const cwd = try phaseCwd(ctx, dir);
+    try progress.beforeInteractive();
     _ = ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd, .interactive = true, .check = true }) catch |err| switch (err) {
         error.CommandFailed => {
             if (std.mem.eql(u8, config_value.optionalObjectString(phase, "on_fail", "abort"), "abort")) return error.CommandPhaseFailed;
-            try writer.writeAll("Warning: command phase failed\n");
+            try progress.warn("Warning: command phase failed\n", .{});
             return;
         },
         else => return err,
@@ -62,21 +69,27 @@ pub fn runCommandPhase(ctx: anytype, phase: std.json.Value, profile: []const u8,
 }
 
 pub fn runServicePhase(ctx: anytype, phase: std.json.Value, profile: []const u8, writer: *std.Io.Writer, mode: lifecycle_mod.StartMode) !void {
+    var progress = progress_mod.Line.init(writer);
+    try runServicePhaseWithProgress(ctx, phase, profile, &progress, mode);
+}
+
+pub fn runServicePhaseWithProgress(ctx: anytype, phase: std.json.Value, profile: []const u8, progress: anytype, mode: lifecycle_mod.StartMode) !void {
     if (phase.object.get("groups")) |groups| if (groups == .array) {
         for (groups.array.items) |group_value| {
             if (group_value != .string) continue;
             const group = ctx.cfg.resolvePhaseGroup(profile, group_value.string);
             const svcs = try ctx.cfg.resolveGroup(ctx.gpa, group);
             defer ctx.gpa.free(svcs);
-            for (svcs) |svc| try ctx.startService(svc, writer, mode);
+            for (svcs) |svc| try ctx.startServiceWithProgress(svc, progress, mode);
         }
     };
     if (phase.object.get("wait_ports")) |ports| if (ports == .array) {
         for (ports.array.items) |port_value| if (port_value == .integer) {
-            try writePortWait(ctx, phase, profile, port_value.integer, writer);
-            waits.waitForPort(ctx, port_value.integer, port_wait_timeout_seconds) catch |err| switch (err) {
+            const service = try serviceForPort(ctx, phase, profile, port_value.integer);
+            try writePortWait(ctx, port_value.integer, service, progress);
+            waits.waitForPortWithProgress(ctx, port_value.integer, port_wait_timeout_seconds, service, progress) catch |err| switch (err) {
                 error.PortNotReady => {
-                    try writePortFailure(ctx, phase, profile, port_value.integer, port_wait_timeout_seconds, writer);
+                    try writePortFailure(ctx, phase, profile, port_value.integer, port_wait_timeout_seconds, progress);
                     return error.StartupFailed;
                 },
                 else => return err,
@@ -91,16 +104,22 @@ fn phaseCwd(ctx: anytype, dir: []const u8) ![]const u8 {
     return pathing.absolute(ctx.gpa, ctx.runner.io, try std.fs.path.join(ctx.gpa, &.{ try ctx.cfg.projectRoot(ctx.gpa), dir }));
 }
 
-fn writePortWait(ctx: anytype, phase: std.json.Value, profile: []const u8, port: i64, writer: *std.Io.Writer) !void {
-    if (try serviceForPort(ctx, phase, profile, port)) |name| {
-        try writer.print("Waiting for {s} on localhost:{d}...\n", .{ name, port });
+fn writePortWait(ctx: anytype, port: i64, service: ?[]const u8, progress: anytype) !void {
+    if (service) |name| {
+        const value = try ctx.cfg.findService(name);
+        const command = try config.Config.serviceStartCommand(ctx.gpa, value);
+        try progress.focus("Starting {s}...\n", .{name});
+        try progress.command("{s}\n", .{command});
+        try progress.status("Waiting for {s} on localhost:{d}...\n", .{ name, port });
     } else {
-        try writer.print("Waiting for localhost:{d}...\n", .{port});
+        try progress.step("Checking localhost:{d}\n", .{port});
+        try progress.status("Waiting for localhost:{d}...\n", .{port});
     }
-    try writer.flush();
 }
 
-fn writePortFailure(ctx: anytype, phase: std.json.Value, profile: []const u8, port: i64, timeout: i64, writer: *std.Io.Writer) !void {
+fn writePortFailure(ctx: anytype, phase: std.json.Value, profile: []const u8, port: i64, timeout: i64, progress: anytype) !void {
+    try progress.failContext();
+    const writer = progress.raw();
     const service = try serviceForPort(ctx, phase, profile, port);
     const phase_label = phaseLabel(ctx, phase, profile);
     try writer.writeByte('\n');
@@ -280,7 +299,7 @@ test "phases.runServicePhase: honors wait_ports as a declared dependency" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
-        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}],
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":5432}]}],
         \\  "startup_order": [{"name":"backend","group":"backend","wait_ports":[5432]}]
         \\}
     ;
@@ -304,6 +323,7 @@ test "phases.runServicePhase: honors wait_ports as a declared dependency" {
     const port_check = proc_runner.findCommandContaining(&recorder, "nc") orelse return error.PortCheckMissing;
     try proc_runner.expectCommandArg(port_check, 3, "5432");
     try proc_runner.expectCommandOrder(&recorder, "serve", "nc");
+    try proc_runner.expectCommandOrder(&recorder, "capture-pane", "nc");
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
@@ -376,6 +396,7 @@ test "phases.runServicePhase: reports unmatched port without service hints" {
 
     try std.testing.expectEqualStrings(
         \\Starting api...
+        \\Checking localhost:5432
         \\Waiting for localhost:5432...
         \\
         \\Error: port 5432 did not become ready

@@ -8,6 +8,7 @@ const observations = @import("../model/observations.zig");
 const paths = @import("../platform/paths.zig");
 const pathing = @import("pathing.zig");
 const proc_runner = @import("../platform/runner.zig");
+const progress_mod = @import("progress.zig");
 const session_layout = @import("session_layout.zig");
 const tmux_client = @import("../platform/tmux.zig");
 const tmux_setup = @import("tmux_setup.zig");
@@ -118,39 +119,47 @@ pub const Runtime = struct {
     }
 
     pub fn open(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
+        var progress = progress_mod.Line.init(writer);
+        try self.openWithProgress(profile, &progress);
+    }
+
+    pub fn openWithProgress(self: Runtime, profile: []const u8, progress: anytype) !void {
         const guard = self.acquireLock() catch |err| switch (err) {
             error.LockBusy => switch (self.tmux().observeSession()) {
                 .active => return self.attachExistingWithRefreshedHooks(),
                 .missing => return err,
-                .unavailable => return waits.reportTmuxUnavailable(writer),
+                .unavailable => return waits.reportTmuxUnavailable(progress.raw()),
             },
             else => return err,
         };
         defer guard.release();
-        try self.openUnlocked(profile, writer);
+        try self.openUnlockedWithProgress(profile, progress);
     }
 
     pub fn openUnlocked(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
+        var progress = progress_mod.Line.init(writer);
+        try self.openUnlockedWithProgress(profile, &progress);
+    }
+
+    pub fn openUnlockedWithProgress(self: Runtime, profile: []const u8, progress: anytype) !void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const scratch = arena.allocator();
         switch (self.tmux().observeSession()) {
             .active => {
-                try writer.writeAll("Workspace already open. Starting resources...\n");
-                try writer.flush();
+                try progress.info("Workspace already open. Starting resources...\n", .{});
                 try self.installSessionOptions(scratch);
                 try tmux_setup.bindControlKeys(scratch, self.tmux());
-                try self.lifecycle().startAll(profile, writer, .observe);
-                try writer.writeAll("Attaching to workspace...\n");
-                try writer.flush();
+                try self.lifecycle().startAllWithProgress(profile, progress, .observe);
+                try progress.step("Attaching to workspace...\n", .{});
+                try progress.beforeInteractive();
                 try self.attachExisting();
                 return;
             },
             .missing => {},
-            .unavailable => return waits.reportTmuxUnavailable(writer),
+            .unavailable => return waits.reportTmuxUnavailable(progress.raw()),
         }
-        try writer.writeAll("Opening workspace...\n");
-        try writer.flush();
+        try progress.step("Opening workspace...\n", .{});
         const tx = self.tmux();
         try self.openSessionWithDashboardWindow(scratch);
         errdefer tx.killSession() catch {};
@@ -159,45 +168,60 @@ pub const Runtime = struct {
         try self.appendServiceAndDockerWindows(scratch);
         try self.focusDashboard();
         try tmux_setup.bindControlKeys(scratch, tx);
-        try self.lifecycle().startAll(profile, writer, .prime);
-        try writer.writeAll("Attaching to workspace...\n");
-        try writer.flush();
+        try self.lifecycle().startAllWithProgress(profile, progress, .prime);
+        try progress.step("Attaching to workspace...\n", .{});
+        try progress.beforeInteractive();
         try self.attachExisting();
     }
 
     pub fn close(self: Runtime, writer: *std.Io.Writer) !void {
+        var progress = progress_mod.Line.init(writer);
+        try self.closeWithProgress(&progress);
+    }
+
+    pub fn closeWithProgress(self: Runtime, progress: anytype) !void {
         const guard = self.acquireLock() catch |err| switch (err) {
             error.LockBusy => switch (self.tmux().observeSession()) {
-                .unavailable => return waits.reportTmuxUnavailable(writer),
+                .unavailable => return waits.reportTmuxUnavailable(progress.raw()),
                 else => return err,
             },
             else => return err,
         };
         defer guard.release();
-        try self.closeUnlocked(writer);
+        try self.closeUnlockedWithProgress(progress);
+    }
+
+    fn closeUnlocked(self: Runtime, writer: *std.Io.Writer) !void {
+        var progress = progress_mod.Line.init(writer);
+        try self.closeUnlockedWithProgress(&progress);
     }
 
     /// Teardown order is load-bearing: stop services and docker first so their
     /// stop signals reach the live panes, let them settle, then kill the tmux
     /// session. Killing the session first would orphan those resources.
-    fn closeUnlocked(self: Runtime, writer: *std.Io.Writer) !void {
+    fn closeUnlockedWithProgress(self: Runtime, progress: anytype) !void {
         switch (self.tmux().observeSession()) {
             .active => {},
             .missing => {
-                try writer.writeAll("Session not running\n");
+                try progress.raw().writeAll("Session not running\n");
                 return;
             },
-            .unavailable => return waits.reportTmuxUnavailable(writer),
+            .unavailable => return waits.reportTmuxUnavailable(progress.raw()),
         }
         // kill-session below stops services regardless, so skip the graceful poll;
         // `stop --all` keeps it since it leaves the session running.
-        try self.lifecycle().teardownResources(writer);
+        try self.lifecycle().teardownResourcesWithProgress(progress);
         self.runner().sleep(close_kill_settle);
         const tx = self.tmux();
         try tx.killSession();
     }
 
     pub fn re(self: Runtime, writer: *std.Io.Writer) !void {
+        var progress = progress_mod.Line.init(writer);
+        try self.reWithProgress(&progress);
+    }
+
+    pub fn reWithProgress(self: Runtime, progress: anytype) !void {
         if (try self.inTmux()) {
             const tx = self.tmux();
             const command = try zask_command.invoke(self.gpa, self.zask_path, self.config_path, "re");
@@ -209,13 +233,13 @@ pub const Runtime = struct {
             error.LockBusy => switch (self.tmux().observeSession()) {
                 .active => return self.detachSingleClientForRe(),
                 .missing => return err,
-                .unavailable => return waits.reportTmuxUnavailable(writer),
+                .unavailable => return waits.reportTmuxUnavailable(progress.raw()),
             },
             else => return err,
         };
         defer guard.release();
-        try self.closeUnlocked(writer);
-        try self.openUnlocked("all", writer);
+        try self.closeUnlockedWithProgress(progress);
+        try self.openUnlockedWithProgress("all", progress);
     }
 
     pub fn start(self: Runtime, target: []const u8, writer: *std.Io.Writer) !void {
@@ -875,6 +899,90 @@ test "runtime.open: creates session without tmuxp" {
     try proc_runner.expectCommandContaining(&recorder, "preview-list");
     try proc_runner.expectCommandOrder(&recorder, "bind-key", "attach-session");
     try proc_runner.expectNoTmuxSizingCommands(&recorder);
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "runtime.open: clears progress before attaching" {
+    const ProgressSpy = struct {
+        writer: *std.Io.Writer,
+        recorder: *const proc_runner.Recorder,
+        before_interactive_count: usize = 0,
+
+        pub fn raw(self: *@This()) *std.Io.Writer {
+            return self.writer;
+        }
+
+        pub fn step(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
+            try self.writer.print(fmt, args);
+        }
+
+        pub fn info(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
+            try self.step(fmt, args);
+        }
+
+        pub fn focus(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
+            try self.step(fmt, args);
+        }
+
+        pub fn command(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
+            _ = self;
+            _ = fmt;
+            _ = args;
+        }
+
+        pub fn status(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
+            try self.step(fmt, args);
+        }
+
+        pub fn detail(self: *@This(), lines: []const []const u8) !void {
+            _ = self;
+            _ = lines;
+        }
+
+        pub fn warn(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
+            try self.step(fmt, args);
+        }
+
+        pub fn beforeInteractive(self: *@This()) !void {
+            if (proc_runner.findCommandContaining(self.recorder, "attach-session") != null) return error.AttachBeforeInteractive;
+            self.before_interactive_count += 1;
+        }
+
+        pub fn failContext(self: *@This()) !void {
+            _ = self;
+        }
+
+        pub fn finishSuccess(self: *@This()) !void {
+            _ = self;
+        }
+
+        pub fn finishError(self: *@This()) !void {
+            _ = self;
+        }
+    };
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    var runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var progress = ProgressSpy{ .writer = &writer, .recorder = &recorder };
+
+    try runtime.openUnlockedWithProgress("all", &progress);
+
+    try std.testing.expectEqual(@as(usize, 1), progress.before_interactive_count);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Attaching to workspace") != null);
+    try proc_runner.expectCommandOrder(&recorder, "bind-key", "attach-session");
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 

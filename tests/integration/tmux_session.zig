@@ -131,7 +131,10 @@ test "tmux_setup.applySessionOptions: keeps global attach hook while refreshing 
     client.killSession() catch {};
     try client.newSession("dashboard", "/tmp", "sleep 60");
     defer client.killSession() catch {};
-    try runDiscard(arena.allocator(), io, &.{ build_options.tmux_path, "set-hook", "-g", "client-attached", "display-message global" });
+
+    const before_global_hooks = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "show-hooks", "-g" });
+    defer std.testing.allocator.free(before_global_hooks.stdout);
+    defer std.testing.allocator.free(before_global_hooks.stderr);
 
     try zask.tmux_setup.applySessionOptions(arena.allocator(), client, .{
         .project = "demo",
@@ -142,7 +145,7 @@ test "tmux_setup.applySessionOptions: keeps global attach hook while refreshing 
     const global_hooks = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "show-hooks", "-g" });
     defer std.testing.allocator.free(global_hooks.stdout);
     defer std.testing.allocator.free(global_hooks.stderr);
-    try std.testing.expect(std.mem.indexOf(u8, global_hooks.stdout, "client-attached[0] display-message global") != null);
+    try std.testing.expectEqualStrings(before_global_hooks.stdout, global_hooks.stdout);
 
     const hooks = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "show-hooks", "-t", session });
     defer std.testing.allocator.free(hooks.stdout);
@@ -151,6 +154,11 @@ test "tmux_setup.applySessionOptions: keeps global attach hook while refreshing 
     try std.testing.expect(std.mem.indexOf(u8, hooks.stdout, "sync-size") != null);
     try std.testing.expect(std.mem.indexOf(u8, hooks.stdout, "#{client_width}") != null);
     try std.testing.expect(std.mem.indexOf(u8, hooks.stdout, "#{client_height}") != null);
+
+    const prefix = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "show-option", "-t", session, "-qv", "prefix" });
+    defer std.testing.allocator.free(prefix.stdout);
+    defer std.testing.allocator.free(prefix.stderr);
+    try std.testing.expectEqualStrings("C-q\n", prefix.stdout);
 }
 
 test "runtime: open, status, close build, report, then remove workspace" {
