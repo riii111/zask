@@ -37,8 +37,7 @@ latest_version() {
 }
 
 verify_checksum() {
-    archive="$1"
-    checksum="$2"
+    checksum="$1"
 
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum -c "$checksum" >/dev/null
@@ -68,7 +67,7 @@ curl -fsSL "$download_url" -o "${tmp_dir}/${archive_name}"
 curl -fsSL "${download_url}.sha256" -o "${tmp_dir}/${archive_name}.sha256"
 
 cd "$tmp_dir"
-verify_checksum "$archive_name" "${archive_name}.sha256"
+verify_checksum "${archive_name}.sha256"
 tar -xzf "$archive_name"
 
 mkdir -p "$INSTALL_DIR"
