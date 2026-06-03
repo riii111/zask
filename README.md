@@ -46,7 +46,14 @@ Unlike plain tmux session managers, zask knows about service groups, startup ord
 
 ## Installation
 
-zask is currently built from source.
+Download a prebuilt binary from GitHub Releases and place it on your `PATH`:
+
+```bash
+tar -xf zask-<target>.tar.gz
+install -m 0755 zask ~/.local/bin/zask
+```
+
+Or build from source:
 
 ```bash
 git clone https://github.com/riii111/zask
@@ -172,6 +179,12 @@ also has `zask.json` or `.zask.json`, the local file takes precedence.
 - tmux
 - Zig 0.16.0 to build from source
 - Docker with Docker Compose, when the config has a `docker` section
+
+## License
+
+Copyright 2026 riii111.
+
+zask is licensed under the Apache License, Version 2.0.
 
 ## Development
 
