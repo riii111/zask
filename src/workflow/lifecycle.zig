@@ -824,7 +824,7 @@ test "lifecycle.startAll: honors docker startup order step" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "lifecycle.startAll: command phase runs interactively" {
+test "lifecycle.startAll: command phase captures output" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo"},
@@ -845,7 +845,7 @@ test "lifecycle.startAll: command phase runs interactively" {
     try lifecycle.startAll("all", &writer, .observe);
 
     const command = proc_runner.findCommandContaining(&recorder, "echo setup") orelse return error.CommandNotFound;
-    try std.testing.expect(command.interactive);
+    try std.testing.expect(!command.interactive);
     try proc_runner.expectCommandArgv(command, &.{ "bash", "-c", "echo setup" });
 }
 
