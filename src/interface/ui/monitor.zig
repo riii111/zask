@@ -20,7 +20,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.
         defer frame_arena.deinit();
         const frame_gpa = frame_arena.allocator();
         const runner: proc_runner.Runner = .{ .gpa = frame_gpa, .io = io };
-        const ctx: RenderContext = .{ .gpa = frame_gpa, .cfg = cfg, .runner = runner, .tmux = .{ .gpa = frame_gpa, .runner = runner, .session = try cfg.sessionName() } };
+        const ctx: RenderContext = .{ .gpa = frame_gpa, .cfg = cfg, .runner = runner, .tmux = .{ .gpa = frame_gpa, .runner = runner, .session = try cfg.projectName() } };
         var frame: std.Io.Writer.Allocating = .init(frame_gpa);
         try render(ctx, &frame.writer);
         const output = frame.writer.buffered();
@@ -260,7 +260,7 @@ fn recordedCommandCount(recorder: *const proc_runner.Recorder, name: []const u8)
 test "monitor.render: shows local and named command forms" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -286,7 +286,7 @@ test "monitor.render: shows local and named command forms" {
 test "monitor.service: skips health checks unless pane is busy" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve","port":3000}]}]
         \\}
     ;
@@ -311,7 +311,7 @@ test "monitor.service: skips health checks unless pane is busy" {
 test "monitor.service: checks health for busy shell panes" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve","port":3000}]}]
         \\}
     ;
@@ -337,7 +337,7 @@ test "monitor.service: checks health for busy shell panes" {
 test "monitor.docker: skips compose observation unless pane is busy" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml"},
         \\  "groups": []
         \\}
@@ -362,7 +362,7 @@ test "monitor.docker: skips compose observation unless pane is busy" {
 test "monitor.docker: checks compose for busy shell panes" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml"},
         \\  "groups": []
         \\}
@@ -388,7 +388,7 @@ test "monitor.docker: checks compose for busy shell panes" {
 test "monitor.docker: runs compose from the root-relative subdir, not a doubled path" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"work/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"work/demo"},
         \\  "docker": {"compose": "infra/compose.yaml"},
         \\  "groups": []
         \\}

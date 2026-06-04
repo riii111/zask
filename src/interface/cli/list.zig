@@ -51,7 +51,7 @@ test "list.run: prints services and docker section" {
 
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "infra/compose.yaml"},
         \\  "groups": [
         \\    {"name":"backend","services":[

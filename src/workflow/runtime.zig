@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("../model/config.zig");
+const configured_path = @import("configured_path.zig");
 const docker_client = @import("../platform/docker.zig");
 const env = @import("../platform/env.zig");
 const lifecycle_mod = @import("lifecycle.zig");
@@ -28,13 +29,14 @@ pub const Runtime = struct {
     runner_impl: proc_runner.Runner,
     tmux_impl: tmux_client.Client,
     docker_impl: docker_client.Compose,
+    validate_configured_dirs: bool = true,
     lock_probe: lock.Probe = .system,
 
     pub fn status(self: Runtime, writer: *std.Io.Writer) !void {
         switch (self.tmux().observeSession()) {
             .active => {},
             .missing => {
-                try writer.print("Session '{s}' is not running\n", .{try self.cfg.sessionName()});
+                try writer.print("Session '{s}' is not running\n", .{try self.cfg.projectName()});
                 return;
             },
             .unavailable => return waits.reportTmuxUnavailable(writer),
@@ -161,6 +163,7 @@ pub const Runtime = struct {
         }
         try progress.step("Opening workspace...\n", .{});
         const tx = self.tmux();
+        try self.ensureOpenConfiguredDirs(scratch, progress.raw());
         try self.openSessionWithDashboardWindow(scratch);
         errdefer tx.killSession() catch {};
         try self.installSessionOptions(scratch);
@@ -274,6 +277,7 @@ pub const Runtime = struct {
             .runner = self.runner(),
             .tmux = self.tmux(),
             .docker = self.docker(),
+            .validate_configured_dirs = self.validate_configured_dirs,
         };
     }
 
@@ -314,6 +318,38 @@ pub const Runtime = struct {
         if (self.cfg.dockerEnabled()) {
             try tx.newWindowAfter(previous_window, session_layout.docker_window, try pathing.absolute(scratch, self.io, try self.cfg.dockerDir(scratch)), try zask_command.waitingPlaceholder(scratch, session_layout.docker_placeholder_title));
         }
+    }
+
+    fn ensureOpenConfiguredDirs(self: Runtime, scratch: std.mem.Allocator, writer: *std.Io.Writer) !void {
+        if (!self.validate_configured_dirs) return;
+        const project_root = try self.cfg.projectRoot(scratch);
+        try self.ensureConfiguredDir(scratch, writer, .{
+            .field = "project.root",
+            .configured = try self.cfg.configuredProjectRoot(),
+            .path = project_root,
+        });
+        for (try self.cfg.services()) |service| {
+            const name = try config.Config.serviceName(service);
+            try self.ensureConfiguredDir(scratch, writer, .{
+                .field = "service.dir",
+                .service = name,
+                .configured = config.Config.serviceDirValue(service),
+                .project_root = project_root,
+                .path = try self.cfg.serviceDir(scratch, service),
+            });
+        }
+        if (self.cfg.dockerEnabled()) {
+            try self.ensureConfiguredDir(scratch, writer, .{
+                .field = "docker.compose",
+                .configured = try self.cfg.configuredDockerCompose(scratch),
+                .project_root = project_root,
+                .path = try self.cfg.dockerDir(scratch),
+            });
+        }
+    }
+
+    fn ensureConfiguredDir(self: Runtime, scratch: std.mem.Allocator, writer: *std.Io.Writer, problem: configured_path.Problem) !void {
+        try configured_path.ensureDir(scratch, self.io, writer, problem);
     }
 
     fn focusDashboard(self: Runtime) !void {
@@ -377,7 +413,7 @@ test "runtime.status: maps observations to text" {
 test "runtime.status: reports session not running when missing" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
@@ -400,7 +436,7 @@ test "runtime.status: reports session not running when missing" {
 test "runtime.status: renders dead pane and unavailable docker as degraded text" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose":"compose.yaml"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
@@ -428,7 +464,7 @@ test "runtime.status: renders dead pane and unavailable docker as degraded text"
 test "runtime.status: distinguishes tmux unavailable from session missing" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -453,7 +489,7 @@ test "runtime.status: distinguishes tmux unavailable from session missing" {
 test "runtime.attach: reports tmux unavailable distinctly from missing session" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -475,7 +511,7 @@ test "runtime.attach: reports tmux unavailable distinctly from missing session" 
 test "runtime.logs: reports tmux unavailable distinctly from missing session" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
@@ -497,7 +533,7 @@ test "runtime.logs: reports tmux unavailable distinctly from missing session" {
 test "runtime.close: kills session after signaling services" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
@@ -523,7 +559,7 @@ test "runtime.close: kills session after signaling services" {
 test "runtime.close: kills session after resource stop" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
@@ -560,7 +596,7 @@ test "runtime.close: kills session after resource stop" {
 test "runtime.close: skips stop polling before killing session" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
@@ -587,7 +623,7 @@ test "runtime.close: skips stop polling before killing session" {
 test "runtime.close: kills session even when a service signal fails" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
@@ -612,7 +648,7 @@ test "runtime.close: kills session even when a service signal fails" {
 test "runtime.close: kills session even when send-keys fails" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
@@ -639,7 +675,7 @@ test "runtime.close: kills session even when send-keys fails" {
 test "runtime.attach: refreshes size hooks before switching client" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -669,7 +705,7 @@ test "runtime.attach: refreshes size hooks before switching client" {
 test "runtime.attach: reports missing session" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -694,7 +730,7 @@ test "runtime.attach: reports missing session" {
 test "runtime.attach: attaches session when outside tmux" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -720,7 +756,7 @@ test "runtime.attach: attaches session when outside tmux" {
 test "runtime.logs: switches client then selects window inside tmux" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
@@ -747,7 +783,7 @@ test "runtime.logs: switches client then selects window inside tmux" {
 test "runtime.logs: selects window then attaches outside tmux" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
@@ -770,7 +806,7 @@ test "runtime.logs: selects window then attaches outside tmux" {
 test "runtime.openSession: creates dashboard service and docker windows" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "infra/compose.yaml"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
@@ -809,7 +845,7 @@ test "runtime.openSession: creates dashboard service and docker windows" {
 test "runtime.openSession: places docker after dashboard" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "infra/compose.yaml"},
         \\  "groups": []
         \\}
@@ -834,10 +870,45 @@ test "runtime.openSession: places docker after dashboard" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
+test "runtime.open: reports missing service directory before creating session" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    const json = try std.fmt.allocPrint(gpa,
+        \\{{
+        \\  "project": {{"name":"demo","root":"{s}"}},
+        \\  "groups": [{{"name":"backend","services":[{{"name":"api","dir":"missing-api","command":"serve"}}]}}]
+        \\}}
+    , .{root});
+    var recorder = proc_runner.Recorder.init(gpa);
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = gpa, .io = io, .recorder = &recorder };
+    const cfg = try config.Config.parse(gpa, json, "/home/me");
+    var runtime = testRuntime(gpa, run, cfg);
+    runtime.io = io;
+    runtime.validate_configured_dirs = true;
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var progress = progress_mod.Line.init(&writer);
+
+    try std.testing.expectError(error.ConfigPathNotFound, runtime.openUnlockedWithProgress("all", &progress));
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Error: configured directory not found") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "field: service.dir") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "service: api") != null);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "new-session") == null);
+}
+
 test "runtime.open: kills partial session on setup failure" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -864,7 +935,7 @@ test "runtime.open: kills partial session on setup failure" {
 test "runtime.open: creates session without tmuxp" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -966,7 +1037,7 @@ test "runtime.open: clears progress before attaching" {
     };
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -993,7 +1064,7 @@ test "runtime.open: clears progress before attaching" {
 test "runtime.open: refreshes bindings for existing session" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -1024,7 +1095,7 @@ test "runtime.open: refreshes bindings for existing session" {
 test "runtime.previewList: resizes windows before choose-tree" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -1062,7 +1133,7 @@ test "runtime.previewList: resizes windows before choose-tree" {
 test "runtime.previewList: rejects resized window mismatch" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -1093,7 +1164,7 @@ test "runtime.previewList: rejects resized window mismatch" {
 test "runtime.syncWindowSizes: resizes windows without opening tree mode" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -1122,7 +1193,7 @@ test "runtime.syncWindowSizes: resizes windows without opening tree mode" {
 test "runtime.open: attaches when lock is busy" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -1166,7 +1237,7 @@ test "runtime.open: attaches when lock is busy" {
 test "runtime.open: preserves lock busy before session exists" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -1209,7 +1280,7 @@ test "runtime.open: preserves lock busy before session exists" {
 test "runtime.open: reports tmux unavailable when lock busy and tmux unreachable" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -1249,7 +1320,7 @@ test "runtime.open: reports tmux unavailable when lock busy and tmux unreachable
 test "runtime.close: reports tmux unavailable when lock busy and tmux unreachable" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -1289,7 +1360,7 @@ test "runtime.close: reports tmux unavailable when lock busy and tmux unreachabl
 test "runtime.re: delegates to single attached client when lock is busy" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -1337,7 +1408,7 @@ test "runtime.re: delegates to single attached client when lock is busy" {
 test "runtime.re: rejects lock busy delegation with multiple attached clients" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -1381,7 +1452,7 @@ test "runtime.re: rejects lock busy delegation with multiple attached clients" {
 test "runtime.re: detaches client exec inside tmux" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -1419,5 +1490,6 @@ fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.C
         .runner_impl = runner,
         .tmux_impl = .{ .gpa = gpa, .runner = runner, .session = "demo" },
         .docker_impl = .{ .gpa = gpa, .runner = runner, .dir = "/tmp/demo", .file = "compose.yaml" },
+        .validate_configured_dirs = false,
     };
 }

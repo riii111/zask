@@ -22,7 +22,6 @@ pub const keys = struct {
     // project
     pub const name = "name";
     pub const root = "root";
-    pub const session_name = "session_name";
 
     // docker (authored)
     pub const compose = "compose";
@@ -86,14 +85,12 @@ pub const Config = struct {
         return name;
     }
 
-    pub fn sessionName(self: Config) ![]const u8 {
-        const name = self.optionalString(&.{ "project", "session_name" }, try self.projectName());
-        try validate.identifier(name);
-        return name;
-    }
-
     pub fn projectRoot(self: Config, gpa: std.mem.Allocator) ![]const u8 {
         return self.expandHome(gpa, try self.requiredString(&.{ "project", "root" }));
+    }
+
+    pub fn configuredProjectRoot(self: Config) ![]const u8 {
+        return self.requiredString(&.{ "project", "root" });
     }
 
     pub fn dockerEnabled(self: Config) bool {
@@ -118,6 +115,12 @@ pub const Config = struct {
 
     pub fn dockerComposeFile(self: Config) []const u8 {
         return self.optionalString(&.{ "docker", "compose_file" }, "docker-compose.yml");
+    }
+
+    pub fn configuredDockerCompose(self: Config, gpa: std.mem.Allocator) ![]const u8 {
+        const dir = self.dockerSubdir();
+        if (std.mem.eql(u8, dir, ".")) return self.dockerComposeFile();
+        return std.fs.path.join(gpa, &.{ dir, self.dockerComposeFile() });
     }
 
     pub fn dockerWaitTimeout(self: Config) i64 {
@@ -178,6 +181,10 @@ pub const Config = struct {
         }
         try validate.relativeSubPath(dir);
         return std.fs.path.join(gpa, &.{ try self.projectRoot(gpa), dir });
+    }
+
+    pub fn serviceDirValue(service: Value) []const u8 {
+        return config_value.optionalObjectString(service, "dir", ".");
     }
 
     pub fn serviceStartCommand(gpa: std.mem.Allocator, service: Value) ![]const u8 {
@@ -526,14 +533,9 @@ fn validateProject(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Di
         return;
     };
     if (!try expectObject(project, "project", diags)) return;
-    try checkKeys(gpa, project, "project", &.{ keys.name, keys.root, keys.session_name }, diags);
+    try checkKeys(gpa, project, "project", &.{ keys.name, keys.root }, diags);
     try checkIdentifier(gpa, project, keys.name, "project", diags);
     _ = try checkRequiredString(gpa, project, keys.root, "project", diags);
-    try checkOptionalString(gpa, project, keys.session_name, "project", diags);
-    if (project.object.get(keys.session_name)) |session_name| {
-        if (session_name == .string)
-            validate.identifier(session_name.string) catch try diags.add("project.session_name", "must be a valid identifier");
-    }
 }
 
 fn validateDocker(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics) !void {
@@ -861,7 +863,7 @@ fn parseTestConfig(arena: *std.heap.ArenaAllocator, json: []const u8) !Config {
 test "config.parse: loads defaults and resolves paths" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"~/work/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"~/work/demo"},
         \\  "groups": [
         \\    {"name":"be","services":[{"name":"api","dir":"backend","command":"serve"}]},
         \\    {"name":"fe","services":[{"name":"web","dir":"~/apps/web","runtime":"npm","command":"run dev","external":true}]}
@@ -873,7 +875,6 @@ test "config.parse: loads defaults and resolves paths" {
     defer arena.deinit();
     const cfg = try parseTestConfig(&arena, json);
     try std.testing.expectEqualStrings("demo", try cfg.projectName());
-    try std.testing.expectEqualStrings("demo", try cfg.sessionName());
     try std.testing.expectEqualStrings("/home/me/work/demo", try cfg.projectRoot(arena.allocator()));
     try std.testing.expectEqualStrings("/home/me/work/demo/backend", try cfg.serviceDir(arena.allocator(), try cfg.findService("api")));
     try std.testing.expectEqualStrings("npm run dev", try Config.serviceStartCommand(arena.allocator(), try cfg.findService("web")));
@@ -881,24 +882,10 @@ test "config.parse: loads defaults and resolves paths" {
     try std.testing.expectEqualStrings("api", group[0]);
 }
 
-test "config.sessionName: defaults to project name" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo"},
-        \\  "groups": []
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const cfg = try parseTestConfig(&arena, json);
-
-    try std.testing.expectEqualStrings("demo", try cfg.sessionName());
-}
-
 test "config.resolvePhaseGroup: resolves profiles and phase group overrides" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [
         \\    {"name":"backend","services":[
         \\      {"name":"api","dir":"backend","command":"serve"},
@@ -930,7 +917,7 @@ test "config.resolvePhaseGroup: resolves profiles and phase group overrides" {
 test "config.commandPhaseCommand: resolves command phase profile overrides and fallback" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [],
         \\  "startup_order": [
         \\    {"command":"default","commands":{"core":"override"}},
@@ -951,7 +938,7 @@ test "config.commandPhaseCommand: resolves command phase profile overrides and f
 test "config.phasePortWaitTimeout: normalizes startup order override" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":5432}]}],
         \\  "startup_order": [{"group":"backend","wait_ports":[5432],"port_wait_timeout_seconds":240}]
         \\}
@@ -966,7 +953,7 @@ test "config.phasePortWaitTimeout: normalizes startup order override" {
 test "config.parse: rejects unknown service runtime" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","runtime":"unknown","command":"serve"}]}]
         \\}
     ;
@@ -979,7 +966,7 @@ test "config.parse: rejects unknown service runtime" {
 test "config.resolveGroup: rejects missing services and groups" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
@@ -994,7 +981,7 @@ test "config.resolveGroup: rejects missing services and groups" {
 test "config.parse: rejects malformed group aliases" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [],
         \\  "group_aliases": {"bad":["api", 42]}
         \\}
@@ -1008,7 +995,7 @@ test "config.parse: rejects malformed group aliases" {
 test "config.parse: rejects legacy flat services" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "services": [{"name":"api","command":"serve"}]
         \\}
     ;
@@ -1021,7 +1008,7 @@ test "config.parse: rejects legacy flat services" {
 test "config.parse: rejects legacy phases" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [],
         \\  "phases": [{"type":"docker"}]
         \\}
@@ -1035,25 +1022,25 @@ test "config.parse: rejects legacy phases" {
 test "config.parse: rejects malformed docker config" {
     const cases = [_][]const u8{
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {},
         \\  "groups": []
         \\}
         ,
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": true,
         \\  "groups": []
         \\}
         ,
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml", "wait_timeout_seconds": "30"},
         \\  "groups": []
         \\}
         ,
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": ""},
         \\  "groups": []
         \\}
@@ -1070,61 +1057,61 @@ test "config.parse: rejects malformed docker config" {
 test "config.parse: rejects malformed startup order" {
     const cases = [_][]const u8{
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [],
         \\  "startup_order": [{"unexpected": true}]
         \\}
         ,
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [],
         \\  "startup_order": [{"group": "backend", "wait_ports": ["3000"]}]
         \\}
         ,
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [],
         \\  "startup_order": [{"group": "backend", "port_wait_timeout_seconds": "180"}]
         \\}
         ,
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [],
         \\  "startup_order": [{"command": "setup", "dir": 42}]
         \\}
         ,
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [],
         \\  "startup_order": [{"command": "setup", "on_fail": false}]
         \\}
         ,
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [],
         \\  "startup_order": [{"command": "setup", "commands": {"core": false}}]
         \\}
         ,
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [],
         \\  "startup_order": [{"name": 42, "command": "setup"}]
         \\}
         ,
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [],
         \\  "startup_order": [{"docker": false}]
         \\}
         ,
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [],
         \\  "startup_order": [{"group": "backend", "dir": "backend"}]
         \\}
         ,
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [],
         \\  "startup_order": [{"group": "backend", "command": "setup"}]
         \\}
@@ -1141,7 +1128,7 @@ test "config.parse: rejects malformed startup order" {
 test "config.parse: rejects duplicate groups and services" {
     const cases = [_][]const u8{
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [
         \\    {"name":"backend","services":[]},
         \\    {"name":"backend","services":[]}
@@ -1149,7 +1136,7 @@ test "config.parse: rejects duplicate groups and services" {
         \\}
         ,
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [
         \\    {"name":"backend","services":[{"name":"api","command":"serve"}]},
         \\    {"name":"worker","services":[{"name":"api","command":"work"}]}
@@ -1168,29 +1155,29 @@ test "config.parse: rejects duplicate groups and services" {
 test "config.parse: rejects unknown public schema fields" {
     const cases = [_][]const u8{
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "unexpected": true,
         \\  "groups": []
         \\}
         ,
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo","unexpected":true},
+        \\  "project": {"name":"demo","root":"/tmp/demo","unexpected":true},
         \\  "groups": []
         \\}
         ,
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml", "unexpected": true},
         \\  "groups": []
         \\}
         ,
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","unexpected":true,"services":[]}]
         \\}
         ,
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","command":"serve","unexpected":true}]}]
         \\}
         ,
@@ -1206,7 +1193,7 @@ test "config.parse: rejects unknown public schema fields" {
 test "config.parse: rejects invalid identifiers in project and service names" {
     const json =
         \\{
-        \\  "project": {"name":"bad name","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"bad name","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api.bad","dir":"backend","command":"serve"}]}]
         \\}
     ;
@@ -1219,7 +1206,7 @@ test "config.parse: rejects invalid identifiers in project and service names" {
 test "config.parse: rejects project-relative service paths that escape root" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"../escape","command":"serve"}]}]
         \\}
     ;
@@ -1232,7 +1219,7 @@ test "config.parse: rejects project-relative service paths that escape root" {
 test "config.serviceDir: allows external service paths outside project root" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"../external","external":true,"command":"serve"}]}]
         \\}
     ;
@@ -1246,7 +1233,7 @@ test "config.serviceDir: allows external service paths outside project root" {
 test "config.parse: rejects docker paths that escape project root" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "../escape/compose.yaml"},
         \\  "groups": []
         \\}
