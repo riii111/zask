@@ -325,7 +325,7 @@ pub const Runtime = struct {
         const project_root = try self.cfg.projectRoot(scratch);
         try self.ensureConfiguredDir(scratch, writer, .{
             .field = "project.root",
-            .configured = try self.cfg.projectRootValue(),
+            .configured = try self.cfg.configuredProjectRoot(),
             .path = project_root,
         });
         for (try self.cfg.services()) |service| {
@@ -341,14 +341,14 @@ pub const Runtime = struct {
         if (self.cfg.dockerEnabled()) {
             try self.ensureConfiguredDir(scratch, writer, .{
                 .field = "docker.compose",
-                .configured = try self.cfg.dockerComposeValue(scratch),
+                .configured = try self.cfg.configuredDockerCompose(scratch),
                 .project_root = project_root,
                 .path = try self.cfg.dockerDir(scratch),
             });
         }
     }
 
-    fn ensureConfiguredDir(self: Runtime, scratch: std.mem.Allocator, writer: *std.Io.Writer, problem: ConfiguredDir) !void {
+    fn ensureConfiguredDir(self: Runtime, scratch: std.mem.Allocator, writer: *std.Io.Writer, problem: configured_path.Problem) !void {
         try configured_path.ensureDir(scratch, self.io, writer, problem);
     }
 
@@ -387,8 +387,6 @@ pub const Runtime = struct {
         return env.exists(self.environ, "TMUX");
     }
 };
-
-const ConfiguredDir = configured_path.Problem;
 
 fn paneStatusText(state: observations.PaneState) []const u8 {
     return switch (state) {

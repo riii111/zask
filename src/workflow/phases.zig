@@ -123,7 +123,7 @@ fn phaseCwd(ctx: anytype, dir: []const u8, field: []const u8, writer: *std.Io.Wr
         if (ctx.validate_configured_dirs) {
             try configured_path.ensureDir(ctx.gpa, ctx.runner.io, writer, .{
                 .field = "project.root",
-                .configured = try ctx.cfg.projectRootValue(),
+                .configured = try ctx.cfg.configuredProjectRoot(),
                 .path = project_root,
             });
         }
