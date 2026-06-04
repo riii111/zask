@@ -1,0 +1,33 @@
+name: Setup Zig
+description: Download and add a Zig release to PATH
+inputs:
+  version:
+    description: Zig version to install
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        ZIG_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64) zig_target="x86_64-linux" ;;
+          Linux-ARM64) zig_target="aarch64-linux" ;;
+          macOS-X64) zig_target="x86_64-macos" ;;
+          macOS-ARM64) zig_target="aarch64-macos" ;;
+          *)
+            echo "unsupported runner: ${RUNNER_OS}-${RUNNER_ARCH}" >&2
+            exit 1
+            ;;
+        esac
+
+        archive="zig-${zig_target}-${ZIG_VERSION}.tar.xz"
+        install_dir="${RUNNER_TEMP}/zig-${ZIG_VERSION}"
+        mkdir -p "$install_dir"
+
+        curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${archive}" -o "${RUNNER_TEMP}/${archive}"
+        tar -xf "${RUNNER_TEMP}/${archive}" -C "$install_dir" --strip-components=1
+        echo "$install_dir" >> "$GITHUB_PATH"
