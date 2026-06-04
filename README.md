@@ -100,11 +100,6 @@ Create a project config:
 }
 ```
 
-`wait_ports` declares ports that must become reachable before startup continues.
-Each port waits up to 180 seconds by default. Use
-`port_wait_timeout_seconds` on that startup step when a slower service needs a
-different limit.
-
 ## Requirements
 
 - tmux
