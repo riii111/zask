@@ -3,7 +3,7 @@ const harness = @import("harness.zig");
 
 const valid_config =
     \\{
-    \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+    \\  "project": {"name":"demo","root":"/tmp/demo"},
     \\  "groups": [
     \\    {"name":"backend","services":[
     \\      {"name":"api","dir":"backend","command":"serve","port":18080}
@@ -11,6 +11,19 @@ const valid_config =
     \\  ]
     \\}
 ;
+
+fn namedConfig(gpa: std.mem.Allocator, name: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(gpa,
+        \\{{
+        \\  "project": {{"name":"{s}","root":"/tmp/{s}"}},
+        \\  "groups": [
+        \\    {{"name":"backend","services":[
+        \\      {{"name":"api","dir":"backend","command":"serve","port":18080}}
+        \\    ]}}
+        \\  ]
+        \\}}
+    , .{ name, name });
+}
 
 test "list: discovers zask.json in current project" {
     const gpa = std.testing.allocator;
@@ -87,7 +100,9 @@ test "config discovery: infers named config from current directory" {
 
     var ws = try harness.Workspace.init(gpa, io);
     defer ws.deinit(gpa);
-    try ws.writeNamedConfig(gpa, io, "project", valid_config);
+    const config = try namedConfig(gpa, "project");
+    defer gpa.free(config);
+    try ws.writeNamedConfig(gpa, io, "project", config);
 
     var res = try harness.spawnZask(gpa, io, .{
         .cwd = ws.project,
@@ -98,7 +113,7 @@ test "config discovery: infers named config from current directory" {
 
     try std.testing.expect(res.exitedWith(0));
     try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
-    try std.testing.expect(std.mem.startsWith(u8, res.stdout, "demo\n"));
+    try std.testing.expect(std.mem.startsWith(u8, res.stdout, "project\n"));
 }
 
 test "config discovery: local config wins over inferred named config" {
@@ -205,7 +220,9 @@ test "list: named project wins over command-form discovery" {
 
     var ws = try harness.Workspace.init(gpa, io);
     defer ws.deinit(gpa);
-    try ws.writeNamedConfig(gpa, io, "list", valid_config);
+    const config = try namedConfig(gpa, "list");
+    defer gpa.free(config);
+    try ws.writeNamedConfig(gpa, io, "list", config);
 
     var res = try harness.spawnZask(gpa, io, .{
         .cwd = ws.project,
@@ -216,7 +233,7 @@ test "list: named project wins over command-form discovery" {
 
     try std.testing.expect(res.exitedWith(0));
     try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
-    try std.testing.expect(std.mem.startsWith(u8, res.stdout, "demo\n"));
+    try std.testing.expect(std.mem.startsWith(u8, res.stdout, "list\n"));
 }
 
 test "config discovery: named project wins over broken local config" {
@@ -228,7 +245,9 @@ test "config discovery: named project wins over broken local config" {
     var ws = try harness.Workspace.init(gpa, io);
     defer ws.deinit(gpa);
     try ws.writeProjectFile(io, "zask.json", "not json");
-    try ws.writeNamedConfig(gpa, io, "logs", valid_config);
+    const config = try namedConfig(gpa, "logs");
+    defer gpa.free(config);
+    try ws.writeNamedConfig(gpa, io, "logs", config);
 
     var res = try harness.spawnZask(gpa, io, .{
         .cwd = ws.project,
@@ -239,7 +258,7 @@ test "config discovery: named project wins over broken local config" {
 
     try std.testing.expect(res.exitedWith(0));
     try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
-    try std.testing.expect(std.mem.startsWith(u8, res.stdout, "demo\n"));
+    try std.testing.expect(std.mem.startsWith(u8, res.stdout, "logs\n"));
 }
 
 test "list: discovered config validation reports selected file" {

@@ -67,7 +67,7 @@ test "runtime.previewList: resizes stale detached windows before tree mode" {
 
     const cfg = try zask.config.Config.parse(arena.allocator(),
         \\{
-        \\  "project": {"name":"demo","root":"/tmp","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp"},
         \\  "groups": []
         \\}
     , "/tmp");
@@ -200,10 +200,10 @@ test "runtime: open, status, close build, report, then remove workspace" {
 
     const cfg_json = try std.fmt.allocPrint(a,
         \\{{
-        \\  "project": {{ "name": "demo", "root": "/tmp", "session_name": "{s}" }},
+        \\  "project": {{ "name": "demo", "root": "/tmp" }},
         \\  "groups": [{{ "name": "backend", "services": [{{ "name": "api", "dir": ".", "command": "sleep 300" }}] }}]
         \\}}
-    , .{session});
+    , .{});
     const cfg = try zask.config.Config.parse(a, cfg_json, "/tmp");
     const run_impl: zask.runner.Runner = .{ .gpa = a, .io = io };
     const runtime_base = try std.fmt.allocPrint(a, "/tmp/zask-test-{d}-runtime", .{std.c.getpid()});
@@ -254,7 +254,7 @@ test "runtime: start, logs, stop, restart move service pane through its lifecycl
 
     const cfg = try zask.config.Config.parse(gpa,
         \\{
-        \\  "project": {"name":"demo","root":"/tmp","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":".","command":"sleep 60"}]}]
         \\}
     , "/tmp");
