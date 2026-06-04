@@ -89,6 +89,10 @@ pub const Config = struct {
         return self.expandHome(gpa, try self.requiredString(&.{ "project", "root" }));
     }
 
+    pub fn projectRootValue(self: Config) ![]const u8 {
+        return self.requiredString(&.{ "project", "root" });
+    }
+
     pub fn dockerEnabled(self: Config) bool {
         return self.optionalBool(&.{ "docker", "enabled" }, false);
     }
@@ -111,6 +115,12 @@ pub const Config = struct {
 
     pub fn dockerComposeFile(self: Config) []const u8 {
         return self.optionalString(&.{ "docker", "compose_file" }, "docker-compose.yml");
+    }
+
+    pub fn dockerComposeValue(self: Config, gpa: std.mem.Allocator) ![]const u8 {
+        const dir = self.dockerSubdir();
+        if (std.mem.eql(u8, dir, ".")) return self.dockerComposeFile();
+        return std.fs.path.join(gpa, &.{ dir, self.dockerComposeFile() });
     }
 
     pub fn dockerWaitTimeout(self: Config) i64 {

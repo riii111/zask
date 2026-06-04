@@ -325,7 +325,7 @@ pub const Runtime = struct {
         const project_root = try self.cfg.projectRoot(scratch);
         try self.ensureConfiguredDir(scratch, writer, .{
             .field = "project.root",
-            .configured = try self.cfg.requiredString(&.{ "project", "root" }),
+            .configured = try self.cfg.projectRootValue(),
             .path = project_root,
         });
         for (try self.cfg.services()) |service| {
@@ -341,7 +341,7 @@ pub const Runtime = struct {
         if (self.cfg.dockerEnabled()) {
             try self.ensureConfiguredDir(scratch, writer, .{
                 .field = "docker.compose",
-                .configured = self.cfg.dockerSubdir(),
+                .configured = try self.cfg.dockerComposeValue(scratch),
                 .project_root = project_root,
                 .path = try self.cfg.dockerDir(scratch),
             });

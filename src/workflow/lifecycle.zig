@@ -342,7 +342,7 @@ pub const Lifecycle = struct {
         const docker_path = try self.cfg.dockerDir(self.gpa);
         try self.ensureConfiguredDir(progress.raw(), .{
             .field = "docker.compose",
-            .configured = self.cfg.dockerSubdir(),
+            .configured = try self.cfg.dockerComposeValue(self.gpa),
             .project_root = project_root,
             .path = docker_path,
         });
