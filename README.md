@@ -66,6 +66,23 @@ real commands such as `npm run dev`, `make dev`, or `mise exec -- npm run dev`
 over aliases, shell functions, or version-manager setup that only exists in
 `.zshrc`.
 
+`wait_ports` declares ports that must become reachable before startup continues.
+Each port waits up to 180 seconds by default. Use
+`port_wait_timeout_seconds` on a `startup_order` group step when a slower service
+needs a different limit:
+
+```json
+{
+  "startup_order": [
+    {
+      "group": "backend",
+      "wait_ports": [3000],
+      "port_wait_timeout_seconds": 240
+    }
+  ]
+}
+```
+
 ## Requirements
 
 - tmux
