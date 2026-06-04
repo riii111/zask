@@ -41,6 +41,7 @@ pub const keys = struct {
     // startup_order step
     pub const group = "group";
     pub const wait_ports = "wait_ports";
+    pub const port_wait_timeout_seconds = "port_wait_timeout_seconds";
     pub const on_fail = "on_fail";
     pub const commands = "commands";
 
@@ -126,6 +127,10 @@ pub const Config = struct {
         const node = self.get(&.{"phases"}) orelse return &.{};
         if (node != .array) return &.{};
         return node.array.items;
+    }
+
+    pub fn phasePortWaitTimeout(phase: Value, default: i64) i64 {
+        return config_value.optionalObjectInt(phase, "port_wait_timeout") orelse default;
     }
 
     pub fn prechecks(self: Config) []const Value {
@@ -391,6 +396,10 @@ fn normalizeStartupOrder(gpa: std.mem.Allocator, root: *std.json.ObjectMap, sour
                 if (step.object.get(keys.wait_ports)) |wait_ports| {
                     try phase.put(gpa, "wait_ports", wait_ports);
                 }
+                if (step.object.get(keys.port_wait_timeout_seconds)) |timeout| {
+                    if (timeout != .integer) return error.InvalidConfig;
+                    try phase.put(gpa, "port_wait_timeout", timeout);
+                }
             },
             .command => {
                 try phase.put(gpa, "type", .{ .string = "command" });
@@ -644,7 +653,7 @@ fn validateStartupStep(gpa: std.mem.Allocator, step: Value, path: []const u8, di
         return;
     }
     if (has_group) {
-        try checkKeys(gpa, step, path, &.{ keys.name, keys.group, keys.wait_ports }, diags);
+        try checkKeys(gpa, step, path, &.{ keys.name, keys.group, keys.wait_ports, keys.port_wait_timeout_seconds }, diags);
         const group_path = try joinPath(gpa, path, "group");
         const group = step.object.get(keys.group).?;
         if (group != .string) {
@@ -659,6 +668,9 @@ fn validateStartupStep(gpa: std.mem.Allocator, step: Value, path: []const u8, di
             } else for (wait_ports.array.items, 0..) |port, pi| {
                 if (port != .integer) try diags.add(try indexedPath(gpa, wpath, pi), "must be an integer");
             }
+        }
+        if (step.object.get(keys.port_wait_timeout_seconds)) |timeout| {
+            if (timeout != .integer) try diags.add(try joinPath(gpa, path, keys.port_wait_timeout_seconds), "must be an integer");
         }
         return;
     }
@@ -913,6 +925,21 @@ test "config.commandPhaseCommand: resolves command phase profile overrides and f
     try std.testing.expectEqualStrings("fallback", try Config.commandPhaseCommand(phases[1], "all"));
 }
 
+test "config.phasePortWaitTimeout: normalizes startup order override" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":5432}]}],
+        \\  "startup_order": [{"group":"backend","wait_ports":[5432],"port_wait_timeout_seconds":240}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try parseTestConfig(&arena, json);
+
+    try std.testing.expectEqual(@as(i64, 240), Config.phasePortWaitTimeout(cfg.phases()[0], 180));
+}
+
 test "config.parse: rejects unknown service runtime" {
     const json =
         \\{
@@ -1033,6 +1060,12 @@ test "config.parse: rejects malformed startup order" {
         ,
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [],
+        \\  "startup_order": [{"group": "backend", "port_wait_timeout_seconds": "180"}]
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
         \\  "groups": [],
         \\  "startup_order": [{"command": "setup", "dir": 42}]
         \\}

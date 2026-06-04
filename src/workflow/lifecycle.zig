@@ -880,6 +880,33 @@ test "waits: report port and stop timeouts" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api ... warning: may not have stopped") != null);
 }
 
+test "waits.waitForPortWithProgress: caps final sleep to timeout" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    recorder.term = .{ .exited = 1 };
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var progress = progress_mod.Line.init(&writer);
+
+    try std.testing.expectError(error.PortNotReady, waits.waitForPortWithProgress(lifecycle, 5432, 5, null, &progress));
+
+    try std.testing.expectEqual(@as(usize, 3), recorder.sleeps.items.len);
+    try std.testing.expectEqual(std.Io.Duration.fromSeconds(2), recorder.sleeps.items[0].duration);
+    try std.testing.expectEqual(std.Io.Duration.fromSeconds(2), recorder.sleeps.items[1].duration);
+    try std.testing.expectEqual(std.Io.Duration.fromSeconds(1), recorder.sleeps.items[2].duration);
+}
+
 test "waits.ensureDockerReady: times out when compose never reports running" {
     const json =
         \\{
