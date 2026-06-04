@@ -36,7 +36,17 @@ pub fn runPrechecks(ctx: anytype, progress: anytype) !void {
         const cwd = try phaseCwd(ctx, dir);
         try progress.step("Checking {s}...\n", .{name});
         try progress.command("{s}\n", .{command});
-        const result = proc_runner.captured(try ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd }));
+        const result = proc_runner.captured(ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd }) catch |err| switch (err) {
+            error.OutputTooLarge => {
+                if (std.mem.eql(u8, on_fail, "abort")) {
+                    try writePrecheckOutputTooLargeError(progress, name, command, hint);
+                    return error.PrecheckFailed;
+                }
+                try writePrecheckOutputTooLargeWarning(progress, name, command, hint);
+                continue;
+            },
+            else => return err,
+        });
         defer ctx.gpa.free(result.stdout);
         defer ctx.gpa.free(result.stderr);
         if (commandSucceeded(result.term)) continue;
@@ -59,15 +69,26 @@ pub fn runCommandPhaseWithProgress(ctx: anytype, phase: std.json.Value, profile:
     const dir = config_value.optionalObjectString(phase, "dir", "");
     const cwd = try phaseCwd(ctx, dir);
     const phase_label = commandPhaseLabel(phase);
-    try progress.focus("Running {s}...\n", .{phase_label});
+    try progress.step("Running {s}...\n", .{phase_label});
     try progress.command("{s}\n", .{command});
 
-    const result = proc_runner.captured(try ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd }));
+    const on_fail = config_value.optionalObjectString(phase, "on_fail", "abort");
+    const result = proc_runner.captured(ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd }) catch |err| switch (err) {
+        error.OutputTooLarge => {
+            if (std.mem.eql(u8, on_fail, "abort")) {
+                try writeCommandOutputTooLargeError(progress, phase_label, command, cwd);
+                return error.CommandPhaseFailed;
+            }
+            try writeCommandOutputTooLargeWarning(progress, phase_label, command, cwd);
+            return;
+        },
+        else => return err,
+    });
     defer ctx.gpa.free(result.stdout);
     defer ctx.gpa.free(result.stderr);
     if (commandSucceeded(result.term)) return;
 
-    if (std.mem.eql(u8, config_value.optionalObjectString(phase, "on_fail", "abort"), "abort")) {
+    if (std.mem.eql(u8, on_fail, "abort")) {
         try writeCommandError(progress, phase_label, command, cwd, result);
         return error.CommandPhaseFailed;
     }
@@ -190,9 +211,19 @@ fn writePrecheckError(progress: anytype, name: []const u8, command: []const u8, 
     try writePrecheckDiagnostic(progress.raw(), "Error", name, command, result, hint);
 }
 
+fn writePrecheckOutputTooLargeError(progress: anytype, name: []const u8, command: []const u8, hint: []const u8) !void {
+    try progress.failContext();
+    try writePrecheckOutputTooLargeDiagnostic(progress.raw(), "Error", name, command, hint);
+}
+
 fn writePrecheckWarning(progress: anytype, name: []const u8, command: []const u8, result: std.process.RunResult, hint: []const u8) !void {
     try progress.warnContext();
     try writePrecheckDiagnostic(progress.raw(), "Warning", name, command, result, hint);
+}
+
+fn writePrecheckOutputTooLargeWarning(progress: anytype, name: []const u8, command: []const u8, hint: []const u8) !void {
+    try progress.warnContext();
+    try writePrecheckOutputTooLargeDiagnostic(progress.raw(), "Warning", name, command, hint);
 }
 
 fn writePrecheckDiagnostic(writer: *std.Io.Writer, label: []const u8, name: []const u8, command: []const u8, result: std.process.RunResult, hint: []const u8) !void {
@@ -209,14 +240,34 @@ fn writePrecheckDiagnostic(writer: *std.Io.Writer, label: []const u8, name: []co
     try writer.flush();
 }
 
+fn writePrecheckOutputTooLargeDiagnostic(writer: *std.Io.Writer, label: []const u8, name: []const u8, command: []const u8, hint: []const u8) !void {
+    try writer.writeByte('\n');
+    try writer.print("{s}: {s} check failed\n", .{ label, name });
+    try writer.print("  command: {s}\n", .{command});
+    try writer.writeAll("  exit code: unavailable\n");
+    try writer.writeAll("  output: exceeded capture limit\n");
+    if (hint.len > 0) try writer.print("Hint: {s}\n", .{hint});
+    try writer.flush();
+}
+
 fn writeCommandError(progress: anytype, phase_label: []const u8, command: []const u8, cwd: []const u8, result: std.process.RunResult) !void {
     try progress.failContext();
     try writeCommandDiagnostic(progress.raw(), "Error", phase_label, command, cwd, result);
 }
 
+fn writeCommandOutputTooLargeError(progress: anytype, phase_label: []const u8, command: []const u8, cwd: []const u8) !void {
+    try progress.failContext();
+    try writeCommandOutputTooLargeDiagnostic(progress.raw(), "Error", phase_label, command, cwd);
+}
+
 fn writeCommandWarning(progress: anytype, phase_label: []const u8, command: []const u8, cwd: []const u8, result: std.process.RunResult) !void {
     try progress.warnContext();
     try writeCommandDiagnostic(progress.raw(), "Warning", phase_label, command, cwd, result);
+}
+
+fn writeCommandOutputTooLargeWarning(progress: anytype, phase_label: []const u8, command: []const u8, cwd: []const u8) !void {
+    try progress.warnContext();
+    try writeCommandOutputTooLargeDiagnostic(progress.raw(), "Warning", phase_label, command, cwd);
 }
 
 fn writeCommandDiagnostic(writer: *std.Io.Writer, label: []const u8, phase_label: []const u8, command: []const u8, cwd: []const u8, result: std.process.RunResult) !void {
@@ -231,6 +282,17 @@ fn writeCommandDiagnostic(writer: *std.Io.Writer, label: []const u8, phase_label
     }
     try writeOutputTail(writer, "stderr tail", result.stderr);
     try writeOutputTail(writer, "stdout tail", result.stdout);
+    try writer.flush();
+}
+
+fn writeCommandOutputTooLargeDiagnostic(writer: *std.Io.Writer, label: []const u8, phase_label: []const u8, command: []const u8, cwd: []const u8) !void {
+    try writer.writeByte('\n');
+    try writer.print("{s}: command phase failed\n", .{label});
+    try writer.print("  phase: {s}\n", .{phase_label});
+    try writer.print("  command: {s}\n", .{command});
+    try writer.print("  cwd: {s}\n", .{cwd});
+    try writer.writeAll("  exit code: unavailable\n");
+    try writer.writeAll("  output: exceeded capture limit\n");
     try writer.flush();
 }
 
@@ -465,6 +527,42 @@ test "phases.runPrechecks: warn failure prints warning and hint" {
     , writer.buffered());
 }
 
+test "phases.runPrechecks: reports capture limit with check context" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "prechecks": [{"name":"tool","command":"verbose-check","on_fail":"abort","hint":"reduce output"}],
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueueError(error.StreamTooLong);
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var progress = TestProgress{ .writer = &writer };
+    defer progress.deinit();
+
+    try std.testing.expectError(error.PrecheckFailed, runPrechecks(lifecycle, &progress));
+
+    try std.testing.expectEqualStrings(
+        \\Checking tool...
+        \\  $ verbose-check
+        \\
+        \\Error: tool check failed
+        \\  command: verbose-check
+        \\  exit code: unavailable
+        \\  output: exceeded capture limit
+        \\Hint: reduce output
+        \\
+    , writer.buffered());
+}
+
 test "phases.runCommandPhase: warn continues and abort fails startup" {
     const json =
         \\{
@@ -492,6 +590,7 @@ test "phases.runCommandPhase: warn continues and abort fails startup" {
     try std.testing.expectError(error.CommandPhaseFailed, runCommandPhase(lifecycle, cfg.phases()[1], "all", &writer));
 
     try std.testing.expectEqualStrings(
+        \\Running command...
         \\
         \\Warning: command phase failed
         \\  phase: command
@@ -502,6 +601,7 @@ test "phases.runCommandPhase: warn continues and abort fails startup" {
         \\    warn err
         \\  stdout tail:
         \\    warn out
+        \\Running command...
         \\
         \\Error: command phase failed
         \\  phase: command
@@ -572,6 +672,7 @@ test "phases.runCommandPhase: reports profile override command failure context" 
     try std.testing.expectError(error.CommandPhaseFailed, runCommandPhase(lifecycle, cfg.phases()[0], "release", &writer));
 
     try std.testing.expectEqualStrings(
+        \\Running prepare...
         \\
         \\Error: command phase failed
         \\  phase: prepare
@@ -592,6 +693,40 @@ test "phases.runCommandPhase: reports profile override command failure context" 
     const command = proc_runner.findCommandContaining(&recorder, "zig build -Drelease") orelse return error.CommandNotFound;
     try std.testing.expect(!command.interactive);
     try proc_runner.expectCommandArg(command, 2, "zig build -Drelease");
+}
+
+test "phases.runCommandPhase: reports capture limit with phase context" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "startup_order": [{"name":"prepare","command":"gradle build"}],
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueueError(error.StreamTooLong);
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.CommandPhaseFailed, runCommandPhase(lifecycle, cfg.phases()[0], "all", &writer));
+
+    try std.testing.expectEqualStrings(
+        \\Running prepare...
+        \\
+        \\Error: command phase failed
+        \\  phase: prepare
+        \\  command: gradle build
+        \\  cwd: /tmp/demo
+        \\  exit code: unavailable
+        \\  output: exceeded capture limit
+        \\
+    , writer.buffered());
 }
 
 test "phases.runServicePhase: propagates window-not-ready as startup failure" {
