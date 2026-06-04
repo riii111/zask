@@ -475,7 +475,7 @@ test "phases.phaseKind: classifies lifecycle phase kinds" {
 test "phases.runPrechecks: abort failure replays precheck context" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "prechecks": [{"name":"tool","command":"missing-tool","on_fail":"abort","hint":"install tool"}],
         \\  "groups": []
         \\}
@@ -514,7 +514,7 @@ test "phases.runPrechecks: abort failure replays precheck context" {
 test "phases.runPrechecks: warn failure prints warning and hint" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "prechecks": [{"name":"tool","command":"missing-tool","on_fail":"warn","hint":"install tool"}],
         \\  "groups": []
         \\}
@@ -551,7 +551,7 @@ test "phases.runPrechecks: warn failure prints warning and hint" {
 test "phases.runPrechecks: reports capture limit with check context" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "prechecks": [{"name":"tool","command":"verbose-check","on_fail":"abort","hint":"reduce output"}],
         \\  "groups": []
         \\}
@@ -588,7 +588,7 @@ test "phases.runPrechecks: reports capture limit with check context" {
 test "phases.runPrechecks: capture limit warning continues" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "prechecks": [
         \\    {"name":"before","command":"before-check"},
         \\    {"name":"verbose","command":"verbose-check","on_fail":"warn"},
@@ -630,7 +630,7 @@ test "phases.runPrechecks: capture limit warning continues" {
 test "phases.runCommandPhase: warn continues and abort fails startup" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "startup_order": [
         \\    {"command":"warn setup","on_fail":"warn"},
         \\    {"command":"abort setup","on_fail":"abort"}
@@ -690,7 +690,7 @@ test "phases.runCommandPhase: warn continues and abort fails startup" {
 test "phases.runCommandPhase: progress includes phase name and command" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "startup_order": [{"name":"release setup","command":"zig build"}],
         \\  "groups": []
         \\}
@@ -717,7 +717,7 @@ test "phases.runCommandPhase: progress includes phase name and command" {
 test "phases.runCommandPhase: reports profile override command failure context" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "startup_order": [{"name":"prepare","command":"default prepare","commands":{"release":"zig build -Drelease"}}],
         \\  "groups": []
         \\}
@@ -762,7 +762,7 @@ test "phases.runCommandPhase: reports profile override command failure context" 
 test "phases.runCommandPhase: reports capture limit with phase context" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "startup_order": [{"name":"prepare","command":"gradle build"}],
         \\  "groups": []
         \\}
@@ -797,7 +797,7 @@ test "phases.runCommandPhase: reports capture limit with phase context" {
 test "phases.runCommandPhase: capture limit warning continues" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "startup_order": [{"name":"prepare","command":"gradle build","on_fail":"warn"}],
         \\  "groups": []
         \\}
@@ -832,7 +832,7 @@ test "phases.runCommandPhase: capture limit warning continues" {
 test "phases.runServicePhase: propagates window-not-ready as startup failure" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}],
         \\  "startup_order": [{"group":"backend"}]
         \\}
@@ -855,7 +855,7 @@ test "phases.runServicePhase: propagates window-not-ready as startup failure" {
 test "phases.runServicePhase: honors wait_ports as a declared dependency" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":5432}]}],
         \\  "startup_order": [{"name":"backend","group":"backend","wait_ports":[5432]}]
         \\}
@@ -887,7 +887,7 @@ test "phases.runServicePhase: honors wait_ports as a declared dependency" {
 test "phases.runServicePhase: reports port readiness failure" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":5432}]}],
         \\  "startup_order": [{"name":"backend","group":"backend","wait_ports":[5432],"port_wait_timeout_seconds":5}]
         \\}
@@ -929,7 +929,7 @@ test "phases.runServicePhase: reports port readiness failure" {
 test "phases.runServicePhase: reports unmatched port without service hints" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":3000}]}],
         \\  "startup_order": [{"group":"backend","wait_ports":[5432]}]
         \\}
@@ -967,7 +967,7 @@ test "phases.runServicePhase: reports unmatched port without service hints" {
 test "phases.phaseCwd: rejects path traversal" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
