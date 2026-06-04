@@ -138,41 +138,6 @@ zask demo start backend
 zask demo stop --all
 ```
 
-## Commands
-
-```text
-zask <command>
-zask <project> <command>
-zask --config <file> <command>
-
-zask init [project] [--root <path>] [--force]
-zask open [--docker|--<profile>]
-zask attach
-zask list
-zask status
-zask logs <service>
-zask start <--all|svc|group|docker>
-zask stop <--all|svc|group|docker>
-zask restart <svc|group|docker>
-zask re
-zask close
-
-zask <project> open [--docker|--<profile>]
-zask <project> attach
-zask <project> list
-zask <project> status
-zask <project> logs <service>
-zask <project> start <--all|svc|group|docker>
-zask <project> stop <--all|svc|group|docker>
-zask <project> restart <svc|group|docker>
-zask <project> re
-zask <project> close
-```
-
-Use `zask --config <file> <command>` to run against an explicit config file.
-Inside an initialized project directory, use `zask <command>`. If that directory
-also has `zask.json` or `.zask.json`, the local file takes precedence.
-
 ## Requirements
 
 - tmux
