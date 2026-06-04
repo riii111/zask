@@ -11,6 +11,7 @@ const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
 
 const default_port_wait_timeout_seconds = 180;
+const diagnostic_tail_lines = 6;
 
 pub const PhaseKind = enum {
     docker,
@@ -35,25 +36,16 @@ pub fn runPrechecks(ctx: anytype, progress: anytype) !void {
         const cwd = try phaseCwd(ctx, dir);
         try progress.step("Checking {s}...\n", .{name});
         try progress.command("{s}\n", .{command});
-        const result = ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd, .check = true }) catch |err| switch (err) {
-            error.CommandFailed => {
-                if (std.mem.eql(u8, on_fail, "abort")) {
-                    try progress.failContext();
-                    const writer = progress.raw();
-                    try writer.writeByte('\n');
-                    try writer.print("Error: {s} check failed\n", .{name});
-                    if (hint.len > 0) try writer.print("Hint: {s}\n", .{hint});
-                    try writer.flush();
-                    return error.PrecheckFailed;
-                }
-                try writePrecheckWarning(progress, name, command, hint);
-                continue;
-            },
-            else => return err,
-        };
-        const captured = result.captured;
-        ctx.gpa.free(captured.stdout);
-        ctx.gpa.free(captured.stderr);
+        const result = proc_runner.captured(try ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd }));
+        defer ctx.gpa.free(result.stdout);
+        defer ctx.gpa.free(result.stderr);
+        if (commandSucceeded(result.term)) continue;
+
+        if (std.mem.eql(u8, on_fail, "abort")) {
+            try writePrecheckError(progress, name, command, result, hint);
+            return error.PrecheckFailed;
+        }
+        try writePrecheckWarning(progress, name, command, result, hint);
     }
 }
 
@@ -69,20 +61,17 @@ pub fn runCommandPhaseWithProgress(ctx: anytype, phase: std.json.Value, profile:
     const phase_label = commandPhaseLabel(phase);
     try progress.focus("Running {s}...\n", .{phase_label});
     try progress.command("{s}\n", .{command});
-    try progress.beforeInteractive();
 
-    const result = try ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd, .interactive = true });
-    const term = switch (result) {
-        .term => |value| value,
-        else => unreachable,
-    };
-    if (commandSucceeded(term)) return;
+    const result = proc_runner.captured(try ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd }));
+    defer ctx.gpa.free(result.stdout);
+    defer ctx.gpa.free(result.stderr);
+    if (commandSucceeded(result.term)) return;
 
     if (std.mem.eql(u8, config_value.optionalObjectString(phase, "on_fail", "abort"), "abort")) {
-        try writeCommandError(progress, phase_label, command, cwd, term);
+        try writeCommandError(progress, phase_label, command, cwd, result);
         return error.CommandPhaseFailed;
     }
-    try writeCommandWarning(progress, phase_label, command, cwd, term);
+    try writeCommandWarning(progress, phase_label, command, cwd, result);
 }
 
 pub fn runServicePhase(ctx: anytype, phase: std.json.Value, profile: []const u8, writer: *std.Io.Writer, mode: lifecycle_mod.StartMode) !void {
@@ -196,37 +185,93 @@ fn commandSucceeded(term: std.process.Child.Term) bool {
     };
 }
 
-fn writePrecheckWarning(progress: anytype, name: []const u8, command: []const u8, hint: []const u8) !void {
+fn writePrecheckError(progress: anytype, name: []const u8, command: []const u8, result: std.process.RunResult, hint: []const u8) !void {
+    try progress.failContext();
+    try writePrecheckDiagnostic(progress.raw(), "Error", name, command, result, hint);
+}
+
+fn writePrecheckWarning(progress: anytype, name: []const u8, command: []const u8, result: std.process.RunResult, hint: []const u8) !void {
     try progress.warnContext();
-    const writer = progress.raw();
+    try writePrecheckDiagnostic(progress.raw(), "Warning", name, command, result, hint);
+}
+
+fn writePrecheckDiagnostic(writer: *std.Io.Writer, label: []const u8, name: []const u8, command: []const u8, result: std.process.RunResult, hint: []const u8) !void {
     try writer.writeByte('\n');
-    try writer.print("Warning: {s} check failed\n", .{name});
+    try writer.print("{s}: {s} check failed\n", .{ label, name });
     try writer.print("  command: {s}\n", .{command});
+    switch (result.term) {
+        .exited => |code| try writer.print("  exit code: {d}\n", .{code}),
+        else => try writer.writeAll("  exit code: unavailable\n"),
+    }
+    try writeOutputTail(writer, "stderr tail", result.stderr);
+    try writeOutputTail(writer, "stdout tail", result.stdout);
     if (hint.len > 0) try writer.print("Hint: {s}\n", .{hint});
     try writer.flush();
 }
 
-fn writeCommandError(progress: anytype, phase_label: []const u8, command: []const u8, cwd: []const u8, term: std.process.Child.Term) !void {
+fn writeCommandError(progress: anytype, phase_label: []const u8, command: []const u8, cwd: []const u8, result: std.process.RunResult) !void {
     try progress.failContext();
-    try writeCommandDiagnostic(progress.raw(), "Error", phase_label, command, cwd, term);
+    try writeCommandDiagnostic(progress.raw(), "Error", phase_label, command, cwd, result);
 }
 
-fn writeCommandWarning(progress: anytype, phase_label: []const u8, command: []const u8, cwd: []const u8, term: std.process.Child.Term) !void {
+fn writeCommandWarning(progress: anytype, phase_label: []const u8, command: []const u8, cwd: []const u8, result: std.process.RunResult) !void {
     try progress.warnContext();
-    try writeCommandDiagnostic(progress.raw(), "Warning", phase_label, command, cwd, term);
+    try writeCommandDiagnostic(progress.raw(), "Warning", phase_label, command, cwd, result);
 }
 
-fn writeCommandDiagnostic(writer: *std.Io.Writer, label: []const u8, phase_label: []const u8, command: []const u8, cwd: []const u8, term: std.process.Child.Term) !void {
+fn writeCommandDiagnostic(writer: *std.Io.Writer, label: []const u8, phase_label: []const u8, command: []const u8, cwd: []const u8, result: std.process.RunResult) !void {
     try writer.writeByte('\n');
     try writer.print("{s}: command phase failed\n", .{label});
     try writer.print("  phase: {s}\n", .{phase_label});
     try writer.print("  command: {s}\n", .{command});
     try writer.print("  cwd: {s}\n", .{cwd});
-    switch (term) {
+    switch (result.term) {
         .exited => |code| try writer.print("  exit code: {d}\n", .{code}),
         else => try writer.writeAll("  exit code: unavailable\n"),
     }
+    try writeOutputTail(writer, "stderr tail", result.stderr);
+    try writeOutputTail(writer, "stdout tail", result.stdout);
     try writer.flush();
+}
+
+fn writeOutputTail(writer: *std.Io.Writer, label: []const u8, output: []const u8) !void {
+    var tail: [diagnostic_tail_lines][]const u8 = undefined;
+    var count: usize = 0;
+    var next: usize = 0;
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0) continue;
+        if (count < diagnostic_tail_lines) {
+            tail[count] = line;
+            count += 1;
+        } else {
+            tail[next] = line;
+            next = (next + 1) % diagnostic_tail_lines;
+        }
+    }
+    if (count == 0) return;
+
+    try writer.print("  {s}:\n", .{label});
+    const start = if (count == diagnostic_tail_lines) next else 0;
+    for (0..count) |offset| {
+        const line = tail[(start + offset) % diagnostic_tail_lines];
+        try writer.writeAll("    ");
+        try writeDisplayLine(writer, line);
+        try writer.writeByte('\n');
+    }
+}
+
+fn writeDisplayLine(writer: *std.Io.Writer, line: []const u8) !void {
+    for (line) |byte| {
+        if (byte < 0x20 and byte != '\t') {
+            try writer.writeByte('?');
+        } else if (byte == 0x7f) {
+            try writer.writeByte('?');
+        } else {
+            try writer.writeByte(byte);
+        }
+    }
 }
 
 fn writeLastLog(ctx: anytype, window: []const u8, writer: *std.Io.Writer) !void {
@@ -356,7 +401,7 @@ test "phases.runPrechecks: abort failure replays precheck context" {
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
-    try recorder.enqueue("", "missing", .{ .exited = 1 });
+    try recorder.enqueue("install log\n", "missing\n", .{ .exited = 1 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
@@ -372,6 +417,12 @@ test "phases.runPrechecks: abort failure replays precheck context" {
         \\  $ missing-tool
         \\
         \\Error: tool check failed
+        \\  command: missing-tool
+        \\  exit code: 1
+        \\  stderr tail:
+        \\    missing
+        \\  stdout tail:
+        \\    install log
         \\Hint: install tool
         \\
     , writer.buffered());
@@ -389,7 +440,7 @@ test "phases.runPrechecks: warn failure prints warning and hint" {
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
-    try recorder.enqueue("", "missing", .{ .exited = 1 });
+    try recorder.enqueue("install log\n", "missing\n", .{ .exited = 1 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
@@ -404,6 +455,11 @@ test "phases.runPrechecks: warn failure prints warning and hint" {
         \\
         \\Warning: tool check failed
         \\  command: missing-tool
+        \\  exit code: 1
+        \\  stderr tail:
+        \\    missing
+        \\  stdout tail:
+        \\    install log
         \\Hint: install tool
         \\
     , writer.buffered());
@@ -424,8 +480,8 @@ test "phases.runCommandPhase: warn continues and abort fails startup" {
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
-    try recorder.enqueue("", "", .{ .exited = 1 });
-    try recorder.enqueue("", "", .{ .exited = 1 });
+    try recorder.enqueue("warn out\n", "warn err\n", .{ .exited = 1 });
+    try recorder.enqueue("abort out\n", "abort err\n", .{ .exited = 1 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
@@ -442,16 +498,26 @@ test "phases.runCommandPhase: warn continues and abort fails startup" {
         \\  command: warn setup
         \\  cwd: /tmp/demo
         \\  exit code: 1
+        \\  stderr tail:
+        \\    warn err
+        \\  stdout tail:
+        \\    warn out
         \\
         \\Error: command phase failed
         \\  phase: command
         \\  command: abort setup
         \\  cwd: /tmp/demo
         \\  exit code: 1
+        \\  stderr tail:
+        \\    abort err
+        \\  stdout tail:
+        \\    abort out
         \\
     , writer.buffered());
     const warn_command = proc_runner.findCommandContaining(&recorder, "warn setup") orelse return error.CommandNotFound;
     const abort_command = proc_runner.findCommandContaining(&recorder, "abort setup") orelse return error.CommandNotFound;
+    try std.testing.expect(!warn_command.interactive);
+    try std.testing.expect(!abort_command.interactive);
     try proc_runner.expectCommandArg(warn_command, 2, "warn setup");
     try proc_runner.expectCommandArg(abort_command, 2, "abort setup");
     try proc_runner.expectNoRemainingResponses(&recorder);
@@ -496,7 +562,7 @@ test "phases.runCommandPhase: reports profile override command failure context" 
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
-    try recorder.enqueue("", "", .{ .exited = 42 });
+    try recorder.enqueue("one\ntwo\nthree\nfour\nfive\nsix\nseven\n", "bad\x1b[2J\n", .{ .exited = 42 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
@@ -512,9 +578,19 @@ test "phases.runCommandPhase: reports profile override command failure context" 
         \\  command: zig build -Drelease
         \\  cwd: /tmp/demo
         \\  exit code: 42
+        \\  stderr tail:
+        \\    bad?[2J
+        \\  stdout tail:
+        \\    two
+        \\    three
+        \\    four
+        \\    five
+        \\    six
+        \\    seven
         \\
     , writer.buffered());
     const command = proc_runner.findCommandContaining(&recorder, "zig build -Drelease") orelse return error.CommandNotFound;
+    try std.testing.expect(!command.interactive);
     try proc_runner.expectCommandArg(command, 2, "zig build -Drelease");
 }
 
