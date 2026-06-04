@@ -8,41 +8,21 @@ zask opens a project-local tmux workspace for your API, workers, frontend, and D
 
 ## Concept
 
-> tmux-native / Project-local / Process-aware / Zig native / Built for daily dev loops
+> Keep the local development environment visible, repeatable, and boring.
 
-API servers, frontend dev servers, workers, and Docker Compose run while you code. zask treats those processes as the development environment.
-
-It creates a persistent tmux workspace from local project configuration. Each service gets a predictable window, the dashboard and monitor stay in the same session, and common lifecycle actions can be run from outside tmux or from an attached client.
-
-zask focuses on the running local environment: open it once, observe what is alive, restart one service, jump to logs, and close everything cleanly when you are done.
-
-Unlike plain tmux session managers, zask knows about service groups, startup order, Docker Compose, ports, and running pane state. It is a local dev process manager that uses tmux as the runtime UI.
+zask started from project-local tmux scripts that were useful enough to keep,
+but too implicit to share or maintain. It keeps that workflow: local config,
+predictable tmux windows, and commands that operate on the processes you
+actually use while coding.
 
 ## Features
 
 ![switch pane](https://github.com/user-attachments/assets/64214681-3a0d-4d15-ac01-c3d26671d70a)
 
-### Workspace
-
-- **Open workspace** - Create a tmux session with dashboard, monitor, service windows, and an optional Docker window
-- **Attach** - Attach from a normal shell or switch clients when already inside tmux
-- **Restart session** - Tear down and reopen the workspace with one command
-- **Close cleanly** - Stop configured resources before killing the tmux session
-
-### Process lifecycle
-
-- **Start / stop / restart** - Control all services, Docker, one service, or a configured service group
-- **Status** - Show Docker Compose state and per-service pane state
-- **Logs focus** - Jump directly to a service window
-- **Startup profiles** - Open only the services needed for a workflow
-
-### Project configuration
-
-- **Service groups** - Address related services together, like backend or frontend
-- **Startup order** - Run Docker, commands, and service groups in a predictable order
-- **Docker Compose integration** - Start and stop Compose from the project directory
-- **Health inputs** - Track service ports and healthcheck metadata in the same config
-- **Runtime commands** - Prefix service commands with runtimes like `npm`, `pnpm`, `bun`, or `cargo`
+- Create a persistent tmux session with dashboard, monitor, service windows, and optional Docker Compose.
+- Control one service, a service group, Docker, or the whole workspace from the project root.
+- Track startup order, ports, health metadata, and running pane state in local project config.
+- Jump between logs and services without turning tmux session management into shell scripts.
 
 ## Installation
 
@@ -69,50 +49,6 @@ zig build install
 
 ## Quick Start
 
-Create a project config:
-
-```json
-{
-  "project": {
-    "name": "demo",
-    "root": "."
-  },
-  "docker": {
-    "compose": "compose.yaml"
-  },
-  "groups": [
-    {
-      "name": "backend",
-      "services": [
-        {"name": "api", "dir": "backend", "command": "serve", "port": 18080},
-        {"name": "worker", "dir": "backend", "command": "work"}
-      ]
-    },
-    {
-      "name": "frontend",
-      "services": [
-        {"name": "web", "dir": "frontend", "runtime": "npm", "command": "run dev", "port": 5173}
-      ]
-    }
-  ],
-  "startup_order": [
-    {"docker": true},
-    {"group": "backend", "wait_ports": [18080]},
-    {"group": "frontend"}
-  ]
-}
-```
-
-Run zask with an explicit config:
-
-```bash
-zask --config ./config.json open
-zask --config ./config.json status
-zask --config ./config.json restart api
-zask --config ./config.json logs web
-zask --config ./config.json close
-```
-
 Initialize the current project once, then run zask from that project directory:
 
 ```bash
@@ -123,20 +59,12 @@ zask logs web
 zask close
 ```
 
+Run `zask help` for the full command list.
+
 Service commands run in a non-interactive `sh -lc` inside each tmux pane. Prefer
 real commands such as `npm run dev`, `make dev`, or `mise exec -- npm run dev`
 over aliases, shell functions, or version-manager setup that only exists in
 `.zshrc`.
-
-You can still use a named project config from outside the project directory:
-
-```bash
-zask demo open
-zask demo list
-zask demo status
-zask demo start backend
-zask demo stop --all
-```
 
 ## Requirements
 
@@ -164,16 +92,4 @@ Without direnv:
 
 ```bash
 nix develop
-```
-
-## Showcase Fixture
-
-The repository includes a fictional Receipt Lab workspace for public
-screenshots and local behavior checks. It models a web console, BFF, backend
-APIs, workers, and optional Docker-backed infrastructure without using any
-private project names.
-
-```bash
-zig build run -- --config testdata/showcase/receipt-lab/zask.json list
-zig build run -- --config testdata/showcase/receipt-lab/zask.json open --dashboard
 ```
