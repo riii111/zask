@@ -928,7 +928,7 @@ test "config.commandPhaseCommand: resolves command phase profile overrides and f
 test "config.phasePortWaitTimeout: normalizes startup order override" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":5432}]}],
         \\  "startup_order": [{"group":"backend","wait_ports":[5432],"port_wait_timeout_seconds":240}]
         \\}
@@ -1065,7 +1065,7 @@ test "config.parse: rejects malformed startup order" {
         \\}
         ,
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [],
         \\  "startup_order": [{"command": "setup", "dir": 42}]
         \\}

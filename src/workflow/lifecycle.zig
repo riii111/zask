@@ -883,7 +883,7 @@ test "waits: report port and stop timeouts" {
 test "waits.waitForPortWithProgress: caps final sleep to timeout" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
