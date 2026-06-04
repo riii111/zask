@@ -61,6 +61,10 @@ zask close
 
 Run `zask help` for the full command list.
 
+Named configs are stored under the same name as `project.name`. For example,
+`zask demo open` loads the `demo` config, and that config must set
+`"project": {"name": "demo", ...}`.
+
 Service commands run in a non-interactive `sh -lc` inside each tmux pane. Prefer
 real commands such as `npm run dev`, `make dev`, or `mise exec -- npm run dev`
 over aliases, shell functions, or version-manager setup that only exists in
