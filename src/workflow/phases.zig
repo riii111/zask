@@ -39,10 +39,10 @@ pub fn runPrechecks(ctx: anytype, progress: anytype) !void {
         const result = proc_runner.captured(ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd }) catch |err| switch (err) {
             error.OutputTooLarge => {
                 if (std.mem.eql(u8, on_fail, "abort")) {
-                    try writePrecheckOutputTooLargeError(progress, name, command, hint);
+                    try writePrecheckOutputTooLargeError(progress, name, command, cwd, hint);
                     return error.PrecheckFailed;
                 }
-                try writePrecheckOutputTooLargeWarning(progress, name, command, hint);
+                try writePrecheckOutputTooLargeWarning(progress, name, command, cwd, hint);
                 continue;
             },
             else => return err,
@@ -52,10 +52,10 @@ pub fn runPrechecks(ctx: anytype, progress: anytype) !void {
         if (commandSucceeded(result.term)) continue;
 
         if (std.mem.eql(u8, on_fail, "abort")) {
-            try writePrecheckError(progress, name, command, result, hint);
+            try writePrecheckError(progress, name, command, cwd, result, hint);
             return error.PrecheckFailed;
         }
-        try writePrecheckWarning(progress, name, command, result, hint);
+        try writePrecheckWarning(progress, name, command, cwd, result, hint);
     }
 }
 
@@ -206,30 +206,31 @@ fn commandSucceeded(term: std.process.Child.Term) bool {
     };
 }
 
-fn writePrecheckError(progress: anytype, name: []const u8, command: []const u8, result: std.process.RunResult, hint: []const u8) !void {
+fn writePrecheckError(progress: anytype, name: []const u8, command: []const u8, cwd: []const u8, result: std.process.RunResult, hint: []const u8) !void {
     try progress.failContext();
-    try writePrecheckDiagnostic(progress.raw(), "Error", name, command, result, hint);
+    try writePrecheckDiagnostic(progress.raw(), "Error", name, command, cwd, result, hint);
 }
 
-fn writePrecheckOutputTooLargeError(progress: anytype, name: []const u8, command: []const u8, hint: []const u8) !void {
+fn writePrecheckOutputTooLargeError(progress: anytype, name: []const u8, command: []const u8, cwd: []const u8, hint: []const u8) !void {
     try progress.failContext();
-    try writePrecheckOutputTooLargeDiagnostic(progress.raw(), "Error", name, command, hint);
+    try writePrecheckOutputTooLargeDiagnostic(progress.raw(), "Error", name, command, cwd, hint);
 }
 
-fn writePrecheckWarning(progress: anytype, name: []const u8, command: []const u8, result: std.process.RunResult, hint: []const u8) !void {
+fn writePrecheckWarning(progress: anytype, name: []const u8, command: []const u8, cwd: []const u8, result: std.process.RunResult, hint: []const u8) !void {
     try progress.warnContext();
-    try writePrecheckDiagnostic(progress.raw(), "Warning", name, command, result, hint);
+    try writePrecheckDiagnostic(progress.raw(), "Warning", name, command, cwd, result, hint);
 }
 
-fn writePrecheckOutputTooLargeWarning(progress: anytype, name: []const u8, command: []const u8, hint: []const u8) !void {
+fn writePrecheckOutputTooLargeWarning(progress: anytype, name: []const u8, command: []const u8, cwd: []const u8, hint: []const u8) !void {
     try progress.warnContext();
-    try writePrecheckOutputTooLargeDiagnostic(progress.raw(), "Warning", name, command, hint);
+    try writePrecheckOutputTooLargeDiagnostic(progress.raw(), "Warning", name, command, cwd, hint);
 }
 
-fn writePrecheckDiagnostic(writer: *std.Io.Writer, label: []const u8, name: []const u8, command: []const u8, result: std.process.RunResult, hint: []const u8) !void {
+fn writePrecheckDiagnostic(writer: *std.Io.Writer, label: []const u8, name: []const u8, command: []const u8, cwd: []const u8, result: std.process.RunResult, hint: []const u8) !void {
     try writer.writeByte('\n');
     try writer.print("{s}: {s} check failed\n", .{ label, name });
     try writer.print("  command: {s}\n", .{command});
+    try writer.print("  cwd: {s}\n", .{cwd});
     switch (result.term) {
         .exited => |code| try writer.print("  exit code: {d}\n", .{code}),
         else => try writer.writeAll("  exit code: unavailable\n"),
@@ -240,10 +241,11 @@ fn writePrecheckDiagnostic(writer: *std.Io.Writer, label: []const u8, name: []co
     try writer.flush();
 }
 
-fn writePrecheckOutputTooLargeDiagnostic(writer: *std.Io.Writer, label: []const u8, name: []const u8, command: []const u8, hint: []const u8) !void {
+fn writePrecheckOutputTooLargeDiagnostic(writer: *std.Io.Writer, label: []const u8, name: []const u8, command: []const u8, cwd: []const u8, hint: []const u8) !void {
     try writer.writeByte('\n');
     try writer.print("{s}: {s} check failed\n", .{ label, name });
     try writer.print("  command: {s}\n", .{command});
+    try writer.print("  cwd: {s}\n", .{cwd});
     try writer.writeAll("  exit code: unavailable\n");
     try writeCaptureLimitExceeded(writer);
     if (hint.len > 0) try writer.print("Hint: {s}\n", .{hint});
@@ -501,6 +503,7 @@ test "phases.runPrechecks: abort failure replays precheck context" {
         \\
         \\Error: tool check failed
         \\  command: missing-tool
+        \\  cwd: /tmp/demo
         \\  exit code: 1
         \\  stderr tail:
         \\    missing
@@ -538,6 +541,7 @@ test "phases.runPrechecks: warn failure prints warning and hint" {
         \\
         \\Warning: tool check failed
         \\  command: missing-tool
+        \\  cwd: /tmp/demo
         \\  exit code: 1
         \\  stderr tail:
         \\    missing
@@ -577,6 +581,7 @@ test "phases.runPrechecks: reports capture limit with check context" {
         \\
         \\Error: tool check failed
         \\  command: verbose-check
+        \\  cwd: /tmp/demo
         \\  exit code: unavailable
         \\  output: 1 MiB capture limit exceeded
         \\Hint: reduce output
@@ -618,6 +623,7 @@ test "phases.runPrechecks: capture limit warning continues" {
         \\
         \\Warning: verbose check failed
         \\  command: verbose-check
+        \\  cwd: /tmp/demo
         \\  exit code: unavailable
         \\  output: 1 MiB capture limit exceeded
         \\Next: run the command directly for full logs
