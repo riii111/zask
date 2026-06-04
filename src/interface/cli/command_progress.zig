@@ -94,6 +94,11 @@ pub const Progress = struct {
         try self.persist(fmt, args);
     }
 
+    pub fn warnContext(self: *Progress) !void {
+        if (!self.transient) return;
+        try self.replayContext();
+    }
+
     pub fn beforeInteractive(self: *Progress) !void {
         if (!self.transient) return self.writer.flush();
         try self.clearRegion();
@@ -102,25 +107,8 @@ pub const Progress = struct {
 
     pub fn failContext(self: *Progress) !void {
         if (!self.transient or self.failure_replayed) return;
-        try self.clearRegion();
-        if (self.current_step.len > 0) {
-            try self.writer.writeAll(self.current_step);
-            try self.writer.writeByte('\n');
-        }
-        if (self.current_command.len > 0) {
-            try self.writeCommandLine(self.current_command);
-            try self.writer.writeByte('\n');
-        }
-        if (self.current_status.len > 0) {
-            try self.writeStatusLine(self.current_status);
-            try self.writer.writeByte('\n');
-        }
-        for (self.details.items) |line| {
-            try self.writeDetailLine(line);
-            try self.writer.writeByte('\n');
-        }
+        try self.replayContext();
         self.failure_replayed = true;
-        try self.writer.flush();
     }
 
     pub fn finishSuccess(self: *Progress) !void {
@@ -154,6 +142,27 @@ pub const Progress = struct {
         try self.writeWarnLabel();
         try self.writer.writeAll(stripWarningPrefix(text));
         try self.writer.writeByte('\n');
+        try self.writer.flush();
+    }
+
+    fn replayContext(self: *Progress) !void {
+        try self.clearRegion();
+        if (self.current_step.len > 0) {
+            try self.writer.writeAll(self.current_step);
+            try self.writer.writeByte('\n');
+        }
+        if (self.current_command.len > 0) {
+            try self.writeCommandLine(self.current_command);
+            try self.writer.writeByte('\n');
+        }
+        if (self.current_status.len > 0) {
+            try self.writeStatusLine(self.current_status);
+            try self.writer.writeByte('\n');
+        }
+        for (self.details.items) |line| {
+            try self.writeDetailLine(line);
+            try self.writer.writeByte('\n');
+        }
         try self.writer.flush();
     }
 
@@ -536,6 +545,29 @@ test "command progress: transient warning strips duplicate prefix" {
         "\r\x1b[2KWARN docker compose down failed\n",
         writer.buffered(),
     );
+}
+
+test "command progress: warning context does not consume failure replay" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var progress: Progress = .{
+        .gpa = arena.allocator(),
+        .writer = &writer,
+        .transient = true,
+        .color = false,
+    };
+
+    try progress.step("Running setup...\n", .{});
+    try progress.command("task setup\n", .{});
+    try progress.warnContext();
+    try progress.raw().writeAll("Warning: command phase failed\n");
+    try progress.step("Starting api...\n", .{});
+    try progress.command("npm run dev\n", .{});
+    try progress.finishError();
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting api...\n  $ npm run dev\n") != null);
 }
 
 test "command progress: clears transient line before interactive command" {

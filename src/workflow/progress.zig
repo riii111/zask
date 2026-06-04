@@ -47,6 +47,10 @@ pub const Line = struct {
         try self.step(fmt, args);
     }
 
+    pub fn warnContext(self: *Line) !void {
+        _ = self;
+    }
+
     pub fn beforeInteractive(self: *Line) !void {
         try self.writer.flush();
     }

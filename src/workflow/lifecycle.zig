@@ -41,7 +41,7 @@ pub const Lifecycle = struct {
     }
 
     pub fn startAllWithProgress(self: Lifecycle, profile: []const u8, progress: anytype, mode: StartMode) !void {
-        try phases.runPrechecks(self, progress.raw());
+        try phases.runPrechecks(self, progress);
         if (std.mem.eql(u8, profile, "docker")) return self.startDockerAndWaitWithProgress(progress);
         const phase_list = self.cfg.phases();
         if (phase_list.len == 0) {

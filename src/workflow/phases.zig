@@ -25,7 +25,7 @@ pub fn phaseKind(phase: std.json.Value) PhaseKind {
     return .services;
 }
 
-pub fn runPrechecks(ctx: anytype, writer: *std.Io.Writer) !void {
+pub fn runPrechecks(ctx: anytype, progress: anytype) !void {
     for (ctx.cfg.prechecks()) |check| {
         const name = config_value.optionalObjectString(check, "name", "precheck");
         const command = try config_value.requiredObjectString(check, "command");
@@ -33,11 +33,20 @@ pub fn runPrechecks(ctx: anytype, writer: *std.Io.Writer) !void {
         const hint = config_value.optionalObjectString(check, "hint", "");
         const dir = config_value.optionalObjectString(check, "dir", "");
         const cwd = try phaseCwd(ctx, dir);
+        try progress.step("Checking {s}...\n", .{name});
+        try progress.command("{s}\n", .{command});
         const result = ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd, .check = true }) catch |err| switch (err) {
             error.CommandFailed => {
-                if (hint.len > 0) try writer.print("Hint: {s}\n", .{hint});
-                if (std.mem.eql(u8, on_fail, "abort")) return error.PrecheckFailed;
-                try writer.print("Warning: {s} check failed\n", .{name});
+                if (std.mem.eql(u8, on_fail, "abort")) {
+                    try progress.failContext();
+                    const writer = progress.raw();
+                    try writer.writeByte('\n');
+                    try writer.print("Error: {s} check failed\n", .{name});
+                    if (hint.len > 0) try writer.print("Hint: {s}\n", .{hint});
+                    try writer.flush();
+                    return error.PrecheckFailed;
+                }
+                try writePrecheckWarning(progress, name, command, hint);
                 continue;
             },
             else => return err,
@@ -57,15 +66,23 @@ pub fn runCommandPhaseWithProgress(ctx: anytype, phase: std.json.Value, profile:
     const command = try config.Config.commandPhaseCommand(phase, profile);
     const dir = config_value.optionalObjectString(phase, "dir", "");
     const cwd = try phaseCwd(ctx, dir);
+    const phase_label = commandPhaseLabel(phase);
+    try progress.focus("Running {s}...\n", .{phase_label});
+    try progress.command("{s}\n", .{command});
     try progress.beforeInteractive();
-    _ = ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd, .interactive = true, .check = true }) catch |err| switch (err) {
-        error.CommandFailed => {
-            if (std.mem.eql(u8, config_value.optionalObjectString(phase, "on_fail", "abort"), "abort")) return error.CommandPhaseFailed;
-            try progress.warn("Warning: command phase failed\n", .{});
-            return;
-        },
-        else => return err,
+
+    const result = try ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd, .interactive = true });
+    const term = switch (result) {
+        .term => |value| value,
+        else => unreachable,
     };
+    if (commandSucceeded(term)) return;
+
+    if (std.mem.eql(u8, config_value.optionalObjectString(phase, "on_fail", "abort"), "abort")) {
+        try writeCommandError(progress, phase_label, command, cwd, term);
+        return error.CommandPhaseFailed;
+    }
+    try writeCommandWarning(progress, phase_label, command, cwd, term);
 }
 
 pub fn runServicePhase(ctx: anytype, phase: std.json.Value, profile: []const u8, writer: *std.Io.Writer, mode: lifecycle_mod.StartMode) !void {
@@ -165,6 +182,52 @@ fn phaseLabel(ctx: anytype, phase: std.json.Value, profile: []const u8) []const 
     return "startup";
 }
 
+fn commandPhaseLabel(phase: std.json.Value) []const u8 {
+    const name = config_value.optionalObjectString(phase, "name", "");
+    if (name.len > 0) return name;
+    return "command";
+}
+
+fn commandSucceeded(term: std.process.Child.Term) bool {
+    return switch (term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+}
+
+fn writePrecheckWarning(progress: anytype, name: []const u8, command: []const u8, hint: []const u8) !void {
+    try progress.warnContext();
+    const writer = progress.raw();
+    try writer.writeByte('\n');
+    try writer.print("Warning: {s} check failed\n", .{name});
+    try writer.print("  command: {s}\n", .{command});
+    if (hint.len > 0) try writer.print("Hint: {s}\n", .{hint});
+    try writer.flush();
+}
+
+fn writeCommandError(progress: anytype, phase_label: []const u8, command: []const u8, cwd: []const u8, term: std.process.Child.Term) !void {
+    try progress.failContext();
+    try writeCommandDiagnostic(progress.raw(), "Error", phase_label, command, cwd, term);
+}
+
+fn writeCommandWarning(progress: anytype, phase_label: []const u8, command: []const u8, cwd: []const u8, term: std.process.Child.Term) !void {
+    try progress.warnContext();
+    try writeCommandDiagnostic(progress.raw(), "Warning", phase_label, command, cwd, term);
+}
+
+fn writeCommandDiagnostic(writer: *std.Io.Writer, label: []const u8, phase_label: []const u8, command: []const u8, cwd: []const u8, term: std.process.Child.Term) !void {
+    try writer.writeByte('\n');
+    try writer.print("{s}: command phase failed\n", .{label});
+    try writer.print("  phase: {s}\n", .{phase_label});
+    try writer.print("  command: {s}\n", .{command});
+    try writer.print("  cwd: {s}\n", .{cwd});
+    switch (term) {
+        .exited => |code| try writer.print("  exit code: {d}\n", .{code}),
+        else => try writer.writeAll("  exit code: unavailable\n"),
+    }
+    try writer.flush();
+}
+
 fn writeLastLog(ctx: anytype, window: []const u8, writer: *std.Io.Writer) !void {
     const line = try ctx.tmux.captureLastLine(window);
     defer ctx.gpa.free(line);
@@ -197,6 +260,71 @@ fn testLifecycle(gpa: std.mem.Allocator, run: proc_runner.Runner, cfg: config.Co
     };
 }
 
+const TestProgress = struct {
+    writer: *std.Io.Writer,
+    current_step: []const u8 = "",
+    current_command: []const u8 = "",
+
+    fn raw(self: *TestProgress) *std.Io.Writer {
+        return self.writer;
+    }
+
+    fn step(self: *TestProgress, comptime fmt: []const u8, args: anytype) !void {
+        self.current_step = try std.fmt.allocPrint(std.testing.allocator, fmt, args);
+    }
+
+    fn info(self: *TestProgress, comptime fmt: []const u8, args: anytype) !void {
+        try self.writer.print(fmt, args);
+    }
+
+    fn focus(self: *TestProgress, comptime fmt: []const u8, args: anytype) !void {
+        try self.step(fmt, args);
+    }
+
+    fn command(self: *TestProgress, comptime fmt: []const u8, args: anytype) !void {
+        self.current_command = try std.fmt.allocPrint(std.testing.allocator, fmt, args);
+    }
+
+    fn status(self: *TestProgress, comptime fmt: []const u8, args: anytype) !void {
+        try self.writer.print(fmt, args);
+    }
+
+    fn detail(self: *TestProgress, lines: []const []const u8) !void {
+        _ = self;
+        _ = lines;
+    }
+
+    fn warn(self: *TestProgress, comptime fmt: []const u8, args: anytype) !void {
+        try self.writer.print(fmt, args);
+    }
+
+    fn warnContext(self: *TestProgress) !void {
+        try self.failContext();
+    }
+
+    fn beforeInteractive(self: *TestProgress) !void {
+        _ = self;
+    }
+
+    fn failContext(self: *TestProgress) !void {
+        if (self.current_step.len > 0) try self.writer.writeAll(self.current_step);
+        if (self.current_command.len > 0) try self.writer.print("  $ {s}", .{self.current_command});
+    }
+
+    fn finishSuccess(self: *TestProgress) !void {
+        _ = self;
+    }
+
+    fn finishError(self: *TestProgress) !void {
+        try self.failContext();
+    }
+
+    fn deinit(self: *TestProgress) void {
+        if (self.current_step.len > 0) std.testing.allocator.free(self.current_step);
+        if (self.current_command.len > 0) std.testing.allocator.free(self.current_command);
+    }
+};
+
 test "phases.phaseKind: classifies lifecycle phase kinds" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -215,7 +343,7 @@ test "phases.phaseKind: classifies lifecycle phase kinds" {
     }
 }
 
-test "phases.runPrechecks: failure prints hint and preserves abort semantics" {
+test "phases.runPrechecks: abort failure replays precheck context" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
@@ -231,11 +359,53 @@ test "phases.runPrechecks: failure prints hint and preserves abort semantics" {
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
-    var buffer: [128]u8 = undefined;
+    var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
+    var progress = TestProgress{ .writer = &writer };
+    defer progress.deinit();
 
-    try std.testing.expectError(error.PrecheckFailed, runPrechecks(lifecycle, &writer));
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Hint: install tool") != null);
+    try std.testing.expectError(error.PrecheckFailed, runPrechecks(lifecycle, &progress));
+
+    try std.testing.expectEqualStrings(
+        \\Checking tool...
+        \\  $ missing-tool
+        \\
+        \\Error: tool check failed
+        \\Hint: install tool
+        \\
+    , writer.buffered());
+}
+
+test "phases.runPrechecks: warn failure prints warning and hint" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "prechecks": [{"name":"tool","command":"missing-tool","on_fail":"warn","hint":"install tool"}],
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "missing", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var progress = progress_mod.Line.init(&writer);
+
+    try runPrechecks(lifecycle, &progress);
+
+    try std.testing.expectEqualStrings(
+        \\Checking tool...
+        \\
+        \\Warning: tool check failed
+        \\  command: missing-tool
+        \\Hint: install tool
+        \\
+    , writer.buffered());
 }
 
 test "phases.runCommandPhase: warn continues and abort fails startup" {
@@ -258,18 +428,93 @@ test "phases.runCommandPhase: warn continues and abort fails startup" {
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
-    var buffer: [128]u8 = undefined;
+    var buffer: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
     try runCommandPhase(lifecycle, cfg.phases()[0], "all", &writer);
     try std.testing.expectError(error.CommandPhaseFailed, runCommandPhase(lifecycle, cfg.phases()[1], "all", &writer));
 
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: command phase failed") != null);
+    try std.testing.expectEqualStrings(
+        \\
+        \\Warning: command phase failed
+        \\  phase: command
+        \\  command: warn setup
+        \\  cwd: /tmp/demo
+        \\  exit code: 1
+        \\
+        \\Error: command phase failed
+        \\  phase: command
+        \\  command: abort setup
+        \\  cwd: /tmp/demo
+        \\  exit code: 1
+        \\
+    , writer.buffered());
     const warn_command = proc_runner.findCommandContaining(&recorder, "warn setup") orelse return error.CommandNotFound;
     const abort_command = proc_runner.findCommandContaining(&recorder, "abort setup") orelse return error.CommandNotFound;
     try proc_runner.expectCommandArg(warn_command, 2, "warn setup");
     try proc_runner.expectCommandArg(abort_command, 2, "abort setup");
     try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "phases.runCommandPhase: progress includes phase name and command" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "startup_order": [{"name":"release setup","command":"zig build"}],
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var progress = TestProgress{ .writer = &writer };
+    defer progress.deinit();
+
+    try runCommandPhaseWithProgress(lifecycle, cfg.phases()[0], "all", &progress);
+
+    try std.testing.expectEqualStrings("Running release setup...\n", progress.current_step);
+    try std.testing.expectEqualStrings("zig build\n", progress.current_command);
+}
+
+test "phases.runCommandPhase: reports profile override command failure context" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "startup_order": [{"name":"prepare","command":"default prepare","commands":{"release":"zig build -Drelease"}}],
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 42 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.CommandPhaseFailed, runCommandPhase(lifecycle, cfg.phases()[0], "release", &writer));
+
+    try std.testing.expectEqualStrings(
+        \\
+        \\Error: command phase failed
+        \\  phase: prepare
+        \\  command: zig build -Drelease
+        \\  cwd: /tmp/demo
+        \\  exit code: 42
+        \\
+    , writer.buffered());
+    const command = proc_runner.findCommandContaining(&recorder, "zig build -Drelease") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArg(command, 2, "zig build -Drelease");
 }
 
 test "phases.runServicePhase: propagates window-not-ready as startup failure" {

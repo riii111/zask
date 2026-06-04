@@ -943,6 +943,10 @@ test "runtime.open: clears progress before attaching" {
             try self.step(fmt, args);
         }
 
+        pub fn warnContext(self: *@This()) !void {
+            _ = self;
+        }
+
         pub fn beforeInteractive(self: *@This()) !void {
             if (proc_runner.findCommandContaining(self.recorder, "attach-session") != null) return error.AttachBeforeInteractive;
             self.before_interactive_count += 1;
