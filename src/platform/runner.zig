@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const captured_output_limit = 1024 * 1024;
+pub const captured_output_limit = 1024 * 1024;
 
 pub const Runner = struct {
     gpa: std.mem.Allocator,

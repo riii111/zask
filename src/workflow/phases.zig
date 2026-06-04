@@ -245,8 +245,9 @@ fn writePrecheckOutputTooLargeDiagnostic(writer: *std.Io.Writer, label: []const 
     try writer.print("{s}: {s} check failed\n", .{ label, name });
     try writer.print("  command: {s}\n", .{command});
     try writer.writeAll("  exit code: unavailable\n");
-    try writer.writeAll("  output: exceeded capture limit\n");
+    try writeCaptureLimitExceeded(writer);
     if (hint.len > 0) try writer.print("Hint: {s}\n", .{hint});
+    try writer.writeAll("Next: run the command directly for full logs\n");
     try writer.flush();
 }
 
@@ -292,8 +293,17 @@ fn writeCommandOutputTooLargeDiagnostic(writer: *std.Io.Writer, label: []const u
     try writer.print("  command: {s}\n", .{command});
     try writer.print("  cwd: {s}\n", .{cwd});
     try writer.writeAll("  exit code: unavailable\n");
-    try writer.writeAll("  output: exceeded capture limit\n");
+    try writeCaptureLimitExceeded(writer);
+    try writer.writeAll("Next: run the command directly for full logs\n");
     try writer.flush();
+}
+
+fn writeCaptureLimitExceeded(writer: *std.Io.Writer) !void {
+    if (proc_runner.captured_output_limit == 1024 * 1024) {
+        try writer.writeAll("  output: 1 MiB capture limit exceeded\n");
+        return;
+    }
+    try writer.print("  output: {d} byte capture limit exceeded\n", .{proc_runner.captured_output_limit});
 }
 
 fn writeOutputTail(writer: *std.Io.Writer, label: []const u8, output: []const u8) !void {
@@ -302,8 +312,8 @@ fn writeOutputTail(writer: *std.Io.Writer, label: []const u8, output: []const u8
     var next: usize = 0;
     var lines = std.mem.splitScalar(u8, output, '\n');
     while (lines.next()) |raw_line| {
-        const line = std.mem.trim(u8, raw_line, " \t\r");
-        if (line.len == 0) continue;
+        const line = trimLineRight(raw_line);
+        if (std.mem.trim(u8, line, " \t").len == 0) continue;
         if (count < diagnostic_tail_lines) {
             tail[count] = line;
             count += 1;
@@ -322,6 +332,17 @@ fn writeOutputTail(writer: *std.Io.Writer, label: []const u8, output: []const u8
         try writeDisplayLine(writer, line);
         try writer.writeByte('\n');
     }
+}
+
+fn trimLineRight(line: []const u8) []const u8 {
+    var end = line.len;
+    while (end > 0) {
+        switch (line[end - 1]) {
+            ' ', '\t', '\r' => end -= 1,
+            else => break,
+        }
+    }
+    return line[0..end];
 }
 
 fn writeDisplayLine(writer: *std.Io.Writer, line: []const u8) !void {
@@ -557,10 +578,53 @@ test "phases.runPrechecks: reports capture limit with check context" {
         \\Error: tool check failed
         \\  command: verbose-check
         \\  exit code: unavailable
-        \\  output: exceeded capture limit
+        \\  output: 1 MiB capture limit exceeded
         \\Hint: reduce output
+        \\Next: run the command directly for full logs
         \\
     , writer.buffered());
+}
+
+test "phases.runPrechecks: capture limit warning continues" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "prechecks": [
+        \\    {"name":"before","command":"before-check"},
+        \\    {"name":"verbose","command":"verbose-check","on_fail":"warn"},
+        \\    {"name":"after","command":"after-check"}
+        \\  ],
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueueError(error.StreamTooLong);
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var progress = progress_mod.Line.init(&writer);
+
+    try runPrechecks(lifecycle, &progress);
+
+    try std.testing.expectEqualStrings(
+        \\Checking before...
+        \\Checking verbose...
+        \\
+        \\Warning: verbose check failed
+        \\  command: verbose-check
+        \\  exit code: unavailable
+        \\  output: 1 MiB capture limit exceeded
+        \\Next: run the command directly for full logs
+        \\Checking after...
+        \\
+    , writer.buffered());
+    try proc_runner.expectCommandContaining(&recorder, "after-check");
 }
 
 test "phases.runCommandPhase: warn continues and abort fails startup" {
@@ -662,7 +726,7 @@ test "phases.runCommandPhase: reports profile override command failure context" 
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
-    try recorder.enqueue("one\ntwo\nthree\nfour\nfive\nsix\nseven\n", "bad\x1b[2J\n", .{ .exited = 42 });
+    try recorder.enqueue("one\n  two\nthree\nfour\nfive\nsix\nseven\n", "bad\x1b[2J\n", .{ .exited = 42 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
@@ -682,7 +746,7 @@ test "phases.runCommandPhase: reports profile override command failure context" 
         \\  stderr tail:
         \\    bad?[2J
         \\  stdout tail:
-        \\    two
+        \\      two
         \\    three
         \\    four
         \\    five
@@ -724,7 +788,43 @@ test "phases.runCommandPhase: reports capture limit with phase context" {
         \\  command: gradle build
         \\  cwd: /tmp/demo
         \\  exit code: unavailable
-        \\  output: exceeded capture limit
+        \\  output: 1 MiB capture limit exceeded
+        \\Next: run the command directly for full logs
+        \\
+    , writer.buffered());
+}
+
+test "phases.runCommandPhase: capture limit warning continues" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "startup_order": [{"name":"prepare","command":"gradle build","on_fail":"warn"}],
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueueError(error.StreamTooLong);
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runCommandPhase(lifecycle, cfg.phases()[0], "all", &writer);
+
+    try std.testing.expectEqualStrings(
+        \\Running prepare...
+        \\
+        \\Warning: command phase failed
+        \\  phase: prepare
+        \\  command: gradle build
+        \\  cwd: /tmp/demo
+        \\  exit code: unavailable
+        \\  output: 1 MiB capture limit exceeded
+        \\Next: run the command directly for full logs
         \\
     , writer.buffered());
 }
