@@ -48,7 +48,7 @@ test "open.Options: rejects extra arguments" {
 test "open.Options: resolves profile aliases" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [],
         \\  "start_profiles": {"api": {"profile": "backend"}}
         \\}

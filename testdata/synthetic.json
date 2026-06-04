@@ -1,8 +1,7 @@
 {
   "project": {
     "name": "demo",
-    "root": "/tmp/zask-demo",
-    "session_name": "demo"
+    "root": "/tmp/zask-demo"
   },
   "docker": {
     "compose": "infra/compose.yaml",

@@ -2,6 +2,7 @@ const std = @import("std");
 
 const config = @import("../model/config.zig");
 const config_value = @import("../model/config_value.zig");
+const configured_path = @import("configured_path.zig");
 const lifecycle_mod = @import("lifecycle.zig");
 const pathing = @import("pathing.zig");
 const proc_runner = @import("../platform/runner.zig");
@@ -32,7 +33,7 @@ pub fn runPrechecks(ctx: anytype, progress: anytype) !void {
         const on_fail = config_value.optionalObjectString(check, "on_fail", "warn");
         const hint = config_value.optionalObjectString(check, "hint", "");
         const dir = config_value.optionalObjectString(check, "dir", "");
-        const cwd = try phaseCwd(ctx, dir);
+        const cwd = try phaseCwd(ctx, dir, "prechecks.dir", progress.raw());
         try progress.step("Checking {s}...\n", .{name});
         try progress.command("{s}\n", .{command});
         const result = ctx.runner.run(&.{ "bash", "-c", command }, .{ .cwd = cwd, .check = true }) catch |err| switch (err) {
@@ -65,7 +66,7 @@ pub fn runCommandPhase(ctx: anytype, phase: std.json.Value, profile: []const u8,
 pub fn runCommandPhaseWithProgress(ctx: anytype, phase: std.json.Value, profile: []const u8, progress: anytype) !void {
     const command = try config.Config.commandPhaseCommand(phase, profile);
     const dir = config_value.optionalObjectString(phase, "dir", "");
-    const cwd = try phaseCwd(ctx, dir);
+    const cwd = try phaseCwd(ctx, dir, "startup_order.dir", progress.raw());
     const phase_label = commandPhaseLabel(phase);
     try progress.focus("Running {s}...\n", .{phase_label});
     try progress.command("{s}\n", .{command});
@@ -115,10 +116,29 @@ pub fn runServicePhaseWithProgress(ctx: anytype, phase: std.json.Value, profile:
     };
 }
 
-fn phaseCwd(ctx: anytype, dir: []const u8) ![]const u8 {
-    if (dir.len == 0) return pathing.absolute(ctx.gpa, ctx.runner.io, try ctx.cfg.projectRoot(ctx.gpa));
+fn phaseCwd(ctx: anytype, dir: []const u8, field: []const u8, writer: *std.Io.Writer) ![]const u8 {
+    const project_root = try ctx.cfg.projectRoot(ctx.gpa);
+    if (dir.len == 0) {
+        if (ctx.validate_configured_dirs) {
+            try configured_path.ensureDir(ctx.gpa, ctx.runner.io, writer, .{
+                .field = "project.root",
+                .configured = try ctx.cfg.requiredString(&.{ "project", "root" }),
+                .path = project_root,
+            });
+        }
+        return pathing.absolute(ctx.gpa, ctx.runner.io, project_root);
+    }
     try validate.relativeSubPath(dir);
-    return pathing.absolute(ctx.gpa, ctx.runner.io, try std.fs.path.join(ctx.gpa, &.{ try ctx.cfg.projectRoot(ctx.gpa), dir }));
+    const path = try std.fs.path.join(ctx.gpa, &.{ project_root, dir });
+    if (ctx.validate_configured_dirs) {
+        try configured_path.ensureDir(ctx.gpa, ctx.runner.io, writer, .{
+            .field = field,
+            .configured = dir,
+            .project_root = project_root,
+            .path = path,
+        });
+    }
+    return pathing.absolute(ctx.gpa, ctx.runner.io, path);
 }
 
 fn writePortWait(ctx: anytype, port: i64, service: ?[]const u8, progress: anytype) !void {
@@ -257,6 +277,7 @@ fn testLifecycle(gpa: std.mem.Allocator, run: proc_runner.Runner, cfg: config.Co
         .runner = run,
         .tmux = .{ .gpa = gpa, .runner = run, .session = "demo" },
         .docker = .{ .gpa = gpa, .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+        .validate_configured_dirs = false,
     };
 }
 
@@ -346,7 +367,7 @@ test "phases.phaseKind: classifies lifecycle phase kinds" {
 test "phases.runPrechecks: abort failure replays precheck context" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "prechecks": [{"name":"tool","command":"missing-tool","on_fail":"abort","hint":"install tool"}],
         \\  "groups": []
         \\}
@@ -379,7 +400,7 @@ test "phases.runPrechecks: abort failure replays precheck context" {
 test "phases.runPrechecks: warn failure prints warning and hint" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "prechecks": [{"name":"tool","command":"missing-tool","on_fail":"warn","hint":"install tool"}],
         \\  "groups": []
         \\}
@@ -411,7 +432,7 @@ test "phases.runPrechecks: warn failure prints warning and hint" {
 test "phases.runCommandPhase: warn continues and abort fails startup" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "startup_order": [
         \\    {"command":"warn setup","on_fail":"warn"},
         \\    {"command":"abort setup","on_fail":"abort"}
@@ -459,7 +480,7 @@ test "phases.runCommandPhase: warn continues and abort fails startup" {
 test "phases.runCommandPhase: progress includes phase name and command" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "startup_order": [{"name":"release setup","command":"zig build"}],
         \\  "groups": []
         \\}
@@ -486,7 +507,7 @@ test "phases.runCommandPhase: progress includes phase name and command" {
 test "phases.runCommandPhase: reports profile override command failure context" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "startup_order": [{"name":"prepare","command":"default prepare","commands":{"release":"zig build -Drelease"}}],
         \\  "groups": []
         \\}
@@ -520,7 +541,7 @@ test "phases.runCommandPhase: reports profile override command failure context" 
 test "phases.runServicePhase: propagates window-not-ready as startup failure" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}],
         \\  "startup_order": [{"group":"backend"}]
         \\}
@@ -543,7 +564,7 @@ test "phases.runServicePhase: propagates window-not-ready as startup failure" {
 test "phases.runServicePhase: honors wait_ports as a declared dependency" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":5432}]}],
         \\  "startup_order": [{"name":"backend","group":"backend","wait_ports":[5432]}]
         \\}
@@ -575,7 +596,7 @@ test "phases.runServicePhase: honors wait_ports as a declared dependency" {
 test "phases.runServicePhase: reports port readiness failure" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":5432}]}],
         \\  "startup_order": [{"name":"backend","group":"backend","wait_ports":[5432]}]
         \\}
@@ -617,7 +638,7 @@ test "phases.runServicePhase: reports port readiness failure" {
 test "phases.runServicePhase: reports unmatched port without service hints" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":3000}]}],
         \\  "startup_order": [{"group":"backend","wait_ports":[5432]}]
         \\}
@@ -655,7 +676,7 @@ test "phases.runServicePhase: reports unmatched port without service hints" {
 test "phases.phaseCwd: rejects path traversal" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -666,6 +687,8 @@ test "phases.phaseCwd: rejects path traversal" {
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectError(error.InvalidPath, phaseCwd(lifecycle, "../escape"));
+    try std.testing.expectError(error.InvalidPath, phaseCwd(lifecycle, "../escape", "startup_order.dir", &writer));
 }

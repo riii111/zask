@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("../model/config.zig");
+const configured_path = @import("configured_path.zig");
 const docker_client = @import("../platform/docker.zig");
 const observations = @import("../model/observations.zig");
 const phases = @import("phases.zig");
@@ -34,6 +35,7 @@ pub const Lifecycle = struct {
     runner: proc_runner.Runner,
     tmux: tmux_client.Client,
     docker: docker_client.Compose,
+    validate_configured_dirs: bool = true,
 
     pub fn startAll(self: Lifecycle, profile: []const u8, writer: *std.Io.Writer, mode: StartMode) !void {
         var progress = progress_mod.Line.init(writer);
@@ -296,7 +298,16 @@ pub const Lifecycle = struct {
                 },
             }
         }
-        const service_dir = try pathing.absolute(self.gpa, self.runner.io, try self.cfg.serviceDir(self.gpa, value));
+        const project_root = try self.cfg.projectRoot(self.gpa);
+        const service_path = try self.cfg.serviceDir(self.gpa, value);
+        try self.ensureConfiguredDir(progress.raw(), .{
+            .field = "service.dir",
+            .service = service,
+            .configured = config.Config.serviceDirValue(value),
+            .project_root = project_root,
+            .path = service_path,
+        });
+        const service_dir = try pathing.absolute(self.gpa, self.runner.io, service_path);
         const start_command = try config.Config.serviceStartCommand(self.gpa, value);
         try progress.step("Starting {s}...\n", .{service});
         try progress.command("{s}\n", .{start_command});
@@ -327,7 +338,15 @@ pub const Lifecycle = struct {
         try waits.ensureWindowReady(self, "docker");
         if (try self.dockerStartAlreadyHandled(progress)) return;
         try progress.step("Starting Docker...\n", .{});
-        const docker_dir = try pathing.absolute(self.gpa, self.runner.io, try self.cfg.dockerDir(self.gpa));
+        const project_root = try self.cfg.projectRoot(self.gpa);
+        const docker_path = try self.cfg.dockerDir(self.gpa);
+        try self.ensureConfiguredDir(progress.raw(), .{
+            .field = "docker.compose",
+            .configured = self.cfg.dockerSubdir(),
+            .project_root = project_root,
+            .path = docker_path,
+        });
+        const docker_dir = try pathing.absolute(self.gpa, self.runner.io, docker_path);
         const compose_file = try shell.quote(self.gpa, self.cfg.dockerComposeFile());
         const cmd = try std.fmt.allocPrint(self.gpa, "COMPOSE_MENU=false docker compose -f {s} up", .{compose_file});
         try progress.command("{s}\n", .{cmd});
@@ -377,6 +396,13 @@ pub const Lifecycle = struct {
             }
         }
         return true;
+    }
+
+    fn ensureConfiguredDir(self: Lifecycle, writer: *std.Io.Writer, problem: configured_path.Problem) !void {
+        if (!self.validate_configured_dirs) return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        try configured_path.ensureDir(arena.allocator(), self.runner.io, writer, problem);
     }
 };
 
@@ -461,6 +487,7 @@ fn testLifecycle(gpa: std.mem.Allocator, run: proc_runner.Runner, cfg: config.Co
         .runner = run,
         .tmux = .{ .gpa = gpa, .runner = run, .session = "demo" },
         .docker = .{ .gpa = gpa, .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
+        .validate_configured_dirs = false,
     };
 }
 
@@ -505,7 +532,7 @@ test "lifecycle.dockerStartDecision: treats shell pane as startable" {
 test "waits.waitForPaneIdle: distinguishes tmux unavailable from idle" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -525,7 +552,7 @@ test "waits.waitForPaneIdle: distinguishes tmux unavailable from idle" {
 test "waits.waitForPaneIdle: returns still busy after timeout" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -545,7 +572,7 @@ test "waits.waitForPaneIdle: returns still busy after timeout" {
 test "waits.waitForPaneIdle: returns idle for non-busy states" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -566,7 +593,7 @@ test "waits.waitForPaneIdle: returns idle for non-busy states" {
 test "lifecycle.startAll: does not block on docker readiness without startup_order" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml"},
         \\  "groups": []
         \\}
@@ -596,7 +623,7 @@ test "lifecycle.startAll: does not block on docker readiness without startup_ord
 test "lifecycle.startAll: prime mode respawns service without observing pane" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
@@ -621,7 +648,7 @@ test "lifecycle.startAll: prime mode respawns service without observing pane" {
 test "lifecycle.stopAll: signals every running service before polling once" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[
         \\    {"name":"api","dir":"backend","command":"serve"},
         \\    {"name":"web","dir":"frontend","command":"dev"}
@@ -655,7 +682,7 @@ test "lifecycle.stopAll: signals every running service before polling once" {
 test "lifecycle.stopAll: a failed signal still waits, tears down docker, and surfaces" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml"},
         \\  "groups": [{"name":"backend","services":[
         \\    {"name":"api","dir":"backend","command":"serve"},
@@ -695,7 +722,7 @@ test "lifecycle.stopAll: a failed signal still waits, tears down docker, and sur
 test "lifecycle.startAll: precheck abort stops startup and warn continues" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "prechecks": [
         \\    {"name":"warn-check","command":"false","on_fail":"warn"},
         \\    {"name":"abort-check","command":"false","on_fail":"abort"}
@@ -723,7 +750,7 @@ test "lifecycle.startAll: precheck abort stops startup and warn continues" {
 test "lifecycle.startAll: starts idle docker before service command" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
@@ -759,7 +786,7 @@ test "lifecycle.startAll: starts idle docker before service command" {
 test "lifecycle.startAll: honors docker startup order step" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml"},
         \\  "startup_order": [
         \\    {"command":"echo setup"},
@@ -800,7 +827,7 @@ test "lifecycle.startAll: honors docker startup order step" {
 test "lifecycle.startAll: command phase runs interactively" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "startup_order": [{"command":"echo setup"}],
         \\  "groups": []
         \\}
@@ -825,7 +852,7 @@ test "lifecycle.startAll: command phase runs interactively" {
 test "waits: report port and stop timeouts" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -856,7 +883,7 @@ test "waits: report port and stop timeouts" {
 test "waits.ensureDockerReady: times out when compose never reports running" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml", "wait_timeout_seconds": 2},
         \\  "groups": []
         \\}
@@ -880,7 +907,7 @@ test "waits.ensureDockerReady: times out when compose never reports running" {
 test "lifecycle.startAll: reports docker readiness failure" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml", "wait_timeout_seconds": 2},
         \\  "startup_order": [{"docker": true}],
         \\  "groups": []
@@ -922,7 +949,7 @@ test "lifecycle.startAll: reports docker readiness failure" {
 test "waits.ensureWindowReady: distinguishes missing windows from unavailable tmux" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -942,7 +969,7 @@ test "waits.ensureWindowReady: distinguishes missing windows from unavailable tm
 test "waits.ensureWindowReady: retries missing windows until timeout" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": []
         \\}
     ;
@@ -962,7 +989,7 @@ test "waits.ensureWindowReady: retries missing windows until timeout" {
 test "lifecycle.startAll: reports missing window as failure" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
@@ -984,7 +1011,7 @@ test "lifecycle.startAll: reports missing window as failure" {
 test "lifecycle.stopTarget: stop and restart require an active session" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
@@ -1010,7 +1037,7 @@ test "lifecycle.stopTarget: stop and restart require an active session" {
 test "lifecycle.stopTarget: docker stop reaches compose down without tmux session" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
@@ -1037,7 +1064,7 @@ test "lifecycle.stopTarget: docker stop reaches compose down without tmux sessio
 test "lifecycle.stopTarget: docker stop reaches compose down when tmux send fails" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml"},
         \\  "groups": []
         \\}
@@ -1065,7 +1092,7 @@ test "lifecycle.stopTarget: docker stop reaches compose down when tmux send fail
 test "lifecycle.startTarget: reports tmux unavailable distinctly from missing session" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
@@ -1087,7 +1114,7 @@ test "lifecycle.startTarget: reports tmux unavailable distinctly from missing se
 test "lifecycle.startTarget: surfaces diagnostic when pane observation becomes unavailable" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
@@ -1111,7 +1138,7 @@ test "lifecycle.startTarget: surfaces diagnostic when pane observation becomes u
 test "lifecycle.restartTarget: docker restart reports tmux unavailable without stopping compose" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml"},
         \\  "groups": []
         \\}
@@ -1134,7 +1161,7 @@ test "lifecycle.restartTarget: docker restart reports tmux unavailable without s
 test "lifecycle.stopTarget: stop and restart report tmux unavailable distinctly from missing session" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
@@ -1162,7 +1189,7 @@ test "lifecycle.stopTarget: stop and restart report tmux unavailable distinctly 
 test "lifecycle.stopTarget: docker stop runs compose down even when tmux is unavailable" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml"},
         \\  "groups": []
         \\}
@@ -1189,7 +1216,7 @@ test "lifecycle.stopTarget: docker stop runs compose down even when tmux is unav
 test "lifecycle.stopTarget: docker stop warns when compose down fails" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml"},
         \\  "groups": []
         \\}
@@ -1214,7 +1241,7 @@ test "lifecycle.stopTarget: docker stop warns when compose down fails" {
 test "lifecycle.startTarget: docker start is a no-op when docker pane is running" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml"},
         \\  "groups": []
         \\}
@@ -1245,7 +1272,7 @@ test "lifecycle.startTarget: docker start is a no-op when docker pane is running
 test "lifecycle.startTarget: docker start sends compose up after transient busy pane" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml"},
         \\  "groups": []
         \\}
@@ -1283,7 +1310,7 @@ test "lifecycle.startTarget: docker start sends compose up after transient busy 
 test "lifecycle.startTarget: docker start respawns shell pane without compose probe" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml"},
         \\  "groups": []
         \\}
@@ -1316,7 +1343,7 @@ test "lifecycle.startTarget: docker start respawns shell pane without compose pr
 test "lifecycle.startTarget: docker start disables compose menu and waits when started" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml"},
         \\  "groups": []
         \\}
@@ -1348,7 +1375,7 @@ test "lifecycle.startTarget: docker start disables compose menu and waits when s
 test "lifecycle.restartTarget: docker restart checks session before stopping compose" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml"},
         \\  "groups": []
         \\}
@@ -1373,7 +1400,7 @@ test "lifecycle.restartTarget: docker restart checks session before stopping com
 test "lifecycle.restartTarget: docker restart runs compose down before compose up" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml"},
         \\  "groups": []
         \\}
@@ -1410,7 +1437,7 @@ test "lifecycle.restartTarget: docker restart runs compose down before compose u
 test "lifecycle.startAll: respawns service pane without sending command to shell history" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo app","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo app"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
         \\}
     ;
@@ -1438,7 +1465,7 @@ test "lifecycle.startAll: respawns service pane without sending command to shell
 test "lifecycle.startAll: resolves relative service cwd before sending command" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"testdata/showcase/receipt-lab","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"testdata/showcase/receipt-lab"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":".","command":"serve"}]}]
         \\}
     ;

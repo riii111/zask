@@ -9,7 +9,7 @@ const RenderContext = @import("context.zig").RenderContext;
 
 pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env.Map, cfg: config.Config, writer: *std.Io.Writer) !void {
     const run: proc_runner.Runner = .{ .gpa = gpa, .io = io };
-    const ctx: RenderContext = .{ .gpa = gpa, .cfg = cfg, .runner = run, .tmux = .{ .gpa = gpa, .runner = run, .session = try cfg.sessionName() } };
+    const ctx: RenderContext = .{ .gpa = gpa, .cfg = cfg, .runner = run, .tmux = .{ .gpa = gpa, .runner = run, .session = try cfg.projectName() } };
     try writer.writeAll(ansi.clear_screen);
     try renderLauncher(ctx, writer);
     try writer.flush();
@@ -147,7 +147,7 @@ fn serviceGroups(ctx: RenderContext) ![][]const u8 {
 test "dashboard.renderLauncher: renders launcher frame with grouped services" {
     const json =
         \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "docker": {"compose": "compose.yaml"},
         \\  "groups": [
         \\    {"name":"backend","services":[

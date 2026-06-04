@@ -1,8 +1,7 @@
 {
   "project": {
     "name": "receipt_lab",
-    "root": "testdata/showcase/receipt-lab",
-    "session_name": "receipt-lab"
+    "root": "testdata/showcase/receipt-lab"
   },
   "docker": {
     "compose": "infra/compose.yaml",

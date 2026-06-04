@@ -143,6 +143,10 @@ pub fn run(init: std.process.Init) !void {
             try stdout.flush();
             std.process.exit(2);
         },
+        error.ConfigPathNotFound => {
+            try stdout.flush();
+            std.process.exit(2);
+        },
         error.ConfigTooLarge => {
             try stdout.writeAll("Error: config file too large\n");
             try stdout.flush();

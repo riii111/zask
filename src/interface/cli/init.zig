@@ -189,10 +189,19 @@ fn writeReport(writer: *std.Io.Writer, project: []const u8, detected: DetectedOp
     if (detected.compose_file) |compose_file| {
         try writer.print("Detected Docker Compose file: {s}\n", .{compose_file});
     }
-    try writer.writeAll("Omitted defaults: project.session_name");
-    if (detected.service != null) try writer.writeAll(", service.dir");
-    if (detected.compose_file != null) try writer.writeAll(", docker.wait_timeout_seconds");
-    try writer.writeByte('\n');
+    if (detected.service != null or detected.compose_file != null) {
+        try writer.writeAll("Omitted defaults: ");
+        var wrote = false;
+        if (detected.service != null) {
+            try writer.writeAll("service.dir");
+            wrote = true;
+        }
+        if (detected.compose_file != null) {
+            if (wrote) try writer.writeAll(", ");
+            try writer.writeAll("docker.wait_timeout_seconds");
+        }
+        try writer.writeByte('\n');
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -268,11 +277,9 @@ test "init.config: renders parseable minimal config" {
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
 
     try std.testing.expectEqualStrings("demo", try cfg.projectName());
-    try std.testing.expectEqualStrings("demo", try cfg.sessionName());
     const project_root = try cfg.projectRoot(arena.allocator());
     try std.testing.expectEqualStrings(".", project_root);
     try std.testing.expectEqual(@as(usize, 0), (try cfg.services()).len);
-    try std.testing.expect(std.mem.indexOf(u8, json, "session_name") == null);
 }
 
 test "init.config: renders minimal config verbatim" {
@@ -449,7 +456,7 @@ test "init.report: prints detected values and omitted defaults" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Detected project.name: demo") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Detected package script: dev") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Detected Docker Compose file: docker-compose.yml") != null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "project.session_name, service.dir, docker.wait_timeout_seconds") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "service.dir, docker.wait_timeout_seconds") != null);
 }
 
 test "init.root: validates project roots" {
