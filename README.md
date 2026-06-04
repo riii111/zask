@@ -66,22 +66,44 @@ real commands such as `npm run dev`, `make dev`, or `mise exec -- npm run dev`
 over aliases, shell functions, or version-manager setup that only exists in
 `.zshrc`.
 
-`wait_ports` declares ports that must become reachable before startup continues.
-Each port waits up to 180 seconds by default. Use
-`port_wait_timeout_seconds` on a `startup_order` group step when a slower service
-needs a different limit:
+Create a project config:
 
 ```json
 {
-  "startup_order": [
+  "project": {
+    "name": "demo",
+    "root": "."
+  },
+  "docker": {
+    "compose": "compose.yaml"
+  },
+  "groups": [
     {
-      "group": "backend",
-      "wait_ports": [3000],
-      "port_wait_timeout_seconds": 240
+      "name": "backend",
+      "services": [
+        {"name": "api", "dir": "backend", "command": "serve", "port": 18080},
+        {"name": "worker", "dir": "backend", "command": "work"}
+      ]
+    },
+    {
+      "name": "frontend",
+      "services": [
+        {"name": "web", "dir": "frontend", "runtime": "npm", "command": "run dev", "port": 5173}
+      ]
     }
+  ],
+  "startup_order": [
+    {"docker": true},
+    {"group": "backend", "wait_ports": [18080], "port_wait_timeout_seconds": 240},
+    {"group": "frontend"}
   ]
 }
 ```
+
+`wait_ports` declares ports that must become reachable before startup continues.
+Each port waits up to 180 seconds by default. Use
+`port_wait_timeout_seconds` on that startup step when a slower service needs a
+different limit.
 
 ## Requirements
 
