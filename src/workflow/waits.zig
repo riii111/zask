@@ -7,7 +7,6 @@ const stop_interval = std.Io.Duration.fromMilliseconds(500);
 pub const docker_ready_interval = std.Io.Duration.fromSeconds(1);
 pub const docker_ready_settle = std.Io.Duration.fromSeconds(2);
 const port_wait_interval_seconds = 2;
-const port_wait_interval = std.Io.Duration.fromSeconds(port_wait_interval_seconds);
 const live_tail_lines = 6;
 
 pub const PaneIdleWait = enum {
@@ -38,10 +37,12 @@ pub fn waitForPortWithProgress(ctx: anytype, port: i64, timeout: i64, service: ?
     const port_text = try std.fmt.allocPrint(ctx.gpa, "{d}", .{port});
     defer ctx.gpa.free(port_text);
     var elapsed: i64 = 0;
-    while (elapsed < timeout) : (elapsed += port_wait_interval_seconds) {
+    while (elapsed < timeout) {
         if (service) |name| try writePaneTail(ctx, name, progress);
         if (ctx.runner.run(&.{ "nc", "-z", "localhost", port_text }, .{ .check = true, .discard = true })) |_| return else |_| {}
-        ctx.runner.sleep(port_wait_interval);
+        const sleep_seconds = @min(port_wait_interval_seconds, timeout - elapsed);
+        ctx.runner.sleep(std.Io.Duration.fromSeconds(sleep_seconds));
+        elapsed += sleep_seconds;
     }
     return error.PortNotReady;
 }

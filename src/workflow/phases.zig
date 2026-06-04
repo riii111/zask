@@ -10,7 +10,7 @@ const shell = @import("../platform/shell.zig");
 const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
 
-const port_wait_timeout_seconds = 30;
+const default_port_wait_timeout_seconds = 180;
 
 pub const PhaseKind = enum {
     docker,
@@ -101,6 +101,7 @@ pub fn runServicePhaseWithProgress(ctx: anytype, phase: std.json.Value, profile:
         }
     };
     if (phase.object.get("wait_ports")) |ports| if (ports == .array) {
+        const port_wait_timeout_seconds = config.Config.phasePortWaitTimeout(phase, default_port_wait_timeout_seconds);
         for (ports.array.items) |port_value| if (port_value == .integer) {
             const service = try serviceForPort(ctx, phase, profile, port_value.integer);
             try writePortWait(ctx, port_value.integer, service, progress);
@@ -577,7 +578,7 @@ test "phases.runServicePhase: reports port readiness failure" {
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo","session_name":"demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":5432}]}],
-        \\  "startup_order": [{"name":"backend","group":"backend","wait_ports":[5432]}]
+        \\  "startup_order": [{"name":"backend","group":"backend","wait_ports":[5432],"port_wait_timeout_seconds":5}]
         \\}
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -605,7 +606,7 @@ test "phases.runServicePhase: reports port readiness failure" {
         \\Error: api did not become ready
         \\  phase: backend
         \\  expected: localhost:5432
-        \\  waited: 30s
+        \\  waited: 5s
         \\  last log: Error: address already in use
         \\
         \\Next:
@@ -647,7 +648,7 @@ test "phases.runServicePhase: reports unmatched port without service hints" {
         \\Error: port 5432 did not become ready
         \\  phase: backend
         \\  expected: localhost:5432
-        \\  waited: 30s
+        \\  waited: 180s
         \\
     , writer.buffered());
 }

@@ -66,6 +66,40 @@ real commands such as `npm run dev`, `make dev`, or `mise exec -- npm run dev`
 over aliases, shell functions, or version-manager setup that only exists in
 `.zshrc`.
 
+Create a project config:
+
+```json
+{
+  "project": {
+    "name": "demo",
+    "root": "."
+  },
+  "docker": {
+    "compose": "compose.yaml"
+  },
+  "groups": [
+    {
+      "name": "backend",
+      "services": [
+        {"name": "api", "dir": "backend", "command": "serve", "port": 18080},
+        {"name": "worker", "dir": "backend", "command": "work"}
+      ]
+    },
+    {
+      "name": "frontend",
+      "services": [
+        {"name": "web", "dir": "frontend", "runtime": "npm", "command": "run dev", "port": 5173}
+      ]
+    }
+  ],
+  "startup_order": [
+    {"docker": true},
+    {"group": "backend", "wait_ports": [18080], "port_wait_timeout_seconds": 240},
+    {"group": "frontend"}
+  ]
+}
+```
+
 ## Requirements
 
 - tmux
