@@ -52,7 +52,7 @@ jobs:
         run: |
           mkdir smoke
           tar -xzf "zask-${{ matrix.target }}.tar.gz" -C smoke
-          test "$(smoke/zask version)" = "zask 0.1.0"
+          test "$(smoke/zask version)" = "zask 0.1.1"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: zask-${{ matrix.target }}
