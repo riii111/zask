@@ -5,7 +5,7 @@ const config_value = @import("../model/config_value.zig");
 const configured_path = @import("configured_path.zig");
 const lifecycle_mod = @import("lifecycle.zig");
 const pathing = @import("pathing.zig");
-const process = @import("../platform/process.zig");
+const process_probe = @import("../platform/process_probe.zig");
 const proc_runner = @import("../platform/runner.zig");
 const progress_mod = @import("progress.zig");
 const validate = @import("../model/validate.zig");
@@ -204,7 +204,7 @@ fn writePortFailure(ctx: anytype, phase: std.json.Value, profile: []const u8, po
     try writer.print("  phase: {s}\n", .{phase_label});
     try writer.print("  expected: localhost:{d}\n", .{port});
     try writer.print("  waited: {d}s\n", .{timeout});
-    var observed = process.ListenPorts.empty(.unavailable);
+    var observed = process_probe.ListenPorts.empty(.unavailable);
     defer observed.deinit(ctx.gpa);
     if (service) |name| {
         observed = try observeListenPorts(ctx, name);
@@ -217,14 +217,14 @@ fn writePortFailure(ctx: anytype, phase: std.json.Value, profile: []const u8, po
     try writer.flush();
 }
 
-fn observeListenPorts(ctx: anytype, service: []const u8) !process.ListenPorts {
-    const info = ctx.tmux.paneInfo(service) catch return process.ListenPorts.empty(.unavailable);
+fn observeListenPorts(ctx: anytype, service: []const u8) !process_probe.ListenPorts {
+    const info = ctx.tmux.paneInfo(service) catch return process_probe.ListenPorts.empty(.unavailable);
     defer info.deinit(ctx.gpa);
     const pid = std.mem.trim(u8, info.pid, " \t\r\n");
-    return process.observeDescendantListenPorts(ctx.gpa, ctx.runner, pid);
+    return process_probe.observeDescendantListenPorts(ctx.gpa, ctx.runner, pid);
 }
 
-fn writeListenPortObservation(writer: *std.Io.Writer, observed: process.ListenPorts) !void {
+fn writeListenPortObservation(writer: *std.Io.Writer, observed: process_probe.ListenPorts) !void {
     switch (observed.state) {
         .unavailable => try writer.writeAll("  observed: unavailable\n"),
         .none => try writer.writeAll("  observed: no listen port from service process\n"),
@@ -447,7 +447,7 @@ fn writeLastLog(ctx: anytype, window: []const u8, writer: *std.Io.Writer) ![]con
     return line;
 }
 
-fn writeStartupFailureHints(writer: *std.Io.Writer, service: []const u8, expected_port: i64, observed: process.ListenPorts, last_log: []const u8) !void {
+fn writeStartupFailureHints(writer: *std.Io.Writer, service: []const u8, expected_port: i64, observed: process_probe.ListenPorts, last_log: []const u8) !void {
     if (observed.state == .ports and !observed.contains(expected_port) and observed.ports.len > 0) {
         try writer.print("Hint: {s} is listening on {d}, but config port is {d}.\n", .{ service, observed.ports[0], expected_port });
     }

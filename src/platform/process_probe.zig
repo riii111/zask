@@ -130,7 +130,7 @@ fn containsPort(ports: []const i64, port: i64) bool {
 // Tests
 // -----------------------------------------------------------------------------
 
-test "process.observeDescendantListenPorts: finds ports from grandchildren" {
+test "process_probe.observeDescendantListenPorts: finds ports from grandchildren" {
     var recorder = runner_mod.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("200\n", "", .{ .exited = 0 });
@@ -152,7 +152,7 @@ test "process.observeDescendantListenPorts: finds ports from grandchildren" {
     try runner_mod.expectCommandArg(recorder.commands.items[3], 6, "100,200,300");
 }
 
-test "process.observeDescendantListenPorts: classifies empty lsof result as none" {
+test "process_probe.observeDescendantListenPorts: classifies empty lsof result as none" {
     var recorder = runner_mod.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("", "", .{ .exited = 1 });
@@ -165,7 +165,7 @@ test "process.observeDescendantListenPorts: classifies empty lsof result as none
     try std.testing.expectEqual(ListenPortState.none, ports.state);
 }
 
-test "process.observeDescendantListenPorts: classifies lsof errors as unavailable" {
+test "process_probe.observeDescendantListenPorts: classifies lsof errors as unavailable" {
     var recorder = runner_mod.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("", "", .{ .exited = 1 });
@@ -178,7 +178,7 @@ test "process.observeDescendantListenPorts: classifies lsof errors as unavailabl
     try std.testing.expectEqual(ListenPortState.unavailable, ports.state);
 }
 
-test "process.parseListenPorts: parses unique lsof listen ports" {
+test "process_probe.parseListenPorts: parses unique lsof listen ports" {
     const output =
         \\COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
         \\node    12345 me     7u  IPv4 0x123      0t0  TCP *:15432 (LISTEN)
