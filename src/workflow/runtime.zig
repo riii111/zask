@@ -198,11 +198,6 @@ pub const Runtime = struct {
         try self.closeUnlockedWithProgress(progress);
     }
 
-    fn closeUnlocked(self: Runtime, writer: *std.Io.Writer) !void {
-        var progress = progress_mod.Line.init(writer);
-        try self.closeUnlockedWithProgress(&progress);
-    }
-
     /// Teardown order is load-bearing: stop services and docker first so their
     /// stop signals reach the live panes, let them settle, then kill the tmux
     /// session. Killing the session first would orphan those resources.
@@ -422,6 +417,10 @@ fn composeStatusText(state: observations.ComposeState) []const u8 {
     };
 }
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 test "runtime.status: maps observations to text" {
     try std.testing.expectEqualStrings("running", paneStatusText(.busy));
     try std.testing.expectEqualStrings("stopped", paneStatusText(.idle));
@@ -567,7 +566,7 @@ test "runtime.close: kills session after signaling services" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.closeUnlocked(&writer);
+    try testCloseUnlocked(runtime, &writer);
 
     try proc_runner.expectCommandOrder(&recorder, "C-c", "kill-session");
     const kill = recorder.commands.items[recorder.commands.items.len - 1];
@@ -599,7 +598,7 @@ test "runtime.close: kills session after resource stop" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.closeUnlocked(&writer);
+    try testCloseUnlocked(runtime, &writer);
 
     const kill_index = recorder.commands.items.len - 1;
     try proc_runner.expectCommandOrder(&recorder, "C-c", "down");
@@ -629,7 +628,7 @@ test "runtime.close: skips stop polling before killing session" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.closeUnlocked(&writer);
+    try testCloseUnlocked(runtime, &writer);
 
     const kill_index = recorder.commands.items.len - 1;
     try proc_runner.expectCommandOrder(&recorder, "C-c", "kill-session");
@@ -657,7 +656,7 @@ test "runtime.close: kills session even when a service signal fails" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.closeUnlocked(&writer);
+    try testCloseUnlocked(runtime, &writer);
 
     const kill = recorder.commands.items[recorder.commands.items.len - 1];
     try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "demo" });
@@ -683,7 +682,7 @@ test "runtime.close: kills session even when send-keys fails" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.closeUnlocked(&writer);
+    try testCloseUnlocked(runtime, &writer);
 
     try proc_runner.expectCommandContaining(&recorder, "C-c");
     const kill = recorder.commands.items[recorder.commands.items.len - 1];
@@ -1576,4 +1575,9 @@ fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.C
         .docker_impl = .{ .gpa = gpa, .runner = runner, .dir = "/tmp/demo", .file = "compose.yaml" },
         .validate_configured_dirs = false,
     };
+}
+
+fn testCloseUnlocked(runtime: Runtime, writer: *std.Io.Writer) !void {
+    var progress = progress_mod.Line.init(writer);
+    try runtime.closeUnlockedWithProgress(&progress);
 }
