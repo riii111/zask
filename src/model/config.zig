@@ -18,6 +18,7 @@ pub const keys = struct {
     pub const prechecks = "prechecks";
     pub const start_profiles = "start_profiles";
     pub const group_aliases = "group_aliases";
+    pub const env_file = "env_file";
 
     // project
     pub const name = "name";
@@ -161,6 +162,42 @@ pub const Config = struct {
 
     pub fn servicePort(service: Value) ?i64 {
         return config_value.optionalObjectInt(service, "port");
+    }
+
+    pub const EnvFileBase = enum {
+        project,
+        service,
+    };
+
+    pub const EnvFile = struct {
+        path: []const u8,
+        base: EnvFileBase,
+    };
+
+    pub fn serviceEnvFiles(gpa: std.mem.Allocator, service: Value) ![]EnvFile {
+        const files = config_value.optionalObjectArray(service, "env_files") orelse return gpa.alloc(EnvFile, 0);
+        var result: std.ArrayList(EnvFile) = .empty;
+        errdefer result.deinit(gpa);
+        for (files) |file| {
+            if (file != .object) return error.InvalidConfig;
+            const path = try config_value.requiredObjectString(file, "path");
+            const base = try config_value.requiredObjectString(file, "base");
+            try result.append(gpa, .{
+                .path = path,
+                .base = if (std.mem.eql(u8, base, "service")) .service else .project,
+            });
+        }
+        return result.toOwnedSlice(gpa);
+    }
+
+    pub fn serviceEnvFilePath(self: Config, gpa: std.mem.Allocator, service: Value, env_file: EnvFile) ![]const u8 {
+        if (std.fs.path.isAbsolute(env_file.path) or std.mem.startsWith(u8, env_file.path, "~"))
+            return self.expandHome(gpa, env_file.path);
+        const base = switch (env_file.base) {
+            .project => try self.projectRoot(gpa),
+            .service => try self.serviceDir(gpa, service),
+        };
+        return std.fs.path.join(gpa, &.{ base, env_file.path });
     }
 
     pub fn serviceHealthcheckType(service: Value) []const u8 {
@@ -368,21 +405,56 @@ fn normalizeDocker(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: Va
 fn normalizeServices(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: Value) !void {
     const groups = source.object.get(keys.groups) orelse return error.InvalidConfig;
     if (groups != .array) return error.InvalidConfig;
+    const project_env = source.object.get(keys.env_file);
 
     var services = std.json.Array.init(gpa);
     errdefer services.deinit();
     for (groups.array.items) |group| {
         if (group != .object) return error.InvalidConfig;
         const name = try config_value.requiredObjectString(group, keys.name);
+        const group_env = group.object.get(keys.env_file);
         const group_services = group.object.get(keys.services) orelse return error.InvalidConfig;
         if (group_services != .array) return error.InvalidConfig;
         for (group_services.array.items) |service| {
             if (service != .object) return error.InvalidConfig;
-            const normalized = try cloneObjectWithField(gpa, service, "group", .{ .string = name });
+            var normalized = try cloneObjectWithField(gpa, service, "group", .{ .string = name });
+            const env_files = try normalizeServiceEnvFiles(gpa, project_env, group_env, service.object.get(keys.env_file));
+            if (env_files.items.len > 0) {
+                try normalized.put(gpa, "env_files", .{ .array = env_files });
+            } else {
+                env_files.deinit();
+            }
             try services.append(.{ .object = normalized });
         }
     }
     try root.put(gpa, "services", .{ .array = services });
+}
+
+fn normalizeServiceEnvFiles(gpa: std.mem.Allocator, project_env: ?Value, group_env: ?Value, service_env: ?Value) !std.json.Array {
+    var files = std.json.Array.init(gpa);
+    errdefer files.deinit();
+    try appendEnvFileValues(gpa, &files, project_env, "project");
+    try appendEnvFileValues(gpa, &files, group_env, "project");
+    try appendEnvFileValues(gpa, &files, service_env, "service");
+    return files;
+}
+
+fn appendEnvFileValues(gpa: std.mem.Allocator, files: *std.json.Array, value: ?Value, base: []const u8) !void {
+    const node = value orelse return;
+    if (node == .string) return appendEnvFile(gpa, files, node.string, base);
+    if (node != .array) return error.InvalidConfig;
+    for (node.array.items) |item| {
+        if (item != .string) return error.InvalidConfig;
+        try appendEnvFile(gpa, files, item.string, base);
+    }
+}
+
+fn appendEnvFile(gpa: std.mem.Allocator, files: *std.json.Array, path: []const u8, base: []const u8) !void {
+    var object: std.json.ObjectMap = .empty;
+    errdefer object.deinit(gpa);
+    try object.put(gpa, "path", .{ .string = path });
+    try object.put(gpa, "base", .{ .string = base });
+    try files.append(.{ .object = object });
 }
 
 fn normalizeStartupOrder(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: Value) !void {
@@ -478,9 +550,10 @@ pub fn validateAll(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Di
     var refs = ValidationIndex.init(gpa);
     defer refs.deinit();
 
-    try checkKeys(gpa, source, "", &.{ keys.project, keys.docker, keys.startup_order, keys.prechecks, keys.start_profiles, keys.group_aliases, keys.groups }, diags);
+    try checkKeys(gpa, source, "", &.{ keys.project, keys.docker, keys.env_file, keys.startup_order, keys.prechecks, keys.start_profiles, keys.group_aliases, keys.groups }, diags);
     try validateProject(gpa, source, diags);
     try validateDocker(gpa, source, diags);
+    try checkEnvFileField(gpa, source, "", diags);
     // Build the reference index before validating references: startup_order and
     // profile overrides may point at groups or aliases declared later in the file.
     try validateGroups(gpa, source, diags, &refs);
@@ -570,7 +643,8 @@ fn validateGroups(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Dia
     for (groups.array.items, 0..) |group, gi| {
         const gpath = try indexedPath(gpa, "groups", gi);
         if (!try expectObject(group, gpath, diags)) continue;
-        try checkKeys(gpa, group, gpath, &.{ keys.name, keys.services }, diags);
+        try checkKeys(gpa, group, gpath, &.{ keys.name, keys.env_file, keys.services }, diags);
+        try checkEnvFileField(gpa, group, gpath, diags);
         var group_name: ?[]const u8 = null;
         if (try checkRequiredString(gpa, group, keys.name, gpath, diags)) |name| {
             group_name = name;
@@ -599,7 +673,7 @@ fn validateGroups(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Dia
 
 fn validateService(gpa: std.mem.Allocator, service: Value, path: []const u8, diags: *diagnostics.Diagnostics, refs: *ValidationIndex) !void {
     if (!try expectObject(service, path, diags)) return;
-    try checkKeys(gpa, service, path, &.{ keys.name, keys.dir, keys.runtime, keys.command, keys.external, keys.port, keys.healthcheck }, diags);
+    try checkKeys(gpa, service, path, &.{ keys.name, keys.dir, keys.runtime, keys.command, keys.external, keys.port, keys.healthcheck, keys.env_file }, diags);
     if (try checkRequiredString(gpa, service, keys.name, path, diags)) |name| {
         const name_path = try joinPath(gpa, path, "name");
         validate.identifier(name) catch try diags.add(name_path, "must be a valid identifier");
@@ -617,6 +691,7 @@ fn validateService(gpa: std.mem.Allocator, service: Value, path: []const u8, dia
         if (port != .integer) try diags.add(try joinPath(gpa, path, "port"), "must be an integer");
     }
     try checkServiceDir(gpa, service, path, diags);
+    try checkEnvFileField(gpa, service, path, diags);
     if (service.object.get(keys.healthcheck)) |healthcheck| {
         const hpath = try joinPath(gpa, path, "healthcheck");
         if (!try expectObject(healthcheck, hpath, diags)) return;
@@ -766,6 +841,33 @@ fn checkStringObject(gpa: std.mem.Allocator, value: Value, path: []const u8, dia
     while (it.next()) |entry| {
         if (entry.value_ptr.* != .string) try diags.add(try joinPath(gpa, path, entry.key_ptr.*), "must be a string");
     }
+}
+
+fn checkEnvFileField(gpa: std.mem.Allocator, node: Value, path: []const u8, diags: *diagnostics.Diagnostics) !void {
+    const env_file = node.object.get(keys.env_file) orelse return;
+    const field_path = if (path.len == 0) keys.env_file else try joinPath(gpa, path, keys.env_file);
+    if (env_file == .string) return checkEnvFilePath(env_file.string, field_path, diags);
+    if (env_file != .array) {
+        try diags.add(field_path, "must be a string or an array of strings");
+        return;
+    }
+    for (env_file.array.items, 0..) |item, index| {
+        const item_path = try indexedPath(gpa, field_path, index);
+        if (item != .string) {
+            try diags.add(item_path, "must be a string");
+            continue;
+        }
+        try checkEnvFilePath(item.string, item_path, diags);
+    }
+}
+
+fn checkEnvFilePath(value: []const u8, path: []const u8, diags: *diagnostics.Diagnostics) !void {
+    if (value.len == 0) {
+        try diags.add(path, "must not be empty");
+        return;
+    }
+    if (std.fs.path.isAbsolute(value) or std.mem.startsWith(u8, value, "~")) return;
+    validate.relativeSubPath(value) catch try diags.add(path, "must stay within its base directory");
 }
 
 fn checkIdentifier(gpa: std.mem.Allocator, node: Value, key: []const u8, path: []const u8, diags: *diagnostics.Diagnostics) !void {
@@ -950,6 +1052,42 @@ test "config.phasePortWaitTimeout: normalizes startup order override" {
     try std.testing.expectEqual(@as(i64, 240), Config.phasePortWaitTimeout(cfg.phases()[0], 180));
 }
 
+test "config.env_file: normalizes project group and service scopes" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "env_file": ".env",
+        \\  "groups": [{
+        \\    "name":"backend",
+        \\    "env_file":["backend/.env"],
+        \\    "services":[{
+        \\      "name":"api",
+        \\      "dir":"services/api",
+        \\      "command":"serve",
+        \\      "env_file":".env.local"
+        \\    }]
+        \\  }]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try parseTestConfig(&arena, json);
+    const service = try cfg.findService("api");
+
+    const env_files = try Config.serviceEnvFiles(arena.allocator(), service);
+    try std.testing.expectEqual(@as(usize, 3), env_files.len);
+    try std.testing.expectEqual(Config.EnvFileBase.project, env_files[0].base);
+    try std.testing.expectEqualStrings(".env", env_files[0].path);
+    try std.testing.expectEqual(Config.EnvFileBase.project, env_files[1].base);
+    try std.testing.expectEqualStrings("backend/.env", env_files[1].path);
+    try std.testing.expectEqual(Config.EnvFileBase.service, env_files[2].base);
+    try std.testing.expectEqualStrings(".env.local", env_files[2].path);
+
+    try std.testing.expectEqualStrings("/tmp/demo/.env", try cfg.serviceEnvFilePath(arena.allocator(), service, env_files[0]));
+    try std.testing.expectEqualStrings("/tmp/demo/backend/.env", try cfg.serviceEnvFilePath(arena.allocator(), service, env_files[1]));
+    try std.testing.expectEqualStrings("/tmp/demo/services/api/.env.local", try cfg.serviceEnvFilePath(arena.allocator(), service, env_files[2]));
+}
+
 test "config.parse: rejects unknown service runtime" {
     const json =
         \\{
@@ -990,6 +1128,39 @@ test "config.parse: rejects malformed group aliases" {
     defer arena.deinit();
 
     try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
+}
+
+test "config.parse: rejects malformed env_file values" {
+    const cases = [_][]const u8{
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "env_file": 42,
+        \\  "groups": []
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "env_file": [""],
+        \\  "groups": []
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","env_file":["../.env"],"services":[]}]
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","command":"serve","env_file":[42]}]}]
+        \\}
+        ,
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    for (cases) |json| {
+        try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
+    }
 }
 
 test "config.parse: rejects legacy flat services" {

@@ -4,6 +4,7 @@ const configured_path = @import("configured_path.zig");
 const docker_client = @import("../platform/docker.zig");
 const observations = @import("../model/observations.zig");
 const phases = @import("phases.zig");
+const paths = @import("../platform/paths.zig");
 const pathing = @import("pathing.zig");
 const proc_runner = @import("../platform/runner.zig");
 const progress_mod = @import("progress.zig");
@@ -36,6 +37,7 @@ pub const Lifecycle = struct {
     tmux: tmux_client.Client,
     docker: docker_client.Compose,
     validate_configured_dirs: bool = true,
+    emit_env_file_tips: bool = false,
     command_hint: zask_command.InvocationHint,
 
     pub fn startAll(self: Lifecycle, profile: []const u8, writer: *std.Io.Writer, mode: StartMode) !void {
@@ -324,10 +326,56 @@ pub const Lifecycle = struct {
             .path = service_path,
         });
         const service_dir = try pathing.absolute(self.gpa, self.runner.io, service_path);
+        try self.writeEnvFileTip(value, service_dir, progress);
         const start_command = try config.Config.serviceStartCommand(self.gpa, value);
+        const launch_command = try self.serviceLaunchCommand(value, start_command);
         try progress.step("Starting {s}...\n", .{service});
         try progress.command("{s}\n", .{start_command});
-        try self.tmux.respawnPane(service, service_dir, start_command);
+        try self.tmux.respawnPane(service, service_dir, launch_command);
+    }
+
+    fn serviceLaunchCommand(self: Lifecycle, service: std.json.Value, command: []const u8) ![]const u8 {
+        const env_files = try config.Config.serviceEnvFiles(self.gpa, service);
+        defer self.gpa.free(env_files);
+        if (env_files.len == 0) return command;
+
+        var script: std.Io.Writer.Allocating = .init(self.gpa);
+        errdefer script.deinit();
+        for (env_files) |env_file| {
+            const path = try self.cfg.serviceEnvFilePath(self.gpa, service, env_file);
+            const quoted = try shell.quote(self.gpa, path);
+            try script.writer.print(
+                \\__zask_env_file={s}
+                \\if [ ! -f "$__zask_env_file" ]; then
+                \\  echo "zask: env_file not found: $__zask_env_file" >&2
+                \\  exit 1
+                \\fi
+                \\while IFS= read -r __zask_env_line || [ -n "$__zask_env_line" ]; do
+                \\  case "$__zask_env_line" in ""|\#*) continue ;; export\ *) __zask_env_line=${{__zask_env_line#export }} ;; esac
+                \\  case "$__zask_env_line" in *=*) __zask_env_key=${{__zask_env_line%%=*}}; __zask_env_value=${{__zask_env_line#*=}} ;; *) continue ;; esac
+                \\  case "$__zask_env_key" in ""|[0-9]*|*[!A-Za-z0-9_]*) continue ;; *) export "$__zask_env_key=$__zask_env_value" ;; esac
+                \\done < "$__zask_env_file"
+                \\
+            , .{quoted});
+        }
+        try script.writer.print("unset __zask_env_file __zask_env_line __zask_env_key __zask_env_value\n{s}", .{command});
+        return script.toOwnedSlice();
+    }
+
+    fn writeEnvFileTip(self: Lifecycle, service: std.json.Value, service_dir: []const u8, progress: anytype) !void {
+        if (!self.emit_env_file_tips) return;
+        const env_files = try config.Config.serviceEnvFiles(self.gpa, service);
+        defer self.gpa.free(env_files);
+        if (env_files.len > 0) return;
+        const name = try config.Config.serviceName(service);
+        const project_env = try std.fs.path.join(self.gpa, &.{ try self.cfg.projectRoot(self.gpa), ".env" });
+        if (paths.exists(self.runner.io, project_env)) {
+            try progress.info("Tip: .env exists but is not loaded for {s}; add env_file to use it.\n", .{name});
+            return;
+        }
+        const service_env = try std.fs.path.join(self.gpa, &.{ service_dir, ".env" });
+        if (paths.exists(self.runner.io, service_env))
+            try progress.info("Tip: service .env exists but is not loaded for {s}; add env_file to use it.\n", .{name});
     }
 
     fn ensureServiceStopped(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
@@ -712,6 +760,66 @@ test "lifecycle.startAll: prime mode respawns service without observing pane" {
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "list-panes") == null);
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "pgrep") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting api...") != null);
+}
+
+test "lifecycle.startAll: wraps service command with env files" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "env_file": ".env",
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","env_file":".env.local"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startAll("all", &writer, .prime);
+
+    const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.RespawnMissing;
+    try proc_runner.expectCommandArgContains(respawn, 9, "__zask_env_file='/tmp/demo/.env'");
+    try proc_runner.expectCommandArgContains(respawn, 9, "__zask_env_file='/tmp/demo/backend/.env.local'");
+    try proc_runner.expectCommandArgContains(respawn, 9, "export \"$__zask_env_key=$__zask_env_value\"");
+    try proc_runner.expectCommandArgContains(respawn, 9, "\nserve");
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting api...") != null);
+}
+
+test "lifecycle.startAll: suggests env_file when project env exists" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = ".env", .data = "TOKEN=secret\n" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const json = try std.fmt.allocPrint(std.testing.allocator,
+        \\{{
+        \\  "project": {{"name":"demo","root":"{s}"}},
+        \\  "groups": [{{"name":"backend","services":[{{"name":"api","command":"serve"}}]}}]
+        \\}}
+    , .{root});
+    defer std.testing.allocator.free(json);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    var lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    lifecycle.emit_env_file_tips = true;
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startAll("all", &writer, .prime);
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Tip: .env exists but is not loaded for api; add env_file to use it.") != null);
 }
 
 test "lifecycle.stopAll: signals every running service before polling once" {

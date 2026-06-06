@@ -67,3 +67,9 @@ pub fn optionalObjectInt(node: Value, key: []const u8) ?i64 {
     const value = node.object.get(key) orelse return null;
     return if (value == .integer) value.integer else null;
 }
+
+pub fn optionalObjectArray(node: Value, key: []const u8) ?[]const Value {
+    if (node != .object) return null;
+    const value = node.object.get(key) orelse return null;
+    return if (value == .array) value.array.items else null;
+}

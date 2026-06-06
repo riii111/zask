@@ -281,6 +281,7 @@ pub const Runtime = struct {
             .tmux = self.tmux(),
             .docker = self.docker(),
             .validate_configured_dirs = self.validate_configured_dirs,
+            .emit_env_file_tips = true,
             .command_hint = self.command_hint,
         };
     }
