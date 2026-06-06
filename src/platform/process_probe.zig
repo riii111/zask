@@ -15,6 +15,7 @@ pub const ListenPorts = struct {
         return .{ .state = state };
     }
 
+    /// Takes ownership of `ports`; callers must not free the slice after passing it here.
     pub fn fromOwned(ports: []const i64) ListenPorts {
         return .{ .state = .ports, .ports = ports };
     }
@@ -103,6 +104,8 @@ fn containsPid(pids: []const []const u8, pid: []const u8) bool {
     return false;
 }
 
+// lsof output is treated as best-effort: unknown lines are skipped, and only
+// parseable LISTEN endpoints contribute observed ports.
 fn parseListenPorts(gpa: std.mem.Allocator, output: []const u8) ![]i64 {
     var ports: std.ArrayList(i64) = .empty;
     errdefer ports.deinit(gpa);
@@ -176,6 +179,11 @@ test "process_probe.observeDescendantListenPorts: classifies lsof errors as unav
     defer ports.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(ListenPortState.unavailable, ports.state);
+}
+
+test "process_probe.ListenPorts: empty deinit is a no-op" {
+    const ports = ListenPorts.empty(.none);
+    ports.deinit(std.testing.allocator);
 }
 
 test "process_probe.parseListenPorts: parses unique lsof listen ports" {
