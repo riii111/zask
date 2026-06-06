@@ -48,6 +48,7 @@ pub const Lifecycle = struct {
     pub fn startAllWithProgress(self: Lifecycle, profile: []const u8, progress: anytype, mode: StartMode) !void {
         try phases.runPrechecks(self, progress);
         if (std.mem.eql(u8, profile, "docker")) return self.startDockerAndWaitWithProgress(progress);
+        try self.writeProjectEnvFileTip(profile, progress);
         const phase_list = self.cfg.phases();
         if (phase_list.len == 0) {
             const service_list = try self.cfg.services();
@@ -369,13 +370,26 @@ pub const Lifecycle = struct {
         if (env_files.len > 0) return;
         const name = try config.Config.serviceName(service);
         const project_env = try std.fs.path.join(self.gpa, &.{ try self.cfg.projectRoot(self.gpa), ".env" });
-        if (paths.exists(self.runner.io, project_env)) {
-            try progress.info("Tip: .env exists but is not loaded for {s}; add env_file to use it.\n", .{name});
-            return;
-        }
         const service_env = try std.fs.path.join(self.gpa, &.{ service_dir, ".env" });
-        if (paths.exists(self.runner.io, service_env))
+        if (!std.mem.eql(u8, project_env, service_env) and paths.exists(self.runner.io, service_env))
             try progress.info("Tip: service .env exists but is not loaded for {s}; add env_file to use it.\n", .{name});
+    }
+
+    fn writeProjectEnvFileTip(self: Lifecycle, profile: []const u8, progress: anytype) !void {
+        if (!self.emit_env_file_tips) return;
+        const project_env = try std.fs.path.join(self.gpa, &.{ try self.cfg.projectRoot(self.gpa), ".env" });
+        if (!paths.exists(self.runner.io, project_env)) return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const services = try phases.resolvedServicePhaseServices(arena.allocator(), self.cfg, profile);
+        for (services) |name| {
+            const service = try self.cfg.findService(name);
+            const env_files = try config.Config.serviceEnvFiles(arena.allocator(), service);
+            if (env_files.len == 0) {
+                try progress.info("Tip: .env exists but is not loaded; add project-level env_file to use it.\n", .{});
+                return;
+            }
+        }
     }
 
     fn ensureServiceStopped(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
@@ -819,7 +833,39 @@ test "lifecycle.startAll: suggests env_file when project env exists" {
 
     try lifecycle.startAll("all", &writer, .prime);
 
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Tip: .env exists but is not loaded for api; add env_file to use it.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Tip: .env exists but is not loaded; add project-level env_file to use it.") != null);
+}
+
+test "lifecycle.serviceLaunchCommand: keeps quoted env values literal" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = ".env", .data = "QUOTED=\"value\"\n" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const json = try std.fmt.allocPrint(std.testing.allocator,
+        \\{{
+        \\  "project": {{"name":"demo","root":"{s}"}},
+        \\  "groups": [{{"name":"backend","services":[{{"name":"api","command":"serve","env_file":"{s}/.env"}}]}}]
+        \\}}
+    , .{ root, root });
+    defer std.testing.allocator.free(json);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    const service = try cfg.findService("api");
+    const command = try lifecycle.serviceLaunchCommand(service, "printf '%s' \"$QUOTED\"");
+    const result = try std.process.run(std.testing.allocator, io, .{ .argv = &.{ "sh", "-c", command } });
+    defer std.testing.allocator.free(result.stdout);
+    defer std.testing.allocator.free(result.stderr);
+
+    try std.testing.expectEqualStrings("\"value\"", result.stdout);
 }
 
 test "lifecycle.stopAll: signals every running service before polling once" {

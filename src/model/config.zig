@@ -174,6 +174,7 @@ pub const Config = struct {
         base: EnvFileBase,
     };
 
+    /// Caller owns the returned slice; entries borrow strings from the config.
     pub fn serviceEnvFiles(gpa: std.mem.Allocator, service: Value) ![]EnvFile {
         const files = config_value.optionalObjectArray(service, "env_files") orelse return gpa.alloc(EnvFile, 0);
         var result: std.ArrayList(EnvFile) = .empty;
@@ -190,6 +191,8 @@ pub const Config = struct {
         return result.toOwnedSlice(gpa);
     }
 
+    /// Returns an env file path owned by the caller unless `env_file.path` is an
+    /// absolute path or bare `~` already borrowed from config/home.
     pub fn serviceEnvFilePath(self: Config, gpa: std.mem.Allocator, service: Value, env_file: EnvFile) ![]const u8 {
         if (std.fs.path.isAbsolute(env_file.path) or std.mem.startsWith(u8, env_file.path, "~"))
             return self.expandHome(gpa, env_file.path);
