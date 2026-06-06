@@ -209,9 +209,9 @@ fn writePortFailure(ctx: anytype, phase: std.json.Value, profile: []const u8, po
     if (service) |name| {
         observed = try observeListenPorts(ctx, name);
         try writeListenPortObservation(writer, observed);
-        const last_log = try writeLastLog(ctx, name, writer);
-        defer ctx.gpa.free(last_log);
-        try writeStartupFailureHints(writer, name, port, observed, last_log);
+        const log_context = try writeLastLog(ctx, name, writer);
+        defer ctx.gpa.free(log_context);
+        try writeStartupFailureHints(writer, name, port, observed, log_context);
         try writeNextLogsHint(ctx, name, writer);
     }
     try writer.flush();
@@ -220,6 +220,7 @@ fn writePortFailure(ctx: anytype, phase: std.json.Value, profile: []const u8, po
 fn observeListenPorts(ctx: anytype, service: []const u8) !process_probe.ListenPorts {
     const info = ctx.tmux.paneInfo(service) catch return process_probe.ListenPorts.empty(.unavailable);
     defer info.deinit(ctx.gpa);
+    if (info.dead) return process_probe.ListenPorts.empty(.none);
     const pid = std.mem.trim(u8, info.pid, " \t\r\n");
     return process_probe.observeDescendantListenPorts(ctx.gpa, ctx.runner, pid);
 }
@@ -442,16 +443,25 @@ fn writeDisplayLine(writer: *std.Io.Writer, line: []const u8) !void {
 }
 
 fn writeLastLog(ctx: anytype, window: []const u8, writer: *std.Io.Writer) ![]const u8 {
-    const line = try ctx.tmux.captureLastLine(window);
-    if (line.len > 0) try writer.print("  last log: {s}\n", .{line});
-    return line;
+    const tail = try ctx.tmux.captureTail(window, diagnostic_tail_lines);
+    defer tail.deinit(ctx.gpa);
+    if (tail.lines.len == 0) return ctx.gpa.dupe(u8, "");
+    try writer.print("  last log: {s}\n", .{tail.lines[tail.lines.len - 1]});
+
+    var out: std.Io.Writer.Allocating = .init(ctx.gpa);
+    errdefer out.deinit();
+    for (tail.lines, 0..) |line, index| {
+        if (index > 0) try out.writer.writeByte('\n');
+        try out.writer.writeAll(line);
+    }
+    return out.toOwnedSlice();
 }
 
-fn writeStartupFailureHints(writer: *std.Io.Writer, service: []const u8, expected_port: i64, observed: process_probe.ListenPorts, last_log: []const u8) !void {
+fn writeStartupFailureHints(writer: *std.Io.Writer, service: []const u8, expected_port: i64, observed: process_probe.ListenPorts, log_context: []const u8) !void {
     if (observed.state == .ports and !observed.contains(expected_port) and observed.ports.len > 0) {
         try writer.print("Hint: {s} is listening on {d}, but config port is {d}.\n", .{ service, observed.ports[0], expected_port });
     }
-    if (startupFailureHint(last_log)) |hint| try writer.print("Hint: {s}\n", .{hint});
+    if (startupFailureHint(log_context)) |hint| try writer.print("Hint: {s}\n", .{hint});
 }
 
 fn startupFailureHint(last_log: []const u8) ?[]const u8 {
@@ -1112,6 +1122,36 @@ test "phases.runServicePhase: reports port readiness failure" {
     , writer.buffered());
 }
 
+test "phases.runServicePhase: reports no observed port for dead pane" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":5432}]}],
+        \\  "startup_order": [{"name":"backend","group":"backend","wait_ports":[5432],"port_wait_timeout_seconds":0}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("1|130|12345|node\n", "", .{ .exited = 0 });
+    try recorder.enqueue("server exited\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [768]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.StartupFailed, runServicePhase(lifecycle, cfg.phases()[0], "all", &writer, .observe));
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "  observed: no listen port from service process\n") != null);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "lsof") == null);
+}
+
 test "phases.runServicePhase: reports mismatched observed listen port" {
     const json =
         \\{
@@ -1217,6 +1257,16 @@ test "phases.startupFailureHint: maps common startup failures" {
         startupFailureHint("listen EADDRINUSE 127.0.0.1:3000").?,
     );
     try std.testing.expect(startupFailureHint("server exited") == null);
+}
+
+test "phases.startupFailureHint: checks previous tail lines" {
+    try std.testing.expectEqualStrings(
+        "required environment may be missing; check env_file or the service command environment.",
+        startupFailureHint(
+            \\[ERROR] TypeError: client_id is required
+            \\    at main
+        ).?,
+    );
 }
 
 test "phases.phaseCwd: rejects path traversal" {
