@@ -30,7 +30,7 @@ const blue = ansi.blue;
 const cyan = ansi.cyan;
 const launcher_width = 46;
 const service_name_width = 15;
-const service_port_width = 6;
+const service_port_width = 8;
 
 fn renderLauncher(ctx: RenderContext, writer: *std.Io.Writer) !void {
     try writer.writeAll("\n");
@@ -72,7 +72,7 @@ fn renderLauncher(ctx: RenderContext, writer: *std.Io.Writer) !void {
                 const port_text = try std.fmt.allocPrint(ctx.gpa, ":{d}", .{p});
                 try ansi.writePadded(writer, port_text, service_port_width);
             } else {
-                try ansi.writePadded(writer, ":N/A", service_port_width);
+                try ansi.writePadded(writer, "no check", service_port_width);
             }
             try writer.print("{s}  {s}\n", .{ reset, command });
         }

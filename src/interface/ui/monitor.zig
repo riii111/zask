@@ -8,7 +8,7 @@ const tmux_options = @import("../../model/tmux_options.zig");
 const RenderContext = @import("context.zig").RenderContext;
 
 const monitor_name_width = 12;
-const monitor_port_width = 6;
+const monitor_port_width = 8;
 const monitor_status_width = 8;
 const monitor_log_width = 35;
 
@@ -68,7 +68,7 @@ const MonitorStatus = enum {
     fn summary(self: MonitorStatus, exit_code: []const u8) []const u8 {
         return switch (self) {
             .live => "live",
-            .ready => "ready",
+            .ready => "waiting",
             .degraded => "degraded",
             .stop => "stop",
             .dead => exit_code,
@@ -128,7 +128,7 @@ fn serviceMonitorRow(ctx: RenderContext, service: std.json.Value) !MonitorRow {
         .status = state,
         .exit_code = observation.pane.exit_code,
         .command = observation.pane.command,
-        .port = if (config.Config.servicePort(service)) |p| try std.fmt.allocPrint(ctx.gpa, ":{d}", .{p}) else "  -",
+        .port = if (config.Config.servicePort(service)) |p| try std.fmt.allocPrint(ctx.gpa, ":{d}", .{p}) else "no check",
     };
 }
 
