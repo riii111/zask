@@ -308,6 +308,31 @@ test "monitor.service: skips health checks unless pane is busy" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
+test "monitor.service: shows no check for services without port" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
+    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+
+    const row = try serviceMonitorRow(ctx, (try cfg.services())[0]);
+
+    try std.testing.expectEqual(MonitorStatus.live, row.status);
+    try std.testing.expectEqualStrings("no check", row.port);
+    try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "nc"));
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
 test "monitor.service: checks health for busy shell panes" {
     const json =
         \\{
@@ -331,6 +356,33 @@ test "monitor.service: checks health for busy shell panes" {
     try std.testing.expectEqual(MonitorStatus.live, row.status);
     try std.testing.expectEqual(@as(usize, 1), recordedCommandCount(&recorder, "nc"));
     try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "curl"));
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "monitor.service: shows waiting while port is not ready" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve","port":3000}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+
+    const row = try serviceMonitorRow(ctx, (try cfg.services())[0]);
+
+    try std.testing.expectEqual(MonitorStatus.ready, row.status);
+    try std.testing.expectEqualStrings(":3000", row.port);
+    try std.testing.expectEqualStrings("waiting", row.status.summary(row.exit_code));
+    try std.testing.expectEqual(@as(usize, 1), recordedCommandCount(&recorder, "nc"));
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 

@@ -178,6 +178,7 @@ test "dashboard.renderLauncher: renders launcher frame with grouped services" {
     try std.testing.expect(std.mem.indexOf(u8, body, "[backend]") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "api") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, ":18080") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "no check") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "npm run dev") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "zask open") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "zask demo <command>") != null);
