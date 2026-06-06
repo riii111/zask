@@ -7,9 +7,9 @@ const lifecycle_mod = @import("lifecycle.zig");
 const pathing = @import("pathing.zig");
 const proc_runner = @import("../platform/runner.zig");
 const progress_mod = @import("progress.zig");
-const shell = @import("../platform/shell.zig");
 const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
+const zask_command = @import("zask_command.zig");
 
 const default_port_wait_timeout_seconds = 180;
 const diagnostic_tail_lines = 6;
@@ -386,10 +386,12 @@ fn writeLastLog(ctx: anytype, window: []const u8, writer: *std.Io.Writer) !void 
 }
 
 fn writeNextLogsHint(ctx: anytype, service: []const u8, writer: *std.Io.Writer) !void {
-    const config_path = try shell.quote(ctx.gpa, ctx.config_path);
-    defer ctx.gpa.free(config_path);
+    const command_text = try std.fmt.allocPrint(ctx.gpa, "logs {s}", .{service});
+    defer ctx.gpa.free(command_text);
+    const command = try zask_command.hint(ctx.gpa, ctx.command_hint, command_text);
+    defer ctx.gpa.free(command);
     try writer.writeAll("\nNext:\n");
-    try writer.print("  zask --config {s} logs {s}\n", .{ config_path, service });
+    try writer.print("  {s}\n", .{command});
 }
 
 // -----------------------------------------------------------------------------
@@ -409,6 +411,7 @@ fn testLifecycle(gpa: std.mem.Allocator, run: proc_runner.Runner, cfg: config.Co
         .tmux = .{ .gpa = gpa, .runner = run, .session = "demo" },
         .docker = .{ .gpa = gpa, .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
         .validate_configured_dirs = false,
+        .command_hint = .{ .config = "config.json" },
     };
 }
 
@@ -872,11 +875,14 @@ test "phases.runServicePhase: propagates window-not-ready as startup failure" {
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
-    var buffer: [128]u8 = undefined;
+    var buffer: [512]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
     try std.testing.expectError(error.WindowNotReady, runServicePhase(lifecycle, cfg.phases()[0], "all", &writer, .observe));
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "window for api not ready") != null);
+    const out = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "Error: api window is not ready") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "window: api") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "zask --config 'config.json' open") != null);
 }
 
 test "phases.runServicePhase: honors wait_ports as a declared dependency" {
