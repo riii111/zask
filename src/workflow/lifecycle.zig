@@ -460,7 +460,7 @@ pub const Lifecycle = struct {
     fn warnProfileServicesWithoutPort(self: Lifecycle, profile: []const u8, writer: *std.Io.Writer) !void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
-        const services = try phases.servicePhaseServices(arena.allocator(), self.cfg, profile);
+        const services = try phases.resolvedServicePhaseServices(arena.allocator(), self.cfg, profile);
         try self.warnServicesWithoutPort(services, writer);
     }
 
@@ -1262,6 +1262,40 @@ test "lifecycle.startTarget: port warnings cover selected service targets" {
     try std.testing.expect(std.mem.indexOf(u8, out, "web has no port") == null);
 }
 
+test "lifecycle.startTarget: group targets warn for unchecked services" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[
+        \\    {"name":"api","dir":"backend","command":"serve"},
+        \\    {"name":"web","dir":"frontend","command":"dev","port":3000}
+        \\  ]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|sleep\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||124|sleep\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startTarget("backend", &writer);
+
+    const out = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "Warning: api has no port; zask cannot check readiness for this service") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "web has no port") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "api already running") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "web already running") != null);
+}
+
 test "lifecycle.startTarget: port warnings follow startup profile service phases" {
     const json =
         \\{
@@ -1296,6 +1330,45 @@ test "lifecycle.startTarget: port warnings follow startup profile service phases
     const out = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "api has no port") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Warning: job has no port; zask cannot check readiness for this service") != null);
+}
+
+test "lifecycle.startTarget: start all warns for resolved startup services" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [
+        \\    {"name":"backend","services":[
+        \\      {"name":"api","dir":"backend","command":"serve"}
+        \\    ]},
+        \\    {"name":"frontend","services":[
+        \\      {"name":"web","dir":"frontend","command":"dev","port":3000}
+        \\    ]}
+        \\  ],
+        \\  "startup_order": [{"group":"backend"}, {"group":"frontend"}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|sleep\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||124|sleep\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startTarget("--all", &writer);
+
+    const out = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "Warning: api has no port; zask cannot check readiness for this service") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "web has no port") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "api already running") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "web already running") != null);
 }
 
 test "lifecycle.restartTarget: docker restart reports tmux unavailable without stopping compose" {

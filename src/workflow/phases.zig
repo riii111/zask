@@ -101,7 +101,7 @@ pub fn runServicePhase(ctx: anytype, phase: std.json.Value, profile: []const u8,
     try runServicePhaseWithProgress(ctx, phase, profile, &progress, mode);
 }
 
-pub fn servicePhaseServices(gpa: std.mem.Allocator, cfg: config.Config, profile: []const u8) ![][]const u8 {
+pub fn resolvedServicePhaseServices(gpa: std.mem.Allocator, cfg: config.Config, profile: []const u8) ![][]const u8 {
     var names: std.ArrayList([]const u8) = .empty;
     errdefer names.deinit(gpa);
     const phase_list = cfg.phases();

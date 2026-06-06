@@ -329,16 +329,12 @@ pub const Runtime = struct {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const scratch = arena.allocator();
-        const services = try self.servicesStartedByProfile(scratch, profile);
+        const services = try phases.resolvedServicePhaseServices(scratch, self.cfg, profile);
         for (services) |name| {
             const service = try self.cfg.findService(name);
             if (config.Config.servicePort(service) != null) continue;
             try progress.warn("Warning: {s} has no port; zask cannot check readiness for this service\n", .{name});
         }
-    }
-
-    fn servicesStartedByProfile(self: Runtime, scratch: std.mem.Allocator, profile: []const u8) ![][]const u8 {
-        return phases.servicePhaseServices(scratch, self.cfg, profile);
     }
 
     fn ensureOpenConfiguredDirs(self: Runtime, scratch: std.mem.Allocator, writer: *std.Io.Writer) !void {
