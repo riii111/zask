@@ -32,7 +32,6 @@ const StopBroadcast = struct {
 pub const Lifecycle = struct {
     gpa: std.mem.Allocator,
     cfg: config.Config,
-    config_path: []const u8,
     runner: proc_runner.Runner,
     tmux: tmux_client.Client,
     docker: docker_client.Compose,
@@ -525,7 +524,6 @@ fn testLifecycle(gpa: std.mem.Allocator, run: proc_runner.Runner, cfg: config.Co
     return .{
         .gpa = gpa,
         .cfg = cfg,
-        .config_path = "config.json",
         .runner = run,
         .tmux = .{ .gpa = gpa, .runner = run, .session = "demo" },
         .docker = .{ .gpa = gpa, .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },

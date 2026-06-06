@@ -277,7 +277,6 @@ pub const Runtime = struct {
         return .{
             .gpa = self.gpa,
             .cfg = self.cfg,
-            .config_path = self.config_path,
             .runner = self.runner(),
             .tmux = self.tmux(),
             .docker = self.docker(),
@@ -338,6 +337,8 @@ pub const Runtime = struct {
         }
     }
 
+    // Warning scope mirrors only service phase group resolution; startup side
+    // effects stay in Lifecycle.
     fn servicesStartedByProfile(self: Runtime, scratch: std.mem.Allocator, profile: []const u8) ![][]const u8 {
         var names: std.ArrayList([]const u8) = .empty;
         errdefer names.deinit(scratch);

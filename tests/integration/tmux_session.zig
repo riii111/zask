@@ -120,6 +120,68 @@ test "tmux_setup.bindControlKeys: refreshes stale list binding in existing sessi
     try std.testing.expect(std.mem.indexOf(u8, binding.stdout, "#{client_height}") != null);
 }
 
+test "cli.start: window not ready exits cleanly after diagnostics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-window-not-ready", .{std.c.getpid()});
+    const client = tmuxClient(gpa, io, session);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const config_json = try std.fmt.allocPrint(gpa,
+        \\{{
+        \\  "project": {{"name":"{s}","root":"."}},
+        \\  "groups": [{{"name":"backend","services":[
+        \\    {{"name":"api","dir":".","command":"serve"}}
+        \\  ]}}]
+        \\}}
+    , .{session});
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "zask.json",
+        .data = config_json,
+    });
+    const project_root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    var env_map = std.process.Environ.Map.init(gpa);
+    defer env_map.deinit();
+    try env_map.put("HOME", project_root);
+    try env_map.put("XDG_CONFIG_HOME", project_root);
+    if (std.fs.path.dirname(build_options.tmux_path)) |tmux_dir| {
+        try env_map.put("PATH", tmux_dir);
+    } else {
+        const parent_path = if (std.c.getenv("PATH")) |path| std.mem.span(path) else "";
+        try env_map.put("PATH", parent_path);
+    }
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", project_root, "sleep 60");
+    try zask.tmux_setup.applySessionOptions(gpa, client, .{
+        .project = session,
+        .zask_path = build_options.zask_path,
+        .config_path = try std.fs.path.join(gpa, &.{ project_root, "zask.json" }),
+    });
+    defer client.killSession() catch {};
+
+    const result = try std.process.run(std.testing.allocator, io, .{
+        .argv = &.{ build_options.zask_path, "start", "api" },
+        .cwd = .{ .path = project_root },
+        .environ_map = &env_map,
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
+    });
+    defer std.testing.allocator.free(result.stdout);
+    defer std.testing.allocator.free(result.stderr);
+
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Error: api window is not ready") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "zask close") != null);
+    try std.testing.expectEqual(@as(usize, 0), result.stderr.len);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "WindowNotReady") == null);
+}
+
 test "tmux_setup.applySessionOptions: keeps global attach hook while refreshing size hook" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
