@@ -316,11 +316,11 @@ fn visibleWidth(text: []const u8) usize {
     var index: usize = 0;
     while (index < text.len) {
         const byte = text[index];
-        if (byte == 0x1b) { // ansi_escape
-            index = skipAnsiEscape(text, index);
+        if (byte == 0x1b) { // ESC
+            index = skipAnsiCsiEscape(text, index);
             continue;
         }
-        if (byte < 0x80) { // ascii
+        if (byte < 0x80) { // ASCII
             if (byte < 0x20 or byte == 0x7f) { // control or delete
                 index += 1;
                 continue;
@@ -345,14 +345,14 @@ fn visibleWidth(text: []const u8) usize {
     return width;
 }
 
-fn skipAnsiEscape(text: []const u8, start: usize) usize {
+fn skipAnsiCsiEscape(text: []const u8, start: usize) usize {
     var index = start + 1;
     if (index >= text.len) return index;
     if (text[index] != '[') return index;
     index += 1;
     while (index < text.len) : (index += 1) {
         const byte = text[index];
-        if (byte >= 0x40 and byte <= 0x7e) return index + 1; // ansi_csi_final_byte
+        if (byte >= 0x40 and byte <= 0x7e) return index + 1; // CSI final byte
     }
     return index;
 }

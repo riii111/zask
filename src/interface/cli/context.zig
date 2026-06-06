@@ -316,6 +316,11 @@ test "cli.context.commandHint: maps config sources to command forms" {
     const cfg = try config.Config.parse(gpa, json, "/home/me");
 
     try std.testing.expectEqual(zask_command.InvocationHint.local, try commandHint(gpa, io, .{ .path = "zask.json", .source = .discovered }, cfg));
+    try tmp.dir.createDirPath(io, "nested");
+    const nested = try std.fs.path.join(gpa, &.{ root, "nested" });
+    _ = try testWithCwd(gpa, io, nested);
+    try std.testing.expectEqualDeep(zask_command.InvocationHint{ .config = "zask.json" }, try commandHint(gpa, io, .{ .path = "zask.json", .source = .discovered }, cfg));
+    _ = try testWithCwd(gpa, io, root);
     try std.testing.expectEqualDeep(zask_command.InvocationHint{ .named = "demo" }, try commandHint(gpa, io, .{ .path = "config.json", .source = .named, .project = "demo" }, cfg));
     try std.testing.expectEqualDeep(zask_command.InvocationHint{ .config = "config.json" }, try commandHint(gpa, io, .{ .path = "config.json", .source = .explicit }, cfg));
 }

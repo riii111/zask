@@ -1234,7 +1234,7 @@ test "lifecycle.startTarget: surfaces diagnostic when pane observation becomes u
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: tmux unavailable for api") != null);
 }
 
-test "lifecycle.startTarget: port warnings cover selected service targets" {
+test "lifecycle.warnServiceWithoutPort: skips services with readiness ports" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo"},

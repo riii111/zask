@@ -101,6 +101,7 @@ pub fn runServicePhase(ctx: anytype, phase: std.json.Value, profile: []const u8,
     try runServicePhaseWithProgress(ctx, phase, profile, &progress, mode);
 }
 
+/// Caller owns the returned slice and must free it with the same allocator.
 pub fn resolvedServicePhaseServices(gpa: std.mem.Allocator, cfg: config.Config, profile: []const u8) ![][]const u8 {
     var names: std.ArrayList([]const u8) = .empty;
     errdefer names.deinit(gpa);
@@ -524,6 +525,72 @@ test "phases.phaseKind: classifies lifecycle phase kinds" {
     for (cases) |case| {
         const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), case.json, .{});
         try std.testing.expectEqual(case.expected, phaseKind(parsed));
+    }
+}
+
+test "phases.resolvedServicePhaseServices: resolves service phase targets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const cases = [_]struct {
+        name: []const u8,
+        json: []const u8,
+        profile: []const u8,
+        expected: []const []const u8,
+    }{
+        .{
+            .name = "no phases",
+            .json =
+            \\{
+            \\  "project": {"name":"demo","root":"/tmp/demo"},
+            \\  "groups": [{"name":"all","services":[
+            \\    {"name":"api","dir":"api","command":"serve"},
+            \\    {"name":"web","dir":"web","command":"dev"}
+            \\  ]}]
+            \\}
+            ,
+            .profile = "all",
+            .expected = &.{ "api", "web" },
+        },
+        .{
+            .name = "profile override",
+            .json =
+            \\{
+            \\  "project": {"name":"demo","root":"/tmp/demo"},
+            \\  "groups": [
+            \\    {"name":"backend","services":[{"name":"api","dir":"api","command":"serve"}]},
+            \\    {"name":"worker","services":[{"name":"job","dir":"job","command":"run"}]}
+            \\  ],
+            \\  "startup_order": [{"group":"backend"}],
+            \\  "start_profiles": {
+            \\    "jobs": {"profile":"jobs","group_overrides":{"backend":"worker"}}
+            \\  }
+            \\}
+            ,
+            .profile = "jobs",
+            .expected = &.{"job"},
+        },
+        .{
+            .name = "dedupe",
+            .json =
+            \\{
+            \\  "project": {"name":"demo","root":"/tmp/demo"},
+            \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve"}]}],
+            \\  "startup_order": [{"group":"backend"}, {"group":"backend"}]
+            \\}
+            ,
+            .profile = "all",
+            .expected = &.{"api"},
+        },
+    };
+
+    for (cases) |case| {
+        const cfg = try parseTestConfig(gpa, case.json);
+        const services = try resolvedServicePhaseServices(gpa, cfg, case.profile);
+        try std.testing.expectEqual(case.expected.len, services.len);
+        for (case.expected, services) |expected, actual| {
+            try std.testing.expectEqualStrings(expected, actual);
+        }
     }
 }
 
