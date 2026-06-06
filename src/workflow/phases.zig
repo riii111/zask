@@ -7,9 +7,9 @@ const lifecycle_mod = @import("lifecycle.zig");
 const pathing = @import("pathing.zig");
 const proc_runner = @import("../platform/runner.zig");
 const progress_mod = @import("progress.zig");
-const shell = @import("../platform/shell.zig");
 const validate = @import("../model/validate.zig");
 const waits = @import("waits.zig");
+const zask_command = @import("zask_command.zig");
 
 const default_port_wait_timeout_seconds = 180;
 const diagnostic_tail_lines = 6;
@@ -99,6 +99,30 @@ pub fn runCommandPhaseWithProgress(ctx: anytype, phase: std.json.Value, profile:
 pub fn runServicePhase(ctx: anytype, phase: std.json.Value, profile: []const u8, writer: *std.Io.Writer, mode: lifecycle_mod.StartMode) !void {
     var progress = progress_mod.Line.init(writer);
     try runServicePhaseWithProgress(ctx, phase, profile, &progress, mode);
+}
+
+/// Caller owns the returned slice and must free it with the same allocator.
+pub fn resolvedServicePhaseServices(gpa: std.mem.Allocator, cfg: config.Config, profile: []const u8) ![][]const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    errdefer names.deinit(gpa);
+    const phase_list = cfg.phases();
+    if (phase_list.len == 0) {
+        for (try cfg.services()) |service| try appendUniqueService(gpa, &names, try config.Config.serviceName(service));
+        return names.toOwnedSlice(gpa);
+    }
+    for (phase_list) |phase| {
+        if (phase != .object or phaseKind(phase) != .services) continue;
+        if (phase.object.get("groups")) |groups| if (groups == .array) {
+            for (groups.array.items) |group_value| {
+                if (group_value != .string) continue;
+                const group = cfg.resolvePhaseGroup(profile, group_value.string);
+                const services = try cfg.resolveGroup(gpa, group);
+                defer gpa.free(services);
+                for (services) |service| try appendUniqueService(gpa, &names, service);
+            }
+        };
+    }
+    return names.toOwnedSlice(gpa);
 }
 
 pub fn runServicePhaseWithProgress(ctx: anytype, phase: std.json.Value, profile: []const u8, progress: anytype, mode: lifecycle_mod.StartMode) !void {
@@ -201,6 +225,13 @@ fn serviceForPort(ctx: anytype, phase: std.json.Value, profile: []const u8, port
         }
     };
     return matched;
+}
+
+fn appendUniqueService(gpa: std.mem.Allocator, names: *std.ArrayList([]const u8), service: []const u8) !void {
+    for (names.items) |existing| {
+        if (std.mem.eql(u8, existing, service)) return;
+    }
+    try names.append(gpa, service);
 }
 
 fn phaseLabel(ctx: anytype, phase: std.json.Value, profile: []const u8) []const u8 {
@@ -386,10 +417,12 @@ fn writeLastLog(ctx: anytype, window: []const u8, writer: *std.Io.Writer) !void 
 }
 
 fn writeNextLogsHint(ctx: anytype, service: []const u8, writer: *std.Io.Writer) !void {
-    const config_path = try shell.quote(ctx.gpa, ctx.config_path);
-    defer ctx.gpa.free(config_path);
+    const command_text = try std.fmt.allocPrint(ctx.gpa, "logs {s}", .{service});
+    defer ctx.gpa.free(command_text);
+    const command = try zask_command.hint(ctx.gpa, ctx.command_hint, command_text);
+    defer ctx.gpa.free(command);
     try writer.writeAll("\nNext:\n");
-    try writer.print("  zask --config {s} logs {s}\n", .{ config_path, service });
+    try writer.print("  {s}\n", .{command});
 }
 
 // -----------------------------------------------------------------------------
@@ -404,11 +437,11 @@ fn testLifecycle(gpa: std.mem.Allocator, run: proc_runner.Runner, cfg: config.Co
     return .{
         .gpa = gpa,
         .cfg = cfg,
-        .config_path = "config.json",
         .runner = run,
         .tmux = .{ .gpa = gpa, .runner = run, .session = "demo" },
         .docker = .{ .gpa = gpa, .runner = run, .dir = "/tmp/demo", .file = "compose.yaml" },
         .validate_configured_dirs = false,
+        .command_hint = .{ .config = "config.json" },
     };
 }
 
@@ -492,6 +525,72 @@ test "phases.phaseKind: classifies lifecycle phase kinds" {
     for (cases) |case| {
         const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), case.json, .{});
         try std.testing.expectEqual(case.expected, phaseKind(parsed));
+    }
+}
+
+test "phases.resolvedServicePhaseServices: resolves service phase targets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const cases = [_]struct {
+        name: []const u8,
+        json: []const u8,
+        profile: []const u8,
+        expected: []const []const u8,
+    }{
+        .{
+            .name = "no phases",
+            .json =
+            \\{
+            \\  "project": {"name":"demo","root":"/tmp/demo"},
+            \\  "groups": [{"name":"all","services":[
+            \\    {"name":"api","dir":"api","command":"serve"},
+            \\    {"name":"web","dir":"web","command":"dev"}
+            \\  ]}]
+            \\}
+            ,
+            .profile = "all",
+            .expected = &.{ "api", "web" },
+        },
+        .{
+            .name = "profile override",
+            .json =
+            \\{
+            \\  "project": {"name":"demo","root":"/tmp/demo"},
+            \\  "groups": [
+            \\    {"name":"backend","services":[{"name":"api","dir":"api","command":"serve"}]},
+            \\    {"name":"worker","services":[{"name":"job","dir":"job","command":"run"}]}
+            \\  ],
+            \\  "startup_order": [{"group":"backend"}],
+            \\  "start_profiles": {
+            \\    "jobs": {"profile":"jobs","group_overrides":{"backend":"worker"}}
+            \\  }
+            \\}
+            ,
+            .profile = "jobs",
+            .expected = &.{"job"},
+        },
+        .{
+            .name = "dedupe",
+            .json =
+            \\{
+            \\  "project": {"name":"demo","root":"/tmp/demo"},
+            \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve"}]}],
+            \\  "startup_order": [{"group":"backend"}, {"group":"backend"}]
+            \\}
+            ,
+            .profile = "all",
+            .expected = &.{"api"},
+        },
+    };
+
+    for (cases) |case| {
+        const cfg = try parseTestConfig(gpa, case.json);
+        const services = try resolvedServicePhaseServices(gpa, cfg, case.profile);
+        try std.testing.expectEqual(case.expected.len, services.len);
+        for (case.expected, services) |expected, actual| {
+            try std.testing.expectEqualStrings(expected, actual);
+        }
     }
 }
 
@@ -872,11 +971,14 @@ test "phases.runServicePhase: propagates window-not-ready as startup failure" {
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
-    var buffer: [128]u8 = undefined;
+    var buffer: [512]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
     try std.testing.expectError(error.WindowNotReady, runServicePhase(lifecycle, cfg.phases()[0], "all", &writer, .observe));
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "window for api not ready") != null);
+    const out = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "Error: api window is not ready") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "window: api") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "zask --config 'config.json' open") != null);
 }
 
 test "phases.runServicePhase: honors wait_ports as a declared dependency" {

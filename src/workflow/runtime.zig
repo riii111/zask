@@ -8,6 +8,7 @@ const lock = @import("../platform/lock.zig");
 const observations = @import("../model/observations.zig");
 const paths = @import("../platform/paths.zig");
 const pathing = @import("pathing.zig");
+const phases = @import("phases.zig");
 const proc_runner = @import("../platform/runner.zig");
 const progress_mod = @import("progress.zig");
 const session_layout = @import("session_layout.zig");
@@ -26,6 +27,7 @@ pub const Runtime = struct {
     cfg: config.Config,
     config_path: []const u8,
     zask_path: []const u8,
+    command_hint: zask_command.InvocationHint,
     runner_impl: proc_runner.Runner,
     tmux_impl: tmux_client.Client,
     docker_impl: docker_client.Compose,
@@ -152,6 +154,7 @@ pub const Runtime = struct {
                 try progress.info("Workspace already open. Starting resources...\n", .{});
                 try self.installSessionOptions(scratch);
                 try tmux_setup.bindControlKeys(scratch, self.tmux());
+                try self.warnServicesWithoutPort(profile, progress);
                 try self.lifecycle().startAllWithProgress(profile, progress, .observe);
                 try progress.step("Attaching to workspace...\n", .{});
                 try progress.beforeInteractive();
@@ -171,6 +174,7 @@ pub const Runtime = struct {
         try self.appendServiceAndDockerWindows(scratch);
         try self.focusDashboard();
         try tmux_setup.bindControlKeys(scratch, tx);
+        try self.warnServicesWithoutPort(profile, progress);
         try self.lifecycle().startAllWithProgress(profile, progress, .prime);
         try progress.step("Attaching to workspace...\n", .{});
         try progress.beforeInteractive();
@@ -273,11 +277,11 @@ pub const Runtime = struct {
         return .{
             .gpa = self.gpa,
             .cfg = self.cfg,
-            .config_path = self.config_path,
             .runner = self.runner(),
             .tmux = self.tmux(),
             .docker = self.docker(),
             .validate_configured_dirs = self.validate_configured_dirs,
+            .command_hint = self.command_hint,
         };
     }
 
@@ -317,6 +321,19 @@ pub const Runtime = struct {
         }
         if (self.cfg.dockerEnabled()) {
             try tx.newWindowAfter(previous_window, session_layout.docker_window, try pathing.absolute(scratch, self.io, try self.cfg.dockerDir(scratch)), try zask_command.waitingPlaceholder(scratch, session_layout.docker_placeholder_title));
+        }
+    }
+
+    fn warnServicesWithoutPort(self: Runtime, profile: []const u8, progress: anytype) !void {
+        if (std.mem.eql(u8, profile, "docker")) return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        const services = try phases.resolvedServicePhaseServices(scratch, self.cfg, profile);
+        for (services) |name| {
+            const service = try self.cfg.findService(name);
+            if (config.Config.servicePort(service) != null) continue;
+            try progress.warn("Warning: {s} has no port; zask cannot check readiness for this service\n", .{name});
         }
     }
 
@@ -1061,6 +1078,71 @@ test "runtime.open: clears progress before attaching" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
+test "runtime.open: warns when service has no readiness port" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[
+        \\    {"name":"api","dir":"backend","command":"serve"},
+        \\    {"name":"web","dir":"frontend","command":"dev","port":3000}
+        \\  ]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var progress = progress_mod.Line.init(&writer);
+
+    try runtime.warnServicesWithoutPort("all", &progress);
+
+    const out = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "Warning: api has no port; zask cannot check readiness for this service") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "web has no port") == null);
+}
+
+test "runtime.open: warns only for services in selected profile" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [
+        \\    {"name":"backend","services":[
+        \\      {"name":"api","dir":"backend","command":"serve","port":3000}
+        \\    ]},
+        \\    {"name":"worker","services":[
+        \\      {"name":"job","dir":"worker","command":"run"}
+        \\    ]}
+        \\  ],
+        \\  "startup_order": [{"group":"backend"}],
+        \\  "start_profiles": {
+        \\    "jobs": {"profile":"jobs","group_overrides":{"backend":"worker"}}
+        \\  }
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var progress = progress_mod.Line.init(&writer);
+
+    try runtime.warnServicesWithoutPort("all", &progress);
+    try runtime.warnServicesWithoutPort("jobs", &progress);
+
+    const out = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "api has no port") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Warning: job has no port; zask cannot check readiness for this service") != null);
+}
+
 test "runtime.open: refreshes bindings for existing session" {
     const json =
         \\{
@@ -1487,6 +1569,7 @@ fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.C
         .cfg = cfg,
         .config_path = "/tmp/demo/config.json",
         .zask_path = "zask",
+        .command_hint = .{ .config = "/tmp/demo/config.json" },
         .runner_impl = runner,
         .tmux_impl = .{ .gpa = gpa, .runner = runner, .session = "demo" },
         .docker_impl = .{ .gpa = gpa, .runner = runner, .dir = "/tmp/demo", .file = "compose.yaml" },

@@ -8,7 +8,7 @@ const tmux_options = @import("../../model/tmux_options.zig");
 const RenderContext = @import("context.zig").RenderContext;
 
 const monitor_name_width = 12;
-const monitor_port_width = 6;
+const monitor_port_width = 8;
 const monitor_status_width = 8;
 const monitor_log_width = 35;
 
@@ -37,7 +37,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.
 
 const MonitorStatus = enum {
     live,
-    ready,
+    waiting,
     degraded,
     stop,
     dead,
@@ -46,7 +46,7 @@ const MonitorStatus = enum {
     fn icon(self: MonitorStatus) []const u8 {
         return switch (self) {
             .live => "●",
-            .ready => "◐",
+            .waiting => "◐",
             .degraded => "▲",
             .stop => "○",
             .dead => "✗",
@@ -57,7 +57,7 @@ const MonitorStatus = enum {
     fn color(self: MonitorStatus) []const u8 {
         return switch (self) {
             .live => ansi.green,
-            .ready => ansi.cyan,
+            .waiting => ansi.cyan,
             .degraded => ansi.yellow,
             .stop => ansi.dim,
             .dead => ansi.red,
@@ -68,7 +68,7 @@ const MonitorStatus = enum {
     fn summary(self: MonitorStatus, exit_code: []const u8) []const u8 {
         return switch (self) {
             .live => "live",
-            .ready => "ready",
+            .waiting => "waiting",
             .degraded => "degraded",
             .stop => "stop",
             .dead => exit_code,
@@ -128,7 +128,7 @@ fn serviceMonitorRow(ctx: RenderContext, service: std.json.Value) !MonitorRow {
         .status = state,
         .exit_code = observation.pane.exit_code,
         .command = observation.pane.command,
-        .port = if (config.Config.servicePort(service)) |p| try std.fmt.allocPrint(ctx.gpa, ":{d}", .{p}) else "  -",
+        .port = if (config.Config.servicePort(service)) |p| try std.fmt.allocPrint(ctx.gpa, ":{d}", .{p}) else "no check",
     };
 }
 
@@ -197,7 +197,7 @@ fn dockerMonitorStatus(pane: observations.PaneObservation, compose: observations
         .tmux_unavailable => .unknown,
         .busy => switch (compose.state) {
             .running => .live,
-            .empty => .ready,
+            .empty => .waiting,
             .unavailable => .unknown,
         },
     };
@@ -206,7 +206,7 @@ fn dockerMonitorStatus(pane: observations.PaneObservation, compose: observations
 fn healthMonitorStatus(health: observations.HealthObservation) MonitorStatus {
     return switch (health) {
         .no_check, .ready => .live,
-        .waiting => .ready,
+        .waiting => .waiting,
         .degraded => .degraded,
     };
 }
@@ -308,6 +308,31 @@ test "monitor.service: skips health checks unless pane is busy" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
+test "monitor.service: shows no check for services without port" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
+    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+
+    const row = try serviceMonitorRow(ctx, (try cfg.services())[0]);
+
+    try std.testing.expectEqual(MonitorStatus.live, row.status);
+    try std.testing.expectEqualStrings("no check", row.port);
+    try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "nc"));
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
 test "monitor.service: checks health for busy shell panes" {
     const json =
         \\{
@@ -331,6 +356,33 @@ test "monitor.service: checks health for busy shell panes" {
     try std.testing.expectEqual(MonitorStatus.live, row.status);
     try std.testing.expectEqual(@as(usize, 1), recordedCommandCount(&recorder, "nc"));
     try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "curl"));
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "monitor.service: shows waiting while port is not ready" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve","port":3000}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+
+    const row = try serviceMonitorRow(ctx, (try cfg.services())[0]);
+
+    try std.testing.expectEqual(MonitorStatus.waiting, row.status);
+    try std.testing.expectEqualStrings(":3000", row.port);
+    try std.testing.expectEqualStrings("waiting", row.status.summary(row.exit_code));
+    try std.testing.expectEqual(@as(usize, 1), recordedCommandCount(&recorder, "nc"));
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 

@@ -9,6 +9,7 @@ const proc_runner = @import("../../platform/runner.zig");
 const tmux_client = @import("../../platform/tmux.zig");
 const validate = @import("../../model/validate.zig");
 const Runtime = @import("../../workflow/runtime.zig").Runtime;
+const zask_command = @import("../../workflow/zask_command.zig");
 
 pub const ConfigSource = enum {
     explicit,
@@ -90,10 +91,32 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
         .cfg = cfg,
         .config_path = resolved.path,
         .zask_path = try zaskExecutablePath(context.gpa, io, context.argv0),
+        .command_hint = try commandHint(context.gpa, io, resolved, cfg),
         .runner_impl = runner,
         .tmux_impl = tmux_client.Client{ .gpa = context.gpa, .runner = runner, .session = try cfg.projectName() },
         .docker_impl = docker_client.Compose{ .gpa = context.gpa, .runner = runner, .dir = try cfg.dockerDir(context.gpa), .file = cfg.dockerComposeFile() },
     };
+}
+
+fn commandHint(gpa: std.mem.Allocator, io: std.Io, resolved: ResolvedConfigPath, cfg: config.Config) !zask_command.InvocationHint {
+    return switch (resolved.source) {
+        .discovered => if (try cwdIsProjectRoot(gpa, io, cfg)) .local else .{ .config = resolved.path },
+        .named => .{ .named = resolved.project orelse try cfg.projectName() },
+        .inferred_named => .{ .named = resolved.project orelse try cfg.projectName() },
+        .explicit => .{ .config = resolved.path },
+    };
+}
+
+fn cwdIsProjectRoot(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config) !bool {
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(cwd);
+    const root = try cfg.projectRoot(gpa);
+    const absolute_root = std.Io.Dir.cwd().realPathFileAlloc(io, root, gpa) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer gpa.free(absolute_root);
+    return std.mem.eql(u8, cwd, absolute_root);
 }
 
 const ResolvedConfigPath = struct {
@@ -268,6 +291,38 @@ test "cli.context.discoverConfigPath: rejects missing local config" {
     }
 
     try std.testing.expectError(error.ConfigNotFound, discoverConfigPath(gpa, io));
+}
+
+test "cli.context.commandHint: maps config sources to command forms" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    const previous = try testWithCwd(gpa, io, root);
+    defer {
+        std.process.setCurrentPath(io, previous) catch unreachable;
+        gpa.free(previous);
+    }
+    const json = try std.fmt.allocPrint(gpa,
+        \\{{
+        \\  "project": {{"name":"demo","root":"{s}"}},
+        \\  "groups": []
+        \\}}
+    , .{root});
+    const cfg = try config.Config.parse(gpa, json, "/home/me");
+
+    try std.testing.expectEqual(zask_command.InvocationHint.local, try commandHint(gpa, io, .{ .path = "zask.json", .source = .discovered }, cfg));
+    try tmp.dir.createDirPath(io, "nested");
+    const nested = try std.fs.path.join(gpa, &.{ root, "nested" });
+    _ = try testWithCwd(gpa, io, nested);
+    try std.testing.expectEqualDeep(zask_command.InvocationHint{ .config = "zask.json" }, try commandHint(gpa, io, .{ .path = "zask.json", .source = .discovered }, cfg));
+    _ = try testWithCwd(gpa, io, root);
+    try std.testing.expectEqualDeep(zask_command.InvocationHint{ .named = "demo" }, try commandHint(gpa, io, .{ .path = "config.json", .source = .named, .project = "demo" }, cfg));
+    try std.testing.expectEqualDeep(zask_command.InvocationHint{ .config = "config.json" }, try commandHint(gpa, io, .{ .path = "config.json", .source = .explicit }, cfg));
 }
 
 test "cli.context.loadRuntime: rejects named config with mismatched project name" {

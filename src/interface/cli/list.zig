@@ -84,6 +84,7 @@ test "list.run: prints services and docker section" {
             .cfg = cfg,
             .config_path = "/tmp/config.json",
             .zask_path = "zask",
+            .command_hint = .{ .config = "/tmp/config.json" },
             .runner_impl = run_impl,
             .tmux_impl = tmux_client.Client{ .gpa = gpa, .runner = run_impl, .session = "demo" },
             .docker_impl = docker_client.Compose{ .gpa = gpa, .runner = run_impl, .dir = "/tmp/demo/infra", .file = "compose.yaml" },

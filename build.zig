@@ -63,6 +63,7 @@ pub fn build(b: *std.Build) void {
 
     const tmux_integration_options = b.addOptions();
     tmux_integration_options.addOption([]const u8, "tmux_path", b.findProgram(&.{"tmux"}, &.{}) catch "tmux");
+    tmux_integration_options.addOption([]const u8, "zask_path", b.getInstallPath(.bin, "zask"));
     const tmux_integration_mod = b.createModule(.{
         .root_source_file = b.path("tests/integration/tmux_session.zig"),
         .target = target,
@@ -77,7 +78,9 @@ pub fn build(b: *std.Build) void {
         .root_module = tmux_integration_mod,
         .filters = test_filters,
     });
-    tmux_integration_step.dependOn(&b.addRunArtifact(tmux_integration_tests).step);
+    const run_tmux_integration_tests = b.addRunArtifact(tmux_integration_tests);
+    run_tmux_integration_tests.step.dependOn(b.getInstallStep());
+    tmux_integration_step.dependOn(&run_tmux_integration_tests.step);
 
     const e2e_options = b.addOptions();
     e2e_options.addOption([]const u8, "zask_path", b.getInstallPath(.bin, "zask"));

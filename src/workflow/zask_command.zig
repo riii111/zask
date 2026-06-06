@@ -4,6 +4,12 @@ const shell = @import("../platform/shell.zig");
 const dashboard_command = "dashboard";
 const monitor_command = "monitor";
 
+pub const InvocationHint = union(enum) {
+    local,
+    named: []const u8,
+    config: []const u8,
+};
+
 /// Returns a shell command string owned by the caller.
 pub fn invoke(gpa: std.mem.Allocator, zask_path: []const u8, config_path: []const u8, command: []const u8) ![]const u8 {
     const quoted_zask_path = try shell.quote(gpa, zask_path);
@@ -23,6 +29,19 @@ pub fn invokeMonitor(gpa: std.mem.Allocator, zask_path: []const u8, config_path:
     return invoke(gpa, zask_path, config_path, monitor_command);
 }
 
+/// Returns a user-facing command hint owned by the caller.
+pub fn hint(gpa: std.mem.Allocator, ctx: InvocationHint, command: []const u8) ![]const u8 {
+    return switch (ctx) {
+        .local => std.fmt.allocPrint(gpa, "zask {s}", .{command}),
+        .named => |project| std.fmt.allocPrint(gpa, "zask {s} {s}", .{ project, command }),
+        .config => |path| {
+            const quoted_config_path = try shell.quote(gpa, path);
+            defer gpa.free(quoted_config_path);
+            return std.fmt.allocPrint(gpa, "zask --config {s} {s}", .{ quoted_config_path, command });
+        },
+    };
+}
+
 /// Returns a shell command string owned by the caller.
 pub fn waitingPlaceholder(gpa: std.mem.Allocator, label: []const u8) ![]const u8 {
     const quoted_label = try shell.quote(gpa, label);
@@ -39,6 +58,19 @@ test "zask_command.invoke: quotes zask and config paths" {
     defer std.testing.allocator.free(command);
 
     try std.testing.expectEqualStrings("'/tmp/zask path' --config '/tmp/demo config.json' dashboard", command);
+}
+
+test "zask_command.hint: formats local named and explicit forms" {
+    const local = try hint(std.testing.allocator, .local, "logs api");
+    defer std.testing.allocator.free(local);
+    const named = try hint(std.testing.allocator, .{ .named = "demo" }, "logs api");
+    defer std.testing.allocator.free(named);
+    const explicit = try hint(std.testing.allocator, .{ .config = "/tmp/demo config.json" }, "logs api");
+    defer std.testing.allocator.free(explicit);
+
+    try std.testing.expectEqualStrings("zask logs api", local);
+    try std.testing.expectEqualStrings("zask demo logs api", named);
+    try std.testing.expectEqualStrings("zask --config '/tmp/demo config.json' logs api", explicit);
 }
 
 test "zask_command.waitingPlaceholder: formats and quotes display label" {
