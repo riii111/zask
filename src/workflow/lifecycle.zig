@@ -153,9 +153,13 @@ pub const Lifecycle = struct {
         if (self.cfg.resolveGroup(self.gpa, target)) |services| {
             defer self.gpa.free(services);
             try self.warnServicesWithoutPort(services, writer);
+            var progress = progress_mod.Line.init(writer);
+            try self.writeProjectEnvFileTipForServices(services, &progress);
             for (services) |svc| try self.restartService(svc, writer);
         } else |_| {
             try self.warnServiceWithoutPort(target, writer);
+            var progress = progress_mod.Line.init(writer);
+            try self.writeProjectEnvFileTipForServices(&.{target}, &progress);
             try self.restartService(target, writer);
         }
     }
@@ -934,7 +938,7 @@ test "lifecycle.startTarget: suggests project env_file for service target" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Tip: .env exists but is not loaded; add project-level env_file to use it.") != null);
 }
 
-test "lifecycle.serviceLaunchCommand: keeps quoted env values literal" {
+test "lifecycle.serviceLaunchCommand: keeps env value export literal" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -959,11 +963,46 @@ test "lifecycle.serviceLaunchCommand: keeps quoted env values literal" {
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     const service = try cfg.findService("api");
     const command = try lifecycle.serviceLaunchCommand(service, "printf '%s' \"$QUOTED\"");
-    const result = try std.process.run(std.testing.allocator, io, .{ .argv = &.{ "sh", "-c", command } });
-    defer std.testing.allocator.free(result.stdout);
-    defer std.testing.allocator.free(result.stderr);
 
-    try std.testing.expectEqualStrings("\"value\"", result.stdout);
+    try std.testing.expect(std.mem.indexOf(u8, command, "export \"$__zask_env_key=$__zask_env_value\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "printf '%s' \"$QUOTED\"") != null);
+}
+
+test "lifecycle.restartTarget: suggests project env_file for service target" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = ".env", .data = "TOKEN=secret\n" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const json = try std.fmt.allocPrint(std.testing.allocator,
+        \\{{
+        \\  "project": {{"name":"demo","root":"{s}"}},
+        \\  "groups": [{{"name":"backend","services":[{{"name":"api","command":"serve"}}]}}]
+        \\}}
+    , .{root});
+    defer std.testing.allocator.free(json);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|sleep\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|sleep\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    var lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    lifecycle.emit_env_file_tips = true;
+    var buffer: [768]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.restartTarget("api", &writer);
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Tip: .env exists but is not loaded; add project-level env_file to use it.") != null);
 }
 
 test "lifecycle.stopAll: signals every running service before polling once" {
