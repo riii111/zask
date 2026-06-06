@@ -436,6 +436,11 @@ fn composeStatusText(state: observations.ComposeState) []const u8 {
 // Tests
 // -----------------------------------------------------------------------------
 
+fn testCloseUnlocked(runtime: Runtime, writer: *std.Io.Writer) !void {
+    var progress = progress_mod.Line.init(writer);
+    try runtime.closeUnlockedWithProgress(&progress);
+}
+
 test "runtime.status: maps observations to text" {
     try std.testing.expectEqualStrings("running", paneStatusText(.busy));
     try std.testing.expectEqualStrings("stopped", paneStatusText(.idle));
@@ -1626,9 +1631,4 @@ fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.C
         .validate_configured_dirs = false,
         .emit_env_file_tips = false,
     };
-}
-
-fn testCloseUnlocked(runtime: Runtime, writer: *std.Io.Writer) !void {
-    var progress = progress_mod.Line.init(writer);
-    try runtime.closeUnlockedWithProgress(&progress);
 }
