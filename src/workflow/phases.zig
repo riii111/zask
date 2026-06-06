@@ -479,13 +479,19 @@ fn startupFailureHint(last_log: []const u8) ?[]const u8 {
 
 fn containsRequiredConfigToken(haystack: []const u8) bool {
     const marker = " is required";
-    const marker_index = std.ascii.indexOfIgnoreCase(haystack, marker) orelse return false;
-    if (marker_index == 0) return false;
-    var start = marker_index;
-    while (start > 0 and !std.ascii.isWhitespace(haystack[start - 1])) : (start -= 1) {}
-    const token = std.mem.trim(u8, haystack[start..marker_index], " \t\r\n`'\".:,;()[]{}");
-    if (token.len == 0) return false;
-    return std.mem.indexOfScalar(u8, token, '_') != null or containsAsciiUpper(token);
+    var offset: usize = 0;
+    while (offset < haystack.len) {
+        const relative = std.ascii.indexOfIgnoreCase(haystack[offset..], marker) orelse return false;
+        const marker_index = offset + relative;
+        offset = marker_index + marker.len;
+        if (marker_index == 0) continue;
+        var start = marker_index;
+        while (start > 0 and !std.ascii.isWhitespace(haystack[start - 1])) : (start -= 1) {}
+        const token = std.mem.trim(u8, haystack[start..marker_index], " \t\r\n`'\".:,;()[]{}");
+        if (token.len == 0) continue;
+        if (std.mem.indexOfScalar(u8, token, '_') != null or containsAsciiUpper(token)) return true;
+    }
+    return false;
 }
 
 fn containsAsciiUpper(value: []const u8) bool {
@@ -1277,6 +1283,10 @@ test "phases.startupFailureHint: maps common startup failures" {
     try std.testing.expectEqualStrings(
         "required environment may be missing; check env_file or the service command environment.",
         startupFailureHint("TypeError: client_id is required").?,
+    );
+    try std.testing.expectEqualStrings(
+        "required environment may be missing; check env_file or the service command environment.",
+        startupFailureHint("name is required\nTypeError: client_id is required").?,
     );
     try std.testing.expect(startupFailureHint("server exited") == null);
     try std.testing.expect(startupFailureHint("name is required") == null);
