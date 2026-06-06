@@ -4,7 +4,7 @@ const shell = @import("../platform/shell.zig");
 const dashboard_command = "dashboard";
 const monitor_command = "monitor";
 
-pub const Hint = union(enum) {
+pub const InvocationHint = union(enum) {
     local,
     named: []const u8,
     config: []const u8,
@@ -30,7 +30,7 @@ pub fn invokeMonitor(gpa: std.mem.Allocator, zask_path: []const u8, config_path:
 }
 
 /// Returns a user-facing command hint owned by the caller.
-pub fn hint(gpa: std.mem.Allocator, ctx: Hint, command: []const u8) ![]const u8 {
+pub fn hint(gpa: std.mem.Allocator, ctx: InvocationHint, command: []const u8) ![]const u8 {
     return switch (ctx) {
         .local => std.fmt.allocPrint(gpa, "zask {s}", .{command}),
         .named => |project| std.fmt.allocPrint(gpa, "zask {s} {s}", .{ project, command }),

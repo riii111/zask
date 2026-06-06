@@ -98,7 +98,7 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
     };
 }
 
-fn commandHint(gpa: std.mem.Allocator, io: std.Io, resolved: ResolvedConfigPath, cfg: config.Config) !zask_command.Hint {
+fn commandHint(gpa: std.mem.Allocator, io: std.Io, resolved: ResolvedConfigPath, cfg: config.Config) !zask_command.InvocationHint {
     return switch (resolved.source) {
         .discovered => if (try cwdIsProjectRoot(gpa, io, cfg)) .local else .{ .config = resolved.path },
         .named => .{ .named = resolved.project orelse try cfg.projectName() },
@@ -315,9 +315,9 @@ test "cli.context.commandHint: maps config sources to command forms" {
     , .{root});
     const cfg = try config.Config.parse(gpa, json, "/home/me");
 
-    try std.testing.expectEqual(zask_command.Hint.local, try commandHint(gpa, io, .{ .path = "zask.json", .source = .discovered }, cfg));
-    try std.testing.expectEqualDeep(zask_command.Hint{ .named = "demo" }, try commandHint(gpa, io, .{ .path = "config.json", .source = .named, .project = "demo" }, cfg));
-    try std.testing.expectEqualDeep(zask_command.Hint{ .config = "config.json" }, try commandHint(gpa, io, .{ .path = "config.json", .source = .explicit }, cfg));
+    try std.testing.expectEqual(zask_command.InvocationHint.local, try commandHint(gpa, io, .{ .path = "zask.json", .source = .discovered }, cfg));
+    try std.testing.expectEqualDeep(zask_command.InvocationHint{ .named = "demo" }, try commandHint(gpa, io, .{ .path = "config.json", .source = .named, .project = "demo" }, cfg));
+    try std.testing.expectEqualDeep(zask_command.InvocationHint{ .config = "config.json" }, try commandHint(gpa, io, .{ .path = "config.json", .source = .explicit }, cfg));
 }
 
 test "cli.context.loadRuntime: rejects named config with mismatched project name" {

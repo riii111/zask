@@ -37,7 +37,7 @@ pub const Lifecycle = struct {
     tmux: tmux_client.Client,
     docker: docker_client.Compose,
     validate_configured_dirs: bool = true,
-    command_hint: zask_command.Hint,
+    command_hint: zask_command.InvocationHint,
 
     pub fn startAll(self: Lifecycle, profile: []const u8, writer: *std.Io.Writer, mode: StartMode) !void {
         var progress = progress_mod.Line.init(writer);

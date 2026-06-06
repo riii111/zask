@@ -8,6 +8,7 @@ const lock = @import("../platform/lock.zig");
 const observations = @import("../model/observations.zig");
 const paths = @import("../platform/paths.zig");
 const pathing = @import("pathing.zig");
+const phases = @import("phases.zig");
 const proc_runner = @import("../platform/runner.zig");
 const progress_mod = @import("progress.zig");
 const session_layout = @import("session_layout.zig");
@@ -26,7 +27,7 @@ pub const Runtime = struct {
     cfg: config.Config,
     config_path: []const u8,
     zask_path: []const u8,
-    command_hint: zask_command.Hint,
+    command_hint: zask_command.InvocationHint,
     runner_impl: proc_runner.Runner,
     tmux_impl: tmux_client.Client,
     docker_impl: docker_client.Compose,
@@ -326,10 +327,44 @@ pub const Runtime = struct {
 
     fn warnServicesWithoutPort(self: Runtime, profile: []const u8, progress: anytype) !void {
         if (std.mem.eql(u8, profile, "docker")) return;
-        for (try self.cfg.services()) |service| {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        const services = try self.servicesStartedByProfile(scratch, profile);
+        for (services) |name| {
+            const service = try self.cfg.findService(name);
             if (config.Config.servicePort(service) != null) continue;
-            try progress.warn("Warning: {s} has no port; zask cannot check readiness for this service\n", .{try config.Config.serviceName(service)});
+            try progress.warn("Warning: {s} has no port; zask cannot check readiness for this service\n", .{name});
         }
+    }
+
+    fn servicesStartedByProfile(self: Runtime, scratch: std.mem.Allocator, profile: []const u8) ![][]const u8 {
+        var names: std.ArrayList([]const u8) = .empty;
+        errdefer names.deinit(scratch);
+        const phase_list = self.cfg.phases();
+        if (phase_list.len == 0) {
+            for (try self.cfg.services()) |service| try appendUniqueService(scratch, &names, try config.Config.serviceName(service));
+            return names.toOwnedSlice(scratch);
+        }
+        for (phase_list) |phase| {
+            if (phase != .object or phases.phaseKind(phase) != .services) continue;
+            if (phase.object.get("groups")) |groups| if (groups == .array) {
+                for (groups.array.items) |group_value| {
+                    if (group_value != .string) continue;
+                    const group = self.cfg.resolvePhaseGroup(profile, group_value.string);
+                    const services = try self.cfg.resolveGroup(scratch, group);
+                    for (services) |service| try appendUniqueService(scratch, &names, service);
+                }
+            };
+        }
+        return names.toOwnedSlice(scratch);
+    }
+
+    fn appendUniqueService(gpa: std.mem.Allocator, names: *std.ArrayList([]const u8), service: []const u8) !void {
+        for (names.items) |existing| {
+            if (std.mem.eql(u8, existing, service)) return;
+        }
+        try names.append(gpa, service);
     }
 
     fn ensureOpenConfiguredDirs(self: Runtime, scratch: std.mem.Allocator, writer: *std.Io.Writer) !void {
@@ -1099,6 +1134,43 @@ test "runtime.open: warns when service has no readiness port" {
     const out = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "Warning: api has no port; zask cannot check readiness for this service") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "web has no port") == null);
+}
+
+test "runtime.open: warns only for services in selected profile" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [
+        \\    {"name":"backend","services":[
+        \\      {"name":"api","dir":"backend","command":"serve","port":3000}
+        \\    ]},
+        \\    {"name":"worker","services":[
+        \\      {"name":"job","dir":"worker","command":"run"}
+        \\    ]}
+        \\  ],
+        \\  "startup_order": [{"group":"backend"}],
+        \\  "start_profiles": {
+        \\    "jobs": {"profile":"jobs","group_overrides":{"backend":"worker"}}
+        \\  }
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var progress = progress_mod.Line.init(&writer);
+
+    try runtime.warnServicesWithoutPort("all", &progress);
+    try runtime.warnServicesWithoutPort("jobs", &progress);
+
+    const out = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "api has no port") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Warning: job has no port; zask cannot check readiness for this service") != null);
 }
 
 test "runtime.open: refreshes bindings for existing session" {

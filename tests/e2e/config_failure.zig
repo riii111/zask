@@ -101,3 +101,63 @@ test "list: config validation prints unresolved reference diagnostics" {
     try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
     try std.testing.expect(std.mem.indexOf(u8, res.stdout, "panic") == null);
 }
+
+test "start: window not ready exits cleanly after diagnostics" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ws = try harness.Workspace.init(gpa, io);
+    defer ws.deinit(gpa);
+    const project = "demo_window_not_ready";
+
+    const config_json = try std.fmt.allocPrint(gpa,
+        \\{{
+        \\  "project": {{"name":"{s}","root":"."}},
+        \\  "groups": [{{"name":"backend","services":[
+        \\    {{"name":"api","dir":".","command":"serve"}}
+        \\  ]}}]
+        \\}}
+    , .{project});
+    defer gpa.free(config_json);
+    try ws.writeProjectFile(io, "zask.json", config_json);
+
+    createTmuxSession(gpa, io, project) catch return error.SkipZigTest;
+    defer killTmuxSession(gpa, io, project) catch {};
+
+    var res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.project,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{ "start", "api" });
+    defer res.deinit(gpa);
+
+    try std.testing.expect(res.exitedWith(1));
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "Error: api window is not ready") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "zask close") != null);
+    try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "WindowNotReady") == null);
+}
+
+fn createTmuxSession(gpa: std.mem.Allocator, io: std.Io, session: []const u8) !void {
+    killTmuxSession(gpa, io, session) catch {};
+    const result = std.process.run(gpa, io, .{
+        .argv = &.{ "tmux", "new-session", "-d", "-s", session, "-n", "dashboard" },
+        .stdout_limit = .limited(1024),
+        .stderr_limit = .limited(1024),
+    }) catch return error.SkipZigTest;
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    if (result.term != .exited or result.term.exited != 0) return error.SkipZigTest;
+}
+
+fn killTmuxSession(gpa: std.mem.Allocator, io: std.Io, session: []const u8) !void {
+    const result = try std.process.run(gpa, io, .{
+        .argv = &.{ "tmux", "kill-session", "-t", session },
+        .stdout_limit = .limited(1024),
+        .stderr_limit = .limited(1024),
+    });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+}
