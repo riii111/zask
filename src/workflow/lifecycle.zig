@@ -113,9 +113,13 @@ pub const Lifecycle = struct {
         if (self.cfg.resolveGroup(self.gpa, target)) |services| {
             defer self.gpa.free(services);
             try self.warnServicesWithoutPort(services, writer);
+            var progress = progress_mod.Line.init(writer);
+            try self.writeProjectEnvFileTipForServices(services, &progress);
             for (services) |svc| try self.startService(svc, writer, .observe);
         } else |_| {
             try self.warnServiceWithoutPort(target, writer);
+            var progress = progress_mod.Line.init(writer);
+            try self.writeProjectEnvFileTipForServices(&.{target}, &progress);
             try self.startService(target, writer, .observe);
         }
     }
@@ -380,11 +384,18 @@ pub const Lifecycle = struct {
 
     fn writeProjectEnvFileTip(self: Lifecycle, profile: []const u8, progress: anytype) !void {
         if (!self.emit_env_file_tips) return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const services = try phases.resolvedServicePhaseServices(arena.allocator(), self.cfg, profile);
+        try self.writeProjectEnvFileTipForServices(services, progress);
+    }
+
+    fn writeProjectEnvFileTipForServices(self: Lifecycle, services: []const []const u8, progress: anytype) !void {
+        if (!self.emit_env_file_tips) return;
         const project_env = try std.fs.path.join(self.gpa, &.{ try self.cfg.projectRoot(self.gpa), ".env" });
         if (!paths.exists(self.runner.io, project_env)) return;
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
-        const services = try phases.resolvedServicePhaseServices(arena.allocator(), self.cfg, profile);
         for (services) |name| {
             const service = try self.cfg.findService(name);
             const env_files = try config.Config.serviceEnvFiles(arena.allocator(), service);
@@ -885,6 +896,40 @@ test "lifecycle.startAll: suggests env_file when project env exists" {
     var writer: std.Io.Writer = .fixed(&buffer);
 
     try lifecycle.startAll("all", &writer, .prime);
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Tip: .env exists but is not loaded; add project-level env_file to use it.") != null);
+}
+
+test "lifecycle.startTarget: suggests project env_file for service target" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = ".env", .data = "TOKEN=secret\n" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const json = try std.fmt.allocPrint(std.testing.allocator,
+        \\{{
+        \\  "project": {{"name":"demo","root":"{s}"}},
+        \\  "groups": [{{"name":"backend","services":[{{"name":"api","command":"serve"}}]}}]
+        \\}}
+    , .{root});
+    defer std.testing.allocator.free(json);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|sleep\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    var lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    lifecycle.emit_env_file_tips = true;
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startTarget("api", &writer);
 
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Tip: .env exists but is not loaded; add project-level env_file to use it.") != null);
 }
