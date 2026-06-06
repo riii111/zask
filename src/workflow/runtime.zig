@@ -167,7 +167,7 @@ pub const Runtime = struct {
         }
         try progress.step("Opening workspace...\n", .{});
         const tx = self.tmux();
-        try self.ensureOpenConfiguredDirs(scratch, progress.raw());
+        try self.ensureOpenConfiguredPaths(scratch, progress.raw());
         try self.openSessionWithDashboardWindow(scratch);
         errdefer tx.killSession() catch {};
         try self.installSessionOptions(scratch);
@@ -334,7 +334,7 @@ pub const Runtime = struct {
         }
     }
 
-    fn ensureOpenConfiguredDirs(self: Runtime, scratch: std.mem.Allocator, writer: *std.Io.Writer) !void {
+    fn ensureOpenConfiguredPaths(self: Runtime, scratch: std.mem.Allocator, writer: *std.Io.Writer) !void {
         if (!self.validate_configured_dirs) return;
         const project_root = try self.cfg.projectRoot(scratch);
         try self.ensureConfiguredDir(scratch, writer, .{
@@ -351,6 +351,16 @@ pub const Runtime = struct {
                 .project_root = project_root,
                 .path = try self.cfg.serviceDir(scratch, service),
             });
+            const env_files = try config.Config.serviceEnvFiles(scratch, service);
+            for (env_files) |env_file| {
+                try self.ensureConfiguredFile(scratch, writer, .{
+                    .field = "env_file",
+                    .service = name,
+                    .configured = env_file.path,
+                    .project_root = project_root,
+                    .path = try self.cfg.serviceEnvFilePath(scratch, service, env_file),
+                });
+            }
         }
         if (self.cfg.dockerEnabled()) {
             try self.ensureConfiguredDir(scratch, writer, .{
@@ -364,6 +374,10 @@ pub const Runtime = struct {
 
     fn ensureConfiguredDir(self: Runtime, scratch: std.mem.Allocator, writer: *std.Io.Writer, problem: configured_path.Problem) !void {
         try configured_path.ensureDir(scratch, self.io, writer, problem);
+    }
+
+    fn ensureConfiguredFile(self: Runtime, scratch: std.mem.Allocator, writer: *std.Io.Writer, problem: configured_path.Problem) !void {
+        try configured_path.ensureFile(scratch, self.io, writer, problem);
     }
 
     fn focusDashboard(self: Runtime) !void {
@@ -919,6 +933,41 @@ test "runtime.open: reports missing service directory before creating session" {
 
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Error: configured directory not found") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "field: service.dir") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "service: api") != null);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "new-session") == null);
+}
+
+test "runtime.open: reports missing env file before creating session" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    const json = try std.fmt.allocPrint(gpa,
+        \\{{
+        \\  "project": {{"name":"demo","root":"{s}"}},
+        \\  "groups": [{{"name":"backend","services":[{{"name":"api","command":"serve","env_file":"missing.env"}}]}}]
+        \\}}
+    , .{root});
+    var recorder = proc_runner.Recorder.init(gpa);
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = gpa, .io = io, .recorder = &recorder };
+    const cfg = try config.Config.parse(gpa, json, "/home/me");
+    var runtime = testRuntime(gpa, run, cfg);
+    runtime.io = io;
+    runtime.validate_configured_dirs = true;
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var progress = progress_mod.Line.init(&writer);
+
+    try std.testing.expectError(error.ConfigPathNotFound, runtime.openUnlockedWithProgress("all", &progress));
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Error: configured file not found") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "field: env_file") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "service: api") != null);
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "new-session") == null);
 }
