@@ -471,9 +471,28 @@ fn startupFailureHint(last_log: []const u8) ?[]const u8 {
     if (containsIgnoreCase(last_log, "connection refused"))
         return "a dependency refused the connection; check whether the upstream service is running.";
     if (containsIgnoreCase(last_log, "environment variable") or
+        containsRequiredConfigToken(last_log) or
         containsIgnoreCase(last_log, "missing required"))
         return "required environment may be missing; check env_file or the service command environment.";
     return null;
+}
+
+fn containsRequiredConfigToken(haystack: []const u8) bool {
+    const marker = " is required";
+    const marker_index = std.ascii.indexOfIgnoreCase(haystack, marker) orelse return false;
+    if (marker_index == 0) return false;
+    var start = marker_index;
+    while (start > 0 and !std.ascii.isWhitespace(haystack[start - 1])) : (start -= 1) {}
+    const token = std.mem.trim(u8, haystack[start..marker_index], " \t\r\n`'\".:,;()[]{}");
+    if (token.len == 0) return false;
+    return std.mem.indexOfScalar(u8, token, '_') != null or containsAsciiUpper(token);
+}
+
+fn containsAsciiUpper(value: []const u8) bool {
+    for (value) |byte| {
+        if (byte >= 'A' and byte <= 'Z') return true;
+    }
+    return false;
 }
 
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
@@ -1255,7 +1274,12 @@ test "phases.startupFailureHint: maps common startup failures" {
         "port is already in use; stop the existing process or change the configured port.",
         startupFailureHint("listen EADDRINUSE 127.0.0.1:3000").?,
     );
+    try std.testing.expectEqualStrings(
+        "required environment may be missing; check env_file or the service command environment.",
+        startupFailureHint("TypeError: client_id is required").?,
+    );
     try std.testing.expect(startupFailureHint("server exited") == null);
+    try std.testing.expect(startupFailureHint("name is required") == null);
 }
 
 test "phases.startupFailureHint: checks previous tail lines" {
