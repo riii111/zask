@@ -869,7 +869,11 @@ fn checkEnvFilePath(value: []const u8, path: []const u8, diags: *diagnostics.Dia
         try diags.add(path, "must not be empty");
         return;
     }
-    if (std.fs.path.isAbsolute(value) or std.mem.startsWith(u8, value, "~")) return;
+    if (std.fs.path.isAbsolute(value) or std.mem.eql(u8, value, "~") or std.mem.startsWith(u8, value, "~/")) return;
+    if (std.mem.startsWith(u8, value, "~")) {
+        try diags.add(path, "must use '~' or '~/' when starting with '~'");
+        return;
+    }
     validate.relativeSubPath(value) catch try diags.add(path, "must stay within its base directory");
 }
 
@@ -1155,6 +1159,11 @@ test "config.parse: rejects malformed env_file values" {
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[{"name":"api","command":"serve","env_file":[42]}]}]
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","command":"serve","env_file":"~other/.env"}]}]
         \\}
         ,
     };
