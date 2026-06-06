@@ -33,7 +33,10 @@ pub const ListenPorts = struct {
 };
 
 pub fn observeDescendantListenPorts(gpa: std.mem.Allocator, runner: runner_mod.Runner, root_pid: []const u8) !ListenPorts {
-    const pids = collectDescendantPids(gpa, runner, root_pid) catch return ListenPorts.empty(.unavailable);
+    const pids = collectDescendantPids(gpa, runner, root_pid) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return ListenPorts.empty(.unavailable),
+    };
     defer {
         for (pids) |pid| gpa.free(pid);
         gpa.free(pids);
@@ -42,7 +45,10 @@ pub fn observeDescendantListenPorts(gpa: std.mem.Allocator, runner: runner_mod.R
 
     const pid_arg = try joinPids(gpa, pids);
     defer gpa.free(pid_arg);
-    const output = runner_mod.captured(runner.run(&.{ "lsof", "-nP", "-a", "-iTCP", "-sTCP:LISTEN", "-p", pid_arg }, .{}) catch return ListenPorts.empty(.unavailable));
+    const output = runner_mod.captured(runner.run(&.{ "lsof", "-nP", "-a", "-iTCP", "-sTCP:LISTEN", "-p", pid_arg }, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return ListenPorts.empty(.unavailable),
+    });
     defer gpa.free(output.stdout);
     defer gpa.free(output.stderr);
 
@@ -73,7 +79,10 @@ fn collectDescendantPids(gpa: std.mem.Allocator, runner: runner_mod.Runner, root
 }
 
 fn appendChildPids(gpa: std.mem.Allocator, runner: runner_mod.Runner, pids: *std.ArrayList([]const u8), parent: []const u8) !void {
-    const output = runner_mod.captured(runner.run(&.{ "pgrep", "-P", parent }, .{}) catch return error.ProcessProbeUnavailable);
+    const output = runner_mod.captured(runner.run(&.{ "pgrep", "-P", parent }, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.ProcessProbeUnavailable,
+    });
     defer gpa.free(output.stdout);
     defer gpa.free(output.stderr);
     if (output.term != .exited) return error.ProcessProbeUnavailable;
@@ -179,6 +188,25 @@ test "process_probe.observeDescendantListenPorts: classifies lsof errors as unav
     defer ports.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(ListenPortState.unavailable, ports.state);
+}
+
+test "process_probe.observeDescendantListenPorts: preserves out of memory from pgrep" {
+    var recorder = runner_mod.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueueError(error.OutOfMemory);
+    const runner = runner_mod.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+
+    try std.testing.expectError(error.OutOfMemory, observeDescendantListenPorts(std.testing.allocator, runner, "100"));
+}
+
+test "process_probe.observeDescendantListenPorts: preserves out of memory from lsof" {
+    var recorder = runner_mod.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    try recorder.enqueueError(error.OutOfMemory);
+    const runner = runner_mod.Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+
+    try std.testing.expectError(error.OutOfMemory, observeDescendantListenPorts(std.testing.allocator, runner, "100"));
 }
 
 test "process_probe.ListenPorts: empty deinit is a no-op" {
