@@ -203,9 +203,125 @@ fn writePortFailure(ctx: anytype, phase: std.json.Value, profile: []const u8, po
     try writer.print("  phase: {s}\n", .{phase_label});
     try writer.print("  expected: localhost:{d}\n", .{port});
     try writer.print("  waited: {d}s\n", .{timeout});
-    if (service) |name| try writeLastLog(ctx, name, writer);
-    if (service) |name| try writeNextLogsHint(ctx, name, writer);
+    var observed = ListenPorts.empty(.unavailable);
+    defer observed.deinit(ctx.gpa);
+    if (service) |name| {
+        observed = try observeListenPorts(ctx, name);
+        try writeListenPortObservation(writer, observed);
+        const last_log = try writeLastLog(ctx, name, writer);
+        defer ctx.gpa.free(last_log);
+        try writeStartupFailureHints(writer, name, port, observed, last_log);
+        try writeNextLogsHint(ctx, name, writer);
+    }
     try writer.flush();
+}
+
+const ListenPortState = enum {
+    ports,
+    none,
+    unavailable,
+};
+
+const ListenPorts = struct {
+    state: ListenPortState,
+    ports: []const i64 = &.{},
+
+    fn empty(state: ListenPortState) ListenPorts {
+        return .{ .state = state };
+    }
+
+    fn fromOwned(ports: []const i64) ListenPorts {
+        return .{ .state = .ports, .ports = ports };
+    }
+
+    fn deinit(self: ListenPorts, gpa: std.mem.Allocator) void {
+        gpa.free(self.ports);
+    }
+
+    fn contains(self: ListenPorts, port: i64) bool {
+        for (self.ports) |item| {
+            if (item == port) return true;
+        }
+        return false;
+    }
+};
+
+fn observeListenPorts(ctx: anytype, service: []const u8) !ListenPorts {
+    const info = ctx.tmux.paneInfo(service) catch return ListenPorts.empty(.unavailable);
+    defer info.deinit(ctx.gpa);
+    const pid = std.mem.trim(u8, info.pid, " \t\r\n");
+    if (pid.len == 0 or std.mem.eql(u8, pid, "0")) return ListenPorts.empty(.unavailable);
+
+    const pid_arg = try listenPortPidArg(ctx, pid);
+    defer ctx.gpa.free(pid_arg);
+    const result = proc_runner.captured(ctx.runner.run(&.{ "lsof", "-nP", "-a", "-iTCP", "-sTCP:LISTEN", "-p", pid_arg }, .{}) catch return ListenPorts.empty(.unavailable));
+    defer ctx.gpa.free(result.stdout);
+    defer ctx.gpa.free(result.stderr);
+    if (result.term != .exited) return ListenPorts.empty(.unavailable);
+
+    const ports = try parseListenPorts(ctx.gpa, result.stdout);
+    if (ports.len == 0) {
+        ctx.gpa.free(ports);
+        return ListenPorts.empty(.none);
+    }
+    return ListenPorts.fromOwned(ports);
+}
+
+fn listenPortPidArg(ctx: anytype, pid: []const u8) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(ctx.gpa);
+    errdefer out.deinit();
+    try out.writer.writeAll(pid);
+
+    const children = proc_runner.captured(ctx.runner.run(&.{ "pgrep", "-P", pid }, .{}) catch return out.toOwnedSlice());
+    defer ctx.gpa.free(children.stdout);
+    defer ctx.gpa.free(children.stderr);
+    if (children.term != .exited or children.term.exited != 0) return out.toOwnedSlice();
+    var lines = std.mem.splitScalar(u8, children.stdout, '\n');
+    while (lines.next()) |line| {
+        const child = std.mem.trim(u8, line, " \t\r\n");
+        if (child.len == 0) continue;
+        try out.writer.writeByte(',');
+        try out.writer.writeAll(child);
+    }
+    return out.toOwnedSlice();
+}
+
+fn parseListenPorts(gpa: std.mem.Allocator, output: []const u8) ![]i64 {
+    var ports: std.ArrayList(i64) = .empty;
+    errdefer ports.deinit(gpa);
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "(LISTEN)") == null) continue;
+        const marker = std.mem.indexOf(u8, line, " (LISTEN)") orelse line.len;
+        const endpoint = std.mem.trim(u8, line[0..marker], " \t\r\n");
+        const colon = std.mem.lastIndexOfScalar(u8, endpoint, ':') orelse continue;
+        const port_text = endpoint[colon + 1 ..];
+        const parsed = std.fmt.parseInt(i64, port_text, 10) catch continue;
+        if (!containsPort(ports.items, parsed)) try ports.append(gpa, parsed);
+    }
+    return ports.toOwnedSlice(gpa);
+}
+
+fn containsPort(ports: []const i64, port: i64) bool {
+    for (ports) |item| {
+        if (item == port) return true;
+    }
+    return false;
+}
+
+fn writeListenPortObservation(writer: *std.Io.Writer, observed: ListenPorts) !void {
+    switch (observed.state) {
+        .unavailable => try writer.writeAll("  observed: unavailable\n"),
+        .none => try writer.writeAll("  observed: no listen port from service process\n"),
+        .ports => {
+            try writer.writeAll("  observed: ");
+            for (observed.ports, 0..) |port, index| {
+                if (index > 0) try writer.writeAll(", ");
+                try writer.print("localhost:{d}", .{port});
+            }
+            try writer.writeByte('\n');
+        },
+    }
 }
 
 fn serviceForPort(ctx: anytype, phase: std.json.Value, profile: []const u8, port: i64) !?[]const u8 {
@@ -410,10 +526,34 @@ fn writeDisplayLine(writer: *std.Io.Writer, line: []const u8) !void {
     }
 }
 
-fn writeLastLog(ctx: anytype, window: []const u8, writer: *std.Io.Writer) !void {
+fn writeLastLog(ctx: anytype, window: []const u8, writer: *std.Io.Writer) ![]const u8 {
     const line = try ctx.tmux.captureLastLine(window);
-    defer ctx.gpa.free(line);
     if (line.len > 0) try writer.print("  last log: {s}\n", .{line});
+    return line;
+}
+
+fn writeStartupFailureHints(writer: *std.Io.Writer, service: []const u8, expected_port: i64, observed: ListenPorts, last_log: []const u8) !void {
+    if (observed.state == .ports and !observed.contains(expected_port) and observed.ports.len > 0) {
+        try writer.print("Hint: {s} is listening on {d}, but config port is {d}.\n", .{ service, observed.ports[0], expected_port });
+    }
+    if (startupFailureHint(last_log)) |hint| try writer.print("Hint: {s}\n", .{hint});
+}
+
+fn startupFailureHint(last_log: []const u8) ?[]const u8 {
+    if (last_log.len == 0) return null;
+    if (containsIgnoreCase(last_log, "address already in use") or containsIgnoreCase(last_log, "eaddrinuse"))
+        return "port is already in use; stop the existing process or change the configured port.";
+    if (containsIgnoreCase(last_log, "connection refused"))
+        return "a dependency refused the connection; check whether the upstream service is running.";
+    if (containsIgnoreCase(last_log, "client_id is required") or
+        containsIgnoreCase(last_log, "environment variable") or
+        containsIgnoreCase(last_log, "missing required"))
+        return "required environment may be missing; check env_file or the service command environment.";
+    return null;
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    return std.ascii.indexOfIgnoreCase(haystack, needle) != null;
 }
 
 fn writeNextLogsHint(ctx: anytype, service: []const u8, writer: *std.Io.Writer) !void {
@@ -1047,7 +1187,61 @@ test "phases.runServicePhase: reports port readiness failure" {
         \\  phase: backend
         \\  expected: localhost:5432
         \\  waited: 5s
+        \\  observed: unavailable
         \\  last log: Error: address already in use
+        \\Hint: port is already in use; stop the existing process or change the configured port.
+        \\
+        \\Next:
+        \\  zask --config 'config.json' logs api
+        \\
+    , writer.buffered());
+}
+
+test "phases.runServicePhase: reports mismatched observed listen port" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":5432}]}],
+        \\  "startup_order": [{"name":"backend","group":"backend","wait_ports":[5432],"port_wait_timeout_seconds":1}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("Listening on 15432\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
+    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
+    try recorder.enqueue(
+        \\COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+        \\node    12346 me     7u  IPv4 0x123      0t0  TCP *:15432 (LISTEN)
+        \\
+    , "", .{ .exited = 0 });
+    try recorder.enqueue("Listening on 15432\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [768]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.StartupFailed, runServicePhase(lifecycle, cfg.phases()[0], "all", &writer, .observe));
+
+    try std.testing.expectEqualStrings(
+        \\Starting api...
+        \\Waiting for api on localhost:5432...
+        \\
+        \\Error: api did not become ready
+        \\  phase: backend
+        \\  expected: localhost:5432
+        \\  waited: 1s
+        \\  observed: localhost:15432
+        \\  last log: Listening on 15432
+        \\Hint: api is listening on 15432, but config port is 5432.
         \\
         \\Next:
         \\  zask --config 'config.json' logs api
@@ -1091,6 +1285,38 @@ test "phases.runServicePhase: reports unmatched port without service hints" {
         \\  waited: 180s
         \\
     , writer.buffered());
+}
+
+test "phases.startupFailureHint: maps common startup failures" {
+    try std.testing.expectEqualStrings(
+        "required environment may be missing; check env_file or the service command environment.",
+        startupFailureHint("[ERROR] TypeError: client_id is required").?,
+    );
+    try std.testing.expectEqualStrings(
+        "a dependency refused the connection; check whether the upstream service is running.",
+        startupFailureHint("Connection refused while calling upstream").?,
+    );
+    try std.testing.expectEqualStrings(
+        "port is already in use; stop the existing process or change the configured port.",
+        startupFailureHint("listen EADDRINUSE 127.0.0.1:3000").?,
+    );
+    try std.testing.expect(startupFailureHint("server exited") == null);
+}
+
+test "phases.parseListenPorts: parses unique lsof listen ports" {
+    const output =
+        \\COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+        \\node    12345 me     7u  IPv4 0x123      0t0  TCP *:15432 (LISTEN)
+        \\node    12346 me     8u  IPv6 0x456      0t0  TCP [::1]:3000 (LISTEN)
+        \\node    12346 me     9u  IPv6 0x456      0t0  TCP [::1]:3000 (LISTEN)
+        \\
+    ;
+    const ports = try parseListenPorts(std.testing.allocator, output);
+    defer std.testing.allocator.free(ports);
+
+    try std.testing.expectEqual(@as(usize, 2), ports.len);
+    try std.testing.expectEqual(@as(i64, 15432), ports[0]);
+    try std.testing.expectEqual(@as(i64, 3000), ports[1]);
 }
 
 test "phases.phaseCwd: rejects path traversal" {
