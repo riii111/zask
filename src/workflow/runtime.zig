@@ -32,6 +32,7 @@ pub const Runtime = struct {
     tmux_impl: tmux_client.Client,
     docker_impl: docker_client.Compose,
     validate_configured_dirs: bool = true,
+    emit_env_file_tips: bool = true,
     lock_probe: lock.Probe = .system,
 
     pub fn status(self: Runtime, writer: *std.Io.Writer) !void {
@@ -276,7 +277,7 @@ pub const Runtime = struct {
             .tmux = self.tmux(),
             .docker = self.docker(),
             .validate_configured_dirs = self.validate_configured_dirs,
-            .emit_env_file_tips = self.runner_impl.recorder == null,
+            .emit_env_file_tips = self.emit_env_file_tips,
             .command_hint = self.command_hint,
         };
     }
@@ -1574,6 +1575,7 @@ fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.C
         .tmux_impl = .{ .gpa = gpa, .runner = runner, .session = "demo" },
         .docker_impl = .{ .gpa = gpa, .runner = runner, .dir = "/tmp/demo", .file = "compose.yaml" },
         .validate_configured_dirs = false,
+        .emit_env_file_tips = false,
     };
 }
 
