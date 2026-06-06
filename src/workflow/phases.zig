@@ -470,8 +470,7 @@ fn startupFailureHint(last_log: []const u8) ?[]const u8 {
         return "port is already in use; stop the existing process or change the configured port.";
     if (containsIgnoreCase(last_log, "connection refused"))
         return "a dependency refused the connection; check whether the upstream service is running.";
-    if (containsIgnoreCase(last_log, "client_id is required") or
-        containsIgnoreCase(last_log, "environment variable") or
+    if (containsIgnoreCase(last_log, "environment variable") or
         containsIgnoreCase(last_log, "missing required"))
         return "required environment may be missing; check env_file or the service command environment.";
     return null;
@@ -1246,7 +1245,7 @@ test "phases.runServicePhase: reports unmatched port without service hints" {
 test "phases.startupFailureHint: maps common startup failures" {
     try std.testing.expectEqualStrings(
         "required environment may be missing; check env_file or the service command environment.",
-        startupFailureHint("[ERROR] TypeError: client_id is required").?,
+        startupFailureHint("[ERROR] missing required environment variable API_TOKEN").?,
     );
     try std.testing.expectEqualStrings(
         "a dependency refused the connection; check whether the upstream service is running.",
@@ -1263,7 +1262,7 @@ test "phases.startupFailureHint: checks previous tail lines" {
     try std.testing.expectEqualStrings(
         "required environment may be missing; check env_file or the service command environment.",
         startupFailureHint(
-            \\[ERROR] TypeError: client_id is required
+            \\[ERROR] missing required environment variable API_TOKEN
             \\    at main
         ).?,
     );
