@@ -14,19 +14,35 @@ pub fn ensureDir(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, pro
     defer gpa.free(resolved);
     const stat = std.Io.Dir.cwd().statFile(io, resolved, .{}) catch |err| switch (err) {
         error.FileNotFound => {
-            try writeError(writer, "not found", problem, resolved);
+            try writeError(writer, "directory", "not found", problem, resolved);
             return error.ConfigPathNotFound;
         },
         else => return err,
     };
     if (stat.kind != .directory) {
-        try writeError(writer, "not a directory", problem, resolved);
+        try writeError(writer, "directory", "not a directory", problem, resolved);
         return error.ConfigPathNotFound;
     }
 }
 
-fn writeError(writer: *std.Io.Writer, reason: []const u8, problem: Problem, resolved: []const u8) !void {
-    try writer.print("\nError: configured directory {s}\n", .{reason});
+pub fn ensureFile(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, problem: Problem) !void {
+    const resolved = try pathing.absoluteForDisplay(gpa, io, problem.path);
+    defer gpa.free(resolved);
+    const stat = std.Io.Dir.cwd().statFile(io, resolved, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            try writeError(writer, "file", "not found", problem, resolved);
+            return error.ConfigPathNotFound;
+        },
+        else => return err,
+    };
+    if (stat.kind != .file) {
+        try writeError(writer, "file", "not a file", problem, resolved);
+        return error.ConfigPathNotFound;
+    }
+}
+
+fn writeError(writer: *std.Io.Writer, kind: []const u8, reason: []const u8, problem: Problem, resolved: []const u8) !void {
+    try writer.print("\nError: configured {s} {s}\n", .{ kind, reason });
     try writer.print("  field: {s}\n", .{problem.field});
     if (problem.service) |service| try writer.print("  service: {s}\n", .{service});
     if (problem.project_root) |project_root| try writer.print("  project.root: {s}\n", .{project_root});
@@ -80,4 +96,24 @@ test "configured_path.ensureDir: rejects regular files" {
 
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "not a directory") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "field: project.root") != null);
+}
+
+test "configured_path.ensureFile: reports missing file details" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.ConfigPathNotFound, ensureFile(arena.allocator(), threaded.io(), &writer, .{
+        .field = "env_file",
+        .service = "api",
+        .configured = ".env.local",
+        .project_root = ".",
+        .path = ".env.local",
+    }));
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "field: env_file") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "service: api") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "configured: .env.local") != null);
 }

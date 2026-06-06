@@ -326,6 +326,7 @@ pub const Lifecycle = struct {
             .project_root = project_root,
             .path = service_path,
         });
+        try self.ensureConfiguredEnvFiles(progress.raw(), value, service, project_root);
         const service_dir = try pathing.absolute(self.gpa, self.runner.io, service_path);
         try self.writeEnvFileTip(value, service_dir, progress);
         const start_command = try config.Config.serviceStartCommand(self.gpa, value);
@@ -335,6 +336,8 @@ pub const Lifecycle = struct {
         try self.tmux.respawnPane(service, service_dir, launch_command);
     }
 
+    /// Returned command is borrowed when no env files are configured and owned by
+    /// this lifecycle allocator otherwise; callers do not free it individually.
     fn serviceLaunchCommand(self: Lifecycle, service: std.json.Value, command: []const u8) ![]const u8 {
         const env_files = try config.Config.serviceEnvFiles(self.gpa, service);
         defer self.gpa.free(env_files);
@@ -496,6 +499,23 @@ pub const Lifecycle = struct {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         try configured_path.ensureDir(arena.allocator(), self.runner.io, writer, problem);
+    }
+
+    fn ensureConfiguredEnvFiles(self: Lifecycle, writer: *std.Io.Writer, service: std.json.Value, service_name: []const u8, project_root: []const u8) !void {
+        if (!self.validate_configured_dirs) return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const env_files = try config.Config.serviceEnvFiles(arena.allocator(), service);
+        for (env_files) |env_file| {
+            const path = try self.cfg.serviceEnvFilePath(arena.allocator(), service, env_file);
+            try configured_path.ensureFile(arena.allocator(), self.runner.io, writer, .{
+                .field = "env_file",
+                .service = service_name,
+                .configured = env_file.path,
+                .project_root = project_root,
+                .path = path,
+            });
+        }
     }
 
     fn writeWindowNotReady(self: Lifecycle, progress: anytype, service: []const u8, window: []const u8) !void {
@@ -802,6 +822,39 @@ test "lifecycle.startAll: wraps service command with env files" {
     try proc_runner.expectCommandArgContains(respawn, 9, "export \"$__zask_env_key=$__zask_env_value\"");
     try proc_runner.expectCommandArgContains(respawn, 9, "\nserve");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting api...") != null);
+}
+
+test "lifecycle.startAll: rejects missing env_file before respawn" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const json = try std.fmt.allocPrint(std.testing.allocator,
+        \\{{
+        \\  "project": {{"name":"demo","root":"{s}"}},
+        \\  "groups": [{{"name":"backend","services":[{{"name":"api","command":"serve","env_file":"missing.env"}}]}}]
+        \\}}
+    , .{root});
+    defer std.testing.allocator.free(json);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    var lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    lifecycle.validate_configured_dirs = true;
+    var buffer: [768]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.ConfigPathNotFound, lifecycle.startAll("all", &writer, .prime));
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "field: env_file") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "configured: missing.env") != null);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "respawn-pane") == null);
 }
 
 test "lifecycle.startAll: suggests env_file when project env exists" {
