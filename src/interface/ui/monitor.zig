@@ -37,7 +37,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.
 
 const MonitorStatus = enum {
     live,
-    ready,
+    waiting,
     degraded,
     stop,
     dead,
@@ -46,7 +46,7 @@ const MonitorStatus = enum {
     fn icon(self: MonitorStatus) []const u8 {
         return switch (self) {
             .live => "●",
-            .ready => "◐",
+            .waiting => "◐",
             .degraded => "▲",
             .stop => "○",
             .dead => "✗",
@@ -57,7 +57,7 @@ const MonitorStatus = enum {
     fn color(self: MonitorStatus) []const u8 {
         return switch (self) {
             .live => ansi.green,
-            .ready => ansi.cyan,
+            .waiting => ansi.cyan,
             .degraded => ansi.yellow,
             .stop => ansi.dim,
             .dead => ansi.red,
@@ -68,7 +68,7 @@ const MonitorStatus = enum {
     fn summary(self: MonitorStatus, exit_code: []const u8) []const u8 {
         return switch (self) {
             .live => "live",
-            .ready => "waiting",
+            .waiting => "waiting",
             .degraded => "degraded",
             .stop => "stop",
             .dead => exit_code,
@@ -197,7 +197,7 @@ fn dockerMonitorStatus(pane: observations.PaneObservation, compose: observations
         .tmux_unavailable => .unknown,
         .busy => switch (compose.state) {
             .running => .live,
-            .empty => .ready,
+            .empty => .waiting,
             .unavailable => .unknown,
         },
     };
@@ -206,7 +206,7 @@ fn dockerMonitorStatus(pane: observations.PaneObservation, compose: observations
 fn healthMonitorStatus(health: observations.HealthObservation) MonitorStatus {
     return switch (health) {
         .no_check, .ready => .live,
-        .waiting => .ready,
+        .waiting => .waiting,
         .degraded => .degraded,
     };
 }
@@ -379,7 +379,7 @@ test "monitor.service: shows waiting while port is not ready" {
 
     const row = try serviceMonitorRow(ctx, (try cfg.services())[0]);
 
-    try std.testing.expectEqual(MonitorStatus.ready, row.status);
+    try std.testing.expectEqual(MonitorStatus.waiting, row.status);
     try std.testing.expectEqualStrings(":3000", row.port);
     try std.testing.expectEqualStrings("waiting", row.status.summary(row.exit_code));
     try std.testing.expectEqual(@as(usize, 1), recordedCommandCount(&recorder, "nc"));

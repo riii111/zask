@@ -101,6 +101,29 @@ pub fn runServicePhase(ctx: anytype, phase: std.json.Value, profile: []const u8,
     try runServicePhaseWithProgress(ctx, phase, profile, &progress, mode);
 }
 
+pub fn servicePhaseServices(gpa: std.mem.Allocator, cfg: config.Config, profile: []const u8) ![][]const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    errdefer names.deinit(gpa);
+    const phase_list = cfg.phases();
+    if (phase_list.len == 0) {
+        for (try cfg.services()) |service| try appendUniqueService(gpa, &names, try config.Config.serviceName(service));
+        return names.toOwnedSlice(gpa);
+    }
+    for (phase_list) |phase| {
+        if (phase != .object or phaseKind(phase) != .services) continue;
+        if (phase.object.get("groups")) |groups| if (groups == .array) {
+            for (groups.array.items) |group_value| {
+                if (group_value != .string) continue;
+                const group = cfg.resolvePhaseGroup(profile, group_value.string);
+                const services = try cfg.resolveGroup(gpa, group);
+                defer gpa.free(services);
+                for (services) |service| try appendUniqueService(gpa, &names, service);
+            }
+        };
+    }
+    return names.toOwnedSlice(gpa);
+}
+
 pub fn runServicePhaseWithProgress(ctx: anytype, phase: std.json.Value, profile: []const u8, progress: anytype, mode: lifecycle_mod.StartMode) !void {
     if (phase.object.get("groups")) |groups| if (groups == .array) {
         for (groups.array.items) |group_value| {
@@ -201,6 +224,13 @@ fn serviceForPort(ctx: anytype, phase: std.json.Value, profile: []const u8, port
         }
     };
     return matched;
+}
+
+fn appendUniqueService(gpa: std.mem.Allocator, names: *std.ArrayList([]const u8), service: []const u8) !void {
+    for (names.items) |existing| {
+        if (std.mem.eql(u8, existing, service)) return;
+    }
+    try names.append(gpa, service);
 }
 
 fn phaseLabel(ctx: anytype, phase: std.json.Value, profile: []const u8) []const u8 {

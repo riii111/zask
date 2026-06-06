@@ -337,35 +337,8 @@ pub const Runtime = struct {
         }
     }
 
-    // Warning scope mirrors only service phase group resolution; startup side
-    // effects stay in Lifecycle.
     fn servicesStartedByProfile(self: Runtime, scratch: std.mem.Allocator, profile: []const u8) ![][]const u8 {
-        var names: std.ArrayList([]const u8) = .empty;
-        errdefer names.deinit(scratch);
-        const phase_list = self.cfg.phases();
-        if (phase_list.len == 0) {
-            for (try self.cfg.services()) |service| try appendUniqueService(scratch, &names, try config.Config.serviceName(service));
-            return names.toOwnedSlice(scratch);
-        }
-        for (phase_list) |phase| {
-            if (phase != .object or phases.phaseKind(phase) != .services) continue;
-            if (phase.object.get("groups")) |groups| if (groups == .array) {
-                for (groups.array.items) |group_value| {
-                    if (group_value != .string) continue;
-                    const group = self.cfg.resolvePhaseGroup(profile, group_value.string);
-                    const services = try self.cfg.resolveGroup(scratch, group);
-                    for (services) |service| try appendUniqueService(scratch, &names, service);
-                }
-            };
-        }
-        return names.toOwnedSlice(scratch);
-    }
-
-    fn appendUniqueService(gpa: std.mem.Allocator, names: *std.ArrayList([]const u8), service: []const u8) !void {
-        for (names.items) |existing| {
-            if (std.mem.eql(u8, existing, service)) return;
-        }
-        try names.append(gpa, service);
+        return phases.servicePhaseServices(scratch, self.cfg, profile);
     }
 
     fn ensureOpenConfiguredDirs(self: Runtime, scratch: std.mem.Allocator, writer: *std.Io.Writer) !void {

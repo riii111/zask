@@ -98,7 +98,10 @@ pub const Lifecycle = struct {
 
     pub fn startTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
         try self.ensureSessionActive(writer);
-        if (std.mem.eql(u8, target, "--all")) return self.startAll("all", writer, .observe);
+        if (std.mem.eql(u8, target, "--all")) {
+            try self.warnProfileServicesWithoutPort("all", writer);
+            return self.startAll("all", writer, .observe);
+        }
         if (std.mem.eql(u8, target, "docker")) {
             var progress = progress_mod.Line.init(writer);
             try self.ensureDockerStartedWithProgress(&progress);
@@ -106,8 +109,12 @@ pub const Lifecycle = struct {
         }
         if (self.cfg.resolveGroup(self.gpa, target)) |services| {
             defer self.gpa.free(services);
+            try self.warnServicesWithoutPort(services, writer);
             for (services) |svc| try self.startService(svc, writer, .observe);
-        } else |_| try self.startService(target, writer, .observe);
+        } else |_| {
+            try self.warnServiceWithoutPort(target, writer);
+            try self.startService(target, writer, .observe);
+        }
     }
 
     pub fn stopTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
@@ -138,8 +145,12 @@ pub const Lifecycle = struct {
         try self.ensureSessionActive(writer);
         if (self.cfg.resolveGroup(self.gpa, target)) |services| {
             defer self.gpa.free(services);
+            try self.warnServicesWithoutPort(services, writer);
             for (services) |svc| try self.restartService(svc, writer);
-        } else |_| try self.restartService(target, writer);
+        } else |_| {
+            try self.warnServiceWithoutPort(target, writer);
+            try self.restartService(target, writer);
+        }
     }
 
     pub fn startService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer, mode: StartMode) !void {
@@ -444,6 +455,23 @@ pub const Lifecycle = struct {
         try writer.writeAll("\nNext:\n");
         try writer.print("  {s}\n", .{close_command});
         try writer.print("  {s}\n", .{open_command});
+    }
+
+    fn warnProfileServicesWithoutPort(self: Lifecycle, profile: []const u8, writer: *std.Io.Writer) !void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const services = try phases.servicePhaseServices(arena.allocator(), self.cfg, profile);
+        try self.warnServicesWithoutPort(services, writer);
+    }
+
+    fn warnServicesWithoutPort(self: Lifecycle, services: []const []const u8, writer: *std.Io.Writer) !void {
+        for (services) |service| try self.warnServiceWithoutPort(service, writer);
+    }
+
+    fn warnServiceWithoutPort(self: Lifecycle, service_name: []const u8, writer: *std.Io.Writer) !void {
+        const service = try self.cfg.findService(service_name);
+        if (config.Config.servicePort(service) != null) return;
+        try writeProgress(writer, "Warning: {s} has no port; zask cannot check readiness for this service\n", .{service_name});
     }
 };
 
@@ -1204,6 +1232,70 @@ test "lifecycle.startTarget: surfaces diagnostic when pane observation becomes u
 
     try std.testing.expectError(error.TmuxUnavailable, lifecycle.startTarget("api", &writer));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Warning: tmux unavailable for api") != null);
+}
+
+test "lifecycle.startTarget: port warnings cover selected service targets" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[
+        \\    {"name":"api","dir":"backend","command":"serve"},
+        \\    {"name":"web","dir":"frontend","command":"dev","port":3000}
+        \\  ]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.warnServiceWithoutPort("api", &writer);
+    try lifecycle.warnServiceWithoutPort("web", &writer);
+
+    const out = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "Warning: api has no port; zask cannot check readiness for this service") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "web has no port") == null);
+}
+
+test "lifecycle.startTarget: port warnings follow startup profile service phases" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [
+        \\    {"name":"backend","services":[
+        \\      {"name":"api","dir":"backend","command":"serve","port":3000}
+        \\    ]},
+        \\    {"name":"worker","services":[
+        \\      {"name":"job","dir":"worker","command":"run"}
+        \\    ]}
+        \\  ],
+        \\  "startup_order": [{"group":"backend"}],
+        \\  "start_profiles": {
+        \\    "jobs": {"profile":"jobs","group_overrides":{"backend":"worker"}}
+        \\  }
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.warnProfileServicesWithoutPort("all", &writer);
+    try lifecycle.warnProfileServicesWithoutPort("jobs", &writer);
+
+    const out = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "api has no port") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Warning: job has no port; zask cannot check readiness for this service") != null);
 }
 
 test "lifecycle.restartTarget: docker restart reports tmux unavailable without stopping compose" {

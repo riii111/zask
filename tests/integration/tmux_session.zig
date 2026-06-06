@@ -176,6 +176,7 @@ test "cli.start: window not ready exits cleanly after diagnostics" {
     defer std.testing.allocator.free(result.stderr);
 
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Warning: api has no port; zask cannot check readiness for this service") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Error: api window is not ready") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "zask close") != null);
     try std.testing.expectEqual(@as(usize, 0), result.stderr.len);
