@@ -370,7 +370,7 @@ pub fn parseJsonBytes(gpa: std.mem.Allocator, bytes: []const u8) !Value {
 }
 
 // normalizeConfig assumes `source` already passed validateAll; the remaining
-// guards are defensive type casts, not user-facing validation.
+// guards are defensive shape/invariant checks, not user-facing validation.
 pub fn normalizeConfig(gpa: std.mem.Allocator, source: Value) !Value {
     if (source != .object) return error.InvalidConfig;
 
@@ -482,7 +482,7 @@ fn normalizeStartupOrder(gpa: std.mem.Allocator, root: *std.json.ObjectMap, sour
                     try phase.put(gpa, "wait_ports", wait_ports);
                 }
                 if (step.object.get(keys.port_wait_timeout_seconds)) |timeout| {
-                    if (timeout != .integer) return error.InvalidConfig;
+                    if (timeout != .integer or timeout.integer < 0) return error.InvalidConfig;
                     try phase.put(gpa, "port_wait_timeout", timeout);
                 }
             },
@@ -758,7 +758,12 @@ fn validateStartupStep(gpa: std.mem.Allocator, step: Value, path: []const u8, di
             }
         }
         if (step.object.get(keys.port_wait_timeout_seconds)) |timeout| {
-            if (timeout != .integer) try diags.add(try joinPath(gpa, path, keys.port_wait_timeout_seconds), "must be an integer");
+            const timeout_path = try joinPath(gpa, path, keys.port_wait_timeout_seconds);
+            if (timeout != .integer) {
+                try diags.add(timeout_path, "must be an integer");
+            } else if (timeout.integer < 0) {
+                try diags.add(timeout_path, "must be >= 0");
+            }
         }
         return;
     }
@@ -1045,18 +1050,39 @@ test "config.commandPhaseCommand: resolves command phase profile overrides and f
 }
 
 test "config.phasePortWaitTimeout: normalizes startup order override" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo"},
-        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":5432}]}],
-        \\  "startup_order": [{"group":"backend","wait_ports":[5432],"port_wait_timeout_seconds":240}]
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const cfg = try parseTestConfig(&arena, json);
+    const cases = [_]struct {
+        json: []const u8,
+        want: i64,
+    }{
+        .{
+            .json =
+            \\{
+            \\  "project": {"name":"demo","root":"/tmp/demo"},
+            \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":5432}]}],
+            \\  "startup_order": [{"group":"backend","wait_ports":[5432],"port_wait_timeout_seconds":240}]
+            \\}
+            ,
+            .want = 240,
+        },
+        .{
+            .json =
+            \\{
+            \\  "project": {"name":"demo","root":"/tmp/demo"},
+            \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":5432}]}],
+            \\  "startup_order": [{"group":"backend","wait_ports":[5432],"port_wait_timeout_seconds":0}]
+            \\}
+            ,
+            .want = 0,
+        },
+    };
 
-    try std.testing.expectEqual(@as(i64, 240), Config.phasePortWaitTimeout(cfg.phases()[0], 180));
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const cfg = try parseTestConfig(&arena, case.json);
+
+        try std.testing.expectEqual(case.want, Config.phasePortWaitTimeout(cfg.phases()[0], 180));
+    }
 }
 
 test "config.env_file: normalizes project group and service scopes" {
@@ -1260,6 +1286,12 @@ test "config.parse: rejects malformed startup order" {
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "groups": [],
+        \\  "startup_order": [{"group": "backend", "port_wait_timeout_seconds": -1}]
+        \\}
+        ,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [],
         \\  "startup_order": [{"command": "setup", "dir": 42}]
         \\}
         ,
@@ -1306,6 +1338,27 @@ test "config.parse: rejects malformed startup order" {
     for (cases) |json| {
         try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
     }
+}
+
+test "config.validateAll: rejects negative startup port wait timeout" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","command":"serve"}]}],
+        \\  "startup_order": [{"group":"backend","port_wait_timeout_seconds":-1}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const value = try parseJsonBytes(arena.allocator(), json);
+    var diags = diagnostics.Diagnostics.init(arena.allocator());
+    defer diags.deinit();
+
+    try validateAll(arena.allocator(), value, &diags);
+
+    try std.testing.expectEqual(@as(usize, 1), diags.slice().len);
+    try std.testing.expectEqualStrings("startup_order[0].port_wait_timeout_seconds", diags.slice()[0].path);
+    try std.testing.expectEqualStrings("must be >= 0", diags.slice()[0].message);
 }
 
 test "config.parse: rejects duplicate groups and services" {
