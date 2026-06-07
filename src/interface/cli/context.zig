@@ -172,6 +172,7 @@ fn absoluteConfigPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]c
     };
 }
 
+/// Consumes `path` and returns either the same owned absolute path or a newly resolved one.
 fn absoluteOwnedConfigPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
     errdefer gpa.free(path);
     if (std.fs.path.isAbsolute(path)) return path;

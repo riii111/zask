@@ -238,6 +238,12 @@ fn testTmpPath(gpa: std.mem.Allocator, tmp: std.testing.TmpDir, name: []const u8
     return std.fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path, name });
 }
 
+test "init.detectedOptions.deinit: empty result is a no-op" {
+    const detected: DetectedOptions = .{ .opts = .{} };
+
+    detected.deinit(std.testing.allocator);
+}
+
 fn testDetectedServiceOnly() !DetectedOptions {
     return .{
         .opts = try Options.parse(&.{ "demo", "--root", "." }),
