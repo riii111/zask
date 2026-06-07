@@ -9,6 +9,11 @@ pub const Input = struct {
 pub const Result = struct {
     service: ?DetectedService = null,
     compose_file: ?[]const u8 = null,
+
+    /// Frees owned detection outputs. Static labels and candidate names are borrowed.
+    pub fn deinit(self: Result, gpa: std.mem.Allocator) void {
+        if (self.service) |service| gpa.free(service.command);
+    }
 };
 
 pub const DetectedService = struct {
@@ -25,11 +30,14 @@ pub fn detect(gpa: std.mem.Allocator, io: std.Io, cwd: []const u8, input: Input)
 }
 
 fn detectPackageService(gpa: std.mem.Allocator, io: std.Io, cwd: []const u8) !?DetectedService {
-    const path = try std.fs.path.join(gpa, &.{ cwd, "package.json" });
-    defer gpa.free(path);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const path = try std.fs.path.join(scratch, &.{ cwd, "package.json" });
     if (!paths.exists(io, path)) return null;
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1024 * 1024)) catch return null;
-    const package = std.json.parseFromSliceLeaky(std.json.Value, gpa, bytes, .{ .ignore_unknown_fields = true }) catch return null;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, scratch, .limited(1024 * 1024)) catch return null;
+    const package = std.json.parseFromSliceLeaky(std.json.Value, scratch, bytes, .{ .ignore_unknown_fields = true }) catch return null;
     if (package != .object) return null;
     const scripts = package.object.get("scripts") orelse return null;
     if (scripts != .object) return null;
@@ -39,7 +47,7 @@ fn detectPackageService(gpa: std.mem.Allocator, io: std.Io, cwd: []const u8) !?D
         const value = scripts.object.get(script_name) orelse continue;
         if (value != .string) continue;
         return .{
-            .command = try std.fmt.allocPrint(gpa, "{s} run {s}", .{ try detectPackageManager(gpa, io, cwd), script_name }),
+            .command = try std.fmt.allocPrint(gpa, "{s} run {s}", .{ try detectPackageManager(scratch, io, cwd), script_name }),
             .script = script_name,
         };
     }

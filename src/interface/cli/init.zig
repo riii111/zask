@@ -49,7 +49,7 @@ pub fn run(ctx: *Context, opts: Options) !void {
     }
 
     var detected = try applyDetections(ctx.base.gpa, io, cwd, opts);
-    defer if (detected.service) |service| ctx.base.gpa.free(service.command);
+    defer detected.deinit(ctx.base.gpa);
     const resolved_root = try resolveRootFromCwd(ctx.base.gpa, cwd, detected.opts.root);
     const resolved_root_owned = resolved_root.ptr != detected.opts.root.ptr;
     defer if (resolved_root_owned) ctx.base.gpa.free(resolved_root);
@@ -79,6 +79,11 @@ const DetectedOptions = struct {
     opts: Options,
     service: ?init_inference.DetectedService = null,
     compose_file: ?[]const u8 = null,
+
+    /// Frees owned values copied from detection helpers.
+    pub fn deinit(self: DetectedOptions, gpa: std.mem.Allocator) void {
+        if (self.service) |service| gpa.free(service.command);
+    }
 };
 
 fn validateOptions(opts: Options) !void {
@@ -560,8 +565,11 @@ test "init.run: releases temporary allocations on success" {
     defer gpa.free(base);
     const config_home = try std.fs.path.join(gpa, &.{ base, "xdg" });
     defer gpa.free(config_home);
+    const package_json = try std.fs.path.join(gpa, &.{ base, "package.json" });
+    defer gpa.free(package_json);
     try environ.put("HOME", "/home/me");
     try environ.put("XDG_CONFIG_HOME", config_home);
+    try paths.writeFile(threaded.io(), package_json, "{\"scripts\":{\"dev\":\"vite\"}}\n");
     var buffer: [2048]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     var ctx = testContext(gpa, threaded.io(), &environ, &writer);
