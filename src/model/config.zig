@@ -86,6 +86,9 @@ pub const Config = struct {
         return name;
     }
 
+    /// Returns the configured project root. The slice borrows config/home for
+    /// plain paths and bare `~`, and is owned by the caller only when `~/...`
+    /// expansion allocates.
     pub fn projectRoot(self: Config, gpa: std.mem.Allocator) ![]const u8 {
         return self.expandHome(gpa, try self.requiredString(&.{ "project", "root" }));
     }
@@ -98,6 +101,9 @@ pub const Config = struct {
         return self.optionalBool(&.{ "docker", "enabled" }, false);
     }
 
+    /// Returns the docker working directory. The slice reuses `projectRoot`
+    /// when no docker subdir is configured; otherwise the joined path is owned
+    /// by the caller.
     pub fn dockerDir(self: Config, gpa: std.mem.Allocator) ![]const u8 {
         const root = try self.projectRoot(gpa);
         const dir = self.optionalString(&.{ "docker", "dir" }, "");
@@ -242,6 +248,8 @@ pub const Config = struct {
         return error.UnknownService;
     }
 
+    /// Caller owns the returned outer slice; service names inside it borrow
+    /// strings from the parsed config.
     pub fn resolveGroup(self: Config, gpa: std.mem.Allocator, name: []const u8) ![][]const u8 {
         if (self.get(&.{ "group_aliases", name })) |alias| {
             if (alias == .array) return stringArray(gpa, alias.array.items);

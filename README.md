@@ -60,6 +60,7 @@ zask close
 ```
 
 Run `zask help` for the full command list.
+Commands exit with `1` for runtime or environment failures, and `2` for usage or config errors.
 
 Named configs are stored under the same name as `project.name`. For example,
 `zask demo open` loads the `demo` config, and that config must set

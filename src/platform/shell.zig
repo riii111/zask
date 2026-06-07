@@ -1,5 +1,6 @@
 const std = @import("std");
 
+/// Returns a shell-quoted string owned by the caller.
 pub fn quote(gpa: std.mem.Allocator, value: []const u8) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
