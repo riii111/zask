@@ -370,7 +370,7 @@ pub fn parseJsonBytes(gpa: std.mem.Allocator, bytes: []const u8) !Value {
 }
 
 // normalizeConfig assumes `source` already passed validateAll; the remaining
-// guards are defensive type casts, not user-facing validation.
+// guards are defensive shape/invariant checks, not user-facing validation.
 pub fn normalizeConfig(gpa: std.mem.Allocator, source: Value) !Value {
     if (source != .object) return error.InvalidConfig;
 
