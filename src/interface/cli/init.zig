@@ -36,10 +36,12 @@ pub const Options = struct {
 pub fn run(ctx: *Context, opts: Options) !void {
     const io = ctx.base.io orelse return error.MissingIo;
     const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", ctx.base.gpa);
+    defer ctx.base.gpa.free(cwd);
     const project = opts.project orelse std.fs.path.basename(cwd);
     try validate.identifier(project);
 
     const config_path = try cli_context.projectConfigPath(ctx.base.gpa, ctx.base.environ, project);
+    defer ctx.base.gpa.free(config_path);
     if (!opts.force and paths.exists(io, config_path)) {
         try ctx.writer.print("Config already exists: {s}\n", .{config_path});
         try ctx.writer.print("Re-run with --force to overwrite it.\n", .{});
@@ -47,10 +49,16 @@ pub fn run(ctx: *Context, opts: Options) !void {
     }
 
     var detected = try applyDetections(ctx.base.gpa, io, cwd, opts);
-    detected.opts.root = try resolveRootFromCwd(ctx.base.gpa, cwd, detected.opts.root);
+    defer if (detected.service) |service| ctx.base.gpa.free(service.command);
+    const resolved_root = try resolveRootFromCwd(ctx.base.gpa, cwd, detected.opts.root);
+    const resolved_root_owned = resolved_root.ptr != detected.opts.root.ptr;
+    defer if (resolved_root_owned) ctx.base.gpa.free(resolved_root);
+    detected.opts.root = resolved_root;
     const json = try renderConfig(ctx.base.gpa, project, detected);
     defer ctx.base.gpa.free(json);
-    _ = try config.Config.parse(ctx.base.gpa, json, try paths.home(ctx.base.environ));
+    var validation_arena = std.heap.ArenaAllocator.init(ctx.base.gpa);
+    defer validation_arena.deinit();
+    _ = try config.Config.parse(validation_arena.allocator(), json, try paths.home(ctx.base.environ));
 
     const config_dir = std.fs.path.dirname(config_path) orelse return error.InvalidPath;
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, config_dir, @enumFromInt(0o755));
@@ -537,4 +545,26 @@ test "init.run: overwrites existing config with force" {
 
     try std.testing.expectEqualStrings(expected_root, project_root);
     try std.testing.expectEqual(@as(usize, 0), (try cfg.services()).len);
+}
+
+test "init.run: releases temporary allocations on success" {
+    var gpa_state = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa_state.deinit() == .ok) catch @panic("leak");
+    const gpa = gpa_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    var environ = env.Map.init(gpa);
+    defer environ.deinit();
+    const base = try tmp.dir.realPathFileAlloc(threaded.io(), ".", gpa);
+    defer gpa.free(base);
+    const config_home = try std.fs.path.join(gpa, &.{ base, "xdg" });
+    defer gpa.free(config_home);
+    try environ.put("HOME", "/home/me");
+    try environ.put("XDG_CONFIG_HOME", config_home);
+    var buffer: [2048]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var ctx = testContext(gpa, threaded.io(), &environ, &writer);
+
+    try run(&ctx, try Options.parse(&.{"demo"}));
 }
