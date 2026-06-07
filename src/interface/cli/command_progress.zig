@@ -289,7 +289,7 @@ fn displayLine(gpa: std.mem.Allocator, text: []const u8) ![]const u8 {
 
 fn terminalWidth(io: std.Io, file: std.Io.File) !usize {
     if (builtin.os.tag == .windows) return default_width;
-    var winsize: std.posix.winsize = .{
+    var winsize: std.c.winsize = .{
         .row = 0,
         .col = 0,
         .xpixel = 0,
@@ -297,7 +297,7 @@ fn terminalWidth(io: std.Io, file: std.Io.File) !usize {
     };
     const err = (try io.operate(.{ .device_io_control = .{
         .file = file,
-        .code = std.posix.T.IOCGWINSZ,
+        .code = std.c.T.IOCGWINSZ,
         .arg = &winsize,
     } })).device_io_control;
     if (err < 0 or winsize.col == 0) return default_width;
