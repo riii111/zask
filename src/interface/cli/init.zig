@@ -225,6 +225,19 @@ fn testTmpPath(gpa: std.mem.Allocator, tmp: std.testing.TmpDir, name: []const u8
     return std.fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path, name });
 }
 
+fn testDetectedServiceOnly() !DetectedOptions {
+    return .{
+        .opts = try Options.parse(&.{ "demo", "--root", "." }),
+        .service = .{ .name = "web", .command = "pnpm run dev", .script = "dev" },
+    };
+}
+
+fn testDetectedServiceAndDocker() !DetectedOptions {
+    var detected = try testDetectedServiceOnly();
+    detected.compose_file = "infra/compose.yaml";
+    return detected;
+}
+
 test "init.options: parses scaffold flags" {
     const opts = try Options.parse(&.{ "demo", "--root", ".", "--force" });
 
@@ -300,11 +313,7 @@ test "init.config: renders minimal config verbatim" {
 }
 
 test "init.config: renders service and docker config verbatim" {
-    const detected = DetectedOptions{
-        .opts = try Options.parse(&.{ "demo", "--root", "." }),
-        .service = .{ .name = "web", .command = "pnpm run dev", .script = "dev" },
-        .compose_file = "infra/compose.yaml",
-    };
+    const detected = try testDetectedServiceAndDocker();
     const json = try renderConfig(std.testing.allocator, "demo", detected);
     defer std.testing.allocator.free(json);
     try std.testing.expectEqualStrings(
@@ -343,10 +352,7 @@ test "init.config: renders service and docker config verbatim" {
 }
 
 test "init.config: renders service-only config verbatim" {
-    const detected = DetectedOptions{
-        .opts = try Options.parse(&.{ "demo", "--root", "." }),
-        .service = .{ .name = "web", .command = "pnpm run dev", .script = "dev" },
-    };
+    const detected = try testDetectedServiceOnly();
     const json = try renderConfig(std.testing.allocator, "demo", detected);
     defer std.testing.allocator.free(json);
     try std.testing.expectEqualStrings(
@@ -374,11 +380,7 @@ test "init.config: renders service-only config verbatim" {
 test "init.config: renders service and docker config" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const detected = DetectedOptions{
-        .opts = try Options.parse(&.{ "demo", "--root", "." }),
-        .service = .{ .name = "web", .command = "pnpm run dev", .script = "dev" },
-        .compose_file = "infra/compose.yaml",
-    };
+    const detected = try testDetectedServiceAndDocker();
     const json = try renderConfig(std.testing.allocator, "demo", detected);
     defer std.testing.allocator.free(json);
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
