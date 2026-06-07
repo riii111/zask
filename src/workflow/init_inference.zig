@@ -9,6 +9,11 @@ pub const Input = struct {
 pub const Result = struct {
     service: ?DetectedService = null,
     compose_file: ?[]const u8 = null,
+
+    /// Frees owned detection outputs. Static labels and candidate names are borrowed.
+    pub fn deinit(self: Result, gpa: std.mem.Allocator) void {
+        if (self.service) |service| gpa.free(service.command);
+    }
 };
 
 pub const DetectedService = struct {
@@ -19,17 +24,21 @@ pub const DetectedService = struct {
 
 pub fn detect(gpa: std.mem.Allocator, io: std.Io, cwd: []const u8, input: Input) !Result {
     var result: Result = .{};
+    errdefer result.deinit(gpa);
     if (input.infer_service) result.service = try detectPackageService(gpa, io, cwd);
     if (input.infer_compose_file) result.compose_file = try detectComposeFile(gpa, io, cwd);
     return result;
 }
 
 fn detectPackageService(gpa: std.mem.Allocator, io: std.Io, cwd: []const u8) !?DetectedService {
-    const path = try std.fs.path.join(gpa, &.{ cwd, "package.json" });
-    defer gpa.free(path);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const path = try std.fs.path.join(scratch, &.{ cwd, "package.json" });
     if (!paths.exists(io, path)) return null;
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1024 * 1024)) catch return null;
-    const package = std.json.parseFromSliceLeaky(std.json.Value, gpa, bytes, .{ .ignore_unknown_fields = true }) catch return null;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, scratch, .limited(1024 * 1024)) catch return null;
+    const package = std.json.parseFromSliceLeaky(std.json.Value, scratch, bytes, .{ .ignore_unknown_fields = true }) catch return null;
     if (package != .object) return null;
     const scripts = package.object.get("scripts") orelse return null;
     if (scripts != .object) return null;
@@ -39,7 +48,7 @@ fn detectPackageService(gpa: std.mem.Allocator, io: std.Io, cwd: []const u8) !?D
         const value = scripts.object.get(script_name) orelse continue;
         if (value != .string) continue;
         return .{
-            .command = try std.fmt.allocPrint(gpa, "{s} run {s}", .{ try detectPackageManager(gpa, io, cwd), script_name }),
+            .command = try std.fmt.allocPrint(gpa, "{s} run {s}", .{ try detectPackageManager(scratch, io, cwd), script_name }),
             .script = script_name,
         };
     }
@@ -83,6 +92,21 @@ fn fileExistsIn(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, name: []con
 
 fn testTmpPath(gpa: std.mem.Allocator, tmp: std.testing.TmpDir, name: []const u8) ![]const u8 {
     return std.fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path, name });
+}
+
+test "initInference.result.deinit: empty result is a no-op" {
+    const result: Result = .{};
+
+    result.deinit(std.testing.allocator);
+}
+
+test "initInference.result.deinit: releases owned command" {
+    const command = try std.testing.allocator.dupe(u8, "npm run dev");
+    const result: Result = .{
+        .service = .{ .name = "web", .command = command, .script = "dev" },
+    };
+
+    result.deinit(std.testing.allocator);
 }
 
 test "initInference.detect: selects package dev script deterministically" {

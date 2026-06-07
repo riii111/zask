@@ -36,10 +36,12 @@ pub const Options = struct {
 pub fn run(ctx: *Context, opts: Options) !void {
     const io = ctx.base.io orelse return error.MissingIo;
     const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", ctx.base.gpa);
+    defer ctx.base.gpa.free(cwd);
     const project = opts.project orelse std.fs.path.basename(cwd);
     try validate.identifier(project);
 
     const config_path = try cli_context.projectConfigPath(ctx.base.gpa, ctx.base.environ, project);
+    defer ctx.base.gpa.free(config_path);
     if (!opts.force and paths.exists(io, config_path)) {
         try ctx.writer.print("Config already exists: {s}\n", .{config_path});
         try ctx.writer.print("Re-run with --force to overwrite it.\n", .{});
@@ -47,10 +49,16 @@ pub fn run(ctx: *Context, opts: Options) !void {
     }
 
     var detected = try applyDetections(ctx.base.gpa, io, cwd, opts);
-    detected.opts.root = try resolveRootFromCwd(ctx.base.gpa, cwd, detected.opts.root);
+    defer detected.deinit(ctx.base.gpa);
+    const resolved_root = try resolveRootFromCwd(ctx.base.gpa, cwd, detected.opts.root);
+    const resolved_root_owned = resolved_root.ptr != detected.opts.root.ptr;
+    defer if (resolved_root_owned) ctx.base.gpa.free(resolved_root);
+    detected.opts.root = resolved_root;
     const json = try renderConfig(ctx.base.gpa, project, detected);
     defer ctx.base.gpa.free(json);
-    _ = try config.Config.parse(ctx.base.gpa, json, try paths.home(ctx.base.environ));
+    var validation_arena = std.heap.ArenaAllocator.init(ctx.base.gpa);
+    defer validation_arena.deinit();
+    _ = try config.Config.parse(validation_arena.allocator(), json, try paths.home(ctx.base.environ));
 
     const config_dir = std.fs.path.dirname(config_path) orelse return error.InvalidPath;
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, config_dir, @enumFromInt(0o755));
@@ -71,6 +79,20 @@ const DetectedOptions = struct {
     opts: Options,
     service: ?init_inference.DetectedService = null,
     compose_file: ?[]const u8 = null,
+
+    /// Takes ownership of owned detection outputs from `init_inference.Result`.
+    fn fromOwnedDetectionResult(opts: Options, detected: init_inference.Result) DetectedOptions {
+        return .{
+            .opts = opts,
+            .service = detected.service,
+            .compose_file = detected.compose_file,
+        };
+    }
+
+    /// Frees owned values copied from detection helpers.
+    pub fn deinit(self: DetectedOptions, gpa: std.mem.Allocator) void {
+        if (self.service) |service| gpa.free(service.command);
+    }
 };
 
 fn validateOptions(opts: Options) !void {
@@ -106,14 +128,11 @@ fn resolveRootFromCwd(gpa: std.mem.Allocator, cwd: []const u8, root: []const u8)
 }
 
 fn applyDetections(gpa: std.mem.Allocator, io: std.Io, cwd: []const u8, opts: Options) !DetectedOptions {
-    var result = DetectedOptions{ .opts = opts };
     const detected = try init_inference.detect(gpa, io, cwd, .{
         .infer_service = true,
         .infer_compose_file = true,
     });
-    result.service = detected.service;
-    result.compose_file = detected.compose_file;
-    return result;
+    return DetectedOptions.fromOwnedDetectionResult(opts, detected);
 }
 
 fn renderConfig(gpa: std.mem.Allocator, project: []const u8, detected: DetectedOptions) ![]u8 {
@@ -225,17 +244,25 @@ fn testTmpPath(gpa: std.mem.Allocator, tmp: std.testing.TmpDir, name: []const u8
     return std.fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path, name });
 }
 
-fn testDetectedServiceOnly() !DetectedOptions {
+fn testDetectedServiceOnly(gpa: std.mem.Allocator) !DetectedOptions {
+    const command = try gpa.dupe(u8, "pnpm run dev");
+    errdefer gpa.free(command);
     return .{
         .opts = try Options.parse(&.{ "demo", "--root", "." }),
-        .service = .{ .name = "web", .command = "pnpm run dev", .script = "dev" },
+        .service = .{ .name = "web", .command = command, .script = "dev" },
     };
 }
 
-fn testDetectedServiceAndDocker() !DetectedOptions {
-    var detected = try testDetectedServiceOnly();
+fn testDetectedServiceAndDocker(gpa: std.mem.Allocator) !DetectedOptions {
+    var detected = try testDetectedServiceOnly(gpa);
     detected.compose_file = "infra/compose.yaml";
     return detected;
+}
+
+test "init.detectedOptions.deinit: empty result is a no-op" {
+    const detected: DetectedOptions = .{ .opts = .{} };
+
+    detected.deinit(std.testing.allocator);
 }
 
 test "init.options: parses scaffold flags" {
@@ -313,7 +340,8 @@ test "init.config: renders minimal config verbatim" {
 }
 
 test "init.config: renders service and docker config verbatim" {
-    const detected = try testDetectedServiceAndDocker();
+    const detected = try testDetectedServiceAndDocker(std.testing.allocator);
+    defer detected.deinit(std.testing.allocator);
     const json = try renderConfig(std.testing.allocator, "demo", detected);
     defer std.testing.allocator.free(json);
     try std.testing.expectEqualStrings(
@@ -352,7 +380,8 @@ test "init.config: renders service and docker config verbatim" {
 }
 
 test "init.config: renders service-only config verbatim" {
-    const detected = try testDetectedServiceOnly();
+    const detected = try testDetectedServiceOnly(std.testing.allocator);
+    defer detected.deinit(std.testing.allocator);
     const json = try renderConfig(std.testing.allocator, "demo", detected);
     defer std.testing.allocator.free(json);
     try std.testing.expectEqualStrings(
@@ -380,7 +409,8 @@ test "init.config: renders service-only config verbatim" {
 test "init.config: renders service and docker config" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const detected = try testDetectedServiceAndDocker();
+    const detected = try testDetectedServiceAndDocker(arena.allocator());
+    defer detected.deinit(arena.allocator());
     const json = try renderConfig(std.testing.allocator, "demo", detected);
     defer std.testing.allocator.free(json);
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
@@ -464,11 +494,9 @@ test "init.detect: infers package script" {
 test "init.report: prints detected values and omitted defaults" {
     var buffer: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    const detected = DetectedOptions{
-        .opts = .{},
-        .service = .{ .name = "web", .command = "npm run dev", .script = "dev" },
-        .compose_file = "docker-compose.yml",
-    };
+    var detected = try testDetectedServiceOnly(std.testing.allocator);
+    defer detected.deinit(std.testing.allocator);
+    detected.compose_file = "docker-compose.yml";
 
     try writeReport(&writer, "demo", detected);
 
@@ -556,4 +584,29 @@ test "init.run: overwrites existing config with force" {
 
     try std.testing.expectEqualStrings(expected_root, project_root);
     try std.testing.expectEqual(@as(usize, 0), (try cfg.services()).len);
+}
+
+test "init.run: releases temporary allocations on success" {
+    var gpa_state = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa_state.deinit() == .ok) catch @panic("leak");
+    const gpa = gpa_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    var environ = env.Map.init(gpa);
+    defer environ.deinit();
+    const base = try tmp.dir.realPathFileAlloc(threaded.io(), ".", gpa);
+    defer gpa.free(base);
+    const config_home = try std.fs.path.join(gpa, &.{ base, "xdg" });
+    defer gpa.free(config_home);
+    const package_json = try std.fs.path.join(gpa, &.{ base, "package.json" });
+    defer gpa.free(package_json);
+    try environ.put("HOME", "/home/me");
+    try environ.put("XDG_CONFIG_HOME", config_home);
+    try paths.writeFile(threaded.io(), package_json, "{\"scripts\":{\"dev\":\"vite\"}}\n");
+    var buffer: [2048]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var ctx = testContext(gpa, threaded.io(), &environ, &writer);
+
+    try run(&ctx, try Options.parse(&.{"demo"}));
 }
