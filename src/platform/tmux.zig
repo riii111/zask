@@ -725,7 +725,7 @@ test "tmux.observePane: returns unavailable on pane info permission denied" {
 test "tmux.observePane: returns unavailable when pane info cannot be captured" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
-    recorder.term = .{ .signal = std.posix.SIG.TERM };
+    recorder.term = .{ .signal = .TERM };
     const client = testClient(&recorder);
 
     const observation = client.observePane("api");

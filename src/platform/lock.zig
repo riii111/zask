@@ -5,23 +5,23 @@ const paths = @import("paths.zig");
 /// `fake` lets tests model a known holder pid as alive or dead deterministically.
 pub const Probe = union(enum) {
     system,
-    fake: struct { pid: std.posix.pid_t, alive: bool },
+    fake: struct { pid: std.c.pid_t, alive: bool },
 
-    fn currentPid(self: Probe) std.posix.pid_t {
+    fn currentPid(self: Probe) std.c.pid_t {
         return switch (self) {
             .system => std.c.getpid(),
             .fake => |f| f.pid,
         };
     }
 
-    fn alive(self: Probe, pid: std.posix.pid_t) bool {
+    fn alive(self: Probe, pid: std.c.pid_t) bool {
         switch (self) {
             .system => {
-                std.posix.kill(pid, @enumFromInt(0)) catch |err| switch (err) {
-                    error.ProcessNotFound => return false,
-                    else => return true,
+                return switch (std.c.errno(std.c.kill(pid, @enumFromInt(0)))) {
+                    .SUCCESS => true,
+                    .SRCH => false,
+                    else => true,
                 };
-                return true;
             },
             .fake => |f| return f.alive and pid == f.pid,
         }
@@ -95,7 +95,7 @@ fn lockAlive(gpa: std.mem.Allocator, io: std.Io, probe: Probe, dir: []const u8) 
     defer gpa.free(bytes);
     const pid_text = std.mem.trim(u8, bytes, " \t\r\n");
     if (pid_text.len == 0) return false;
-    const pid = std.fmt.parseInt(std.posix.pid_t, pid_text, 10) catch return false;
+    const pid = std.fmt.parseInt(std.c.pid_t, pid_text, 10) catch return false;
     if (pid <= 0) return false;
     return probe.alive(pid);
 }
