@@ -225,6 +225,19 @@ fn testTmpPath(gpa: std.mem.Allocator, tmp: std.testing.TmpDir, name: []const u8
     return std.fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path, name });
 }
 
+fn testDetectedServiceOnly() !DetectedOptions {
+    return .{
+        .opts = try Options.parse(&.{ "demo", "--root", "." }),
+        .service = .{ .name = "web", .command = "pnpm run dev", .script = "dev" },
+    };
+}
+
+fn testDetectedServiceAndDocker() !DetectedOptions {
+    var detected = try testDetectedServiceOnly();
+    detected.compose_file = "infra/compose.yaml";
+    return detected;
+}
+
 test "init.options: parses scaffold flags" {
     const opts = try Options.parse(&.{ "demo", "--root", ".", "--force" });
 
@@ -279,6 +292,7 @@ test "init.config: renders parseable minimal config" {
     try std.testing.expectEqualStrings("demo", try cfg.projectName());
     const project_root = try cfg.projectRoot(arena.allocator());
     try std.testing.expectEqualStrings(".", project_root);
+    try std.testing.expect(!cfg.dockerEnabled());
     try std.testing.expectEqual(@as(usize, 0), (try cfg.services()).len);
 }
 
@@ -299,11 +313,7 @@ test "init.config: renders minimal config verbatim" {
 }
 
 test "init.config: renders service and docker config verbatim" {
-    const detected = DetectedOptions{
-        .opts = try Options.parse(&.{ "demo", "--root", "." }),
-        .service = .{ .name = "web", .command = "pnpm run dev", .script = "dev" },
-        .compose_file = "infra/compose.yaml",
-    };
+    const detected = try testDetectedServiceAndDocker();
     const json = try renderConfig(std.testing.allocator, "demo", detected);
     defer std.testing.allocator.free(json);
     try std.testing.expectEqualStrings(
@@ -341,14 +351,36 @@ test "init.config: renders service and docker config verbatim" {
     , json);
 }
 
+test "init.config: renders service-only config verbatim" {
+    const detected = try testDetectedServiceOnly();
+    const json = try renderConfig(std.testing.allocator, "demo", detected);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        \\{
+        \\  "project": {
+        \\    "name": "demo",
+        \\    "root": "."
+        \\  },
+        \\  "groups": [
+        \\    {
+        \\      "name": "frontend",
+        \\      "services": [
+        \\        {
+        \\          "name": "web",
+        \\          "command": "pnpm run dev"
+        \\        }
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+        \\
+    , json);
+}
+
 test "init.config: renders service and docker config" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const detected = DetectedOptions{
-        .opts = try Options.parse(&.{ "demo", "--root", "." }),
-        .service = .{ .name = "web", .command = "pnpm run dev", .script = "dev" },
-        .compose_file = "infra/compose.yaml",
-    };
+    const detected = try testDetectedServiceAndDocker();
     const json = try renderConfig(std.testing.allocator, "demo", detected);
     defer std.testing.allocator.free(json);
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
@@ -361,20 +393,7 @@ test "init.config: renders service and docker config" {
     try std.testing.expect(cfg.dockerEnabled());
     try std.testing.expectEqualStrings("compose.yaml", cfg.dockerComposeFile());
     try std.testing.expectEqualStrings("./infra", try cfg.dockerDir(arena.allocator()));
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"dir\": \".\"") == null);
     try std.testing.expectEqual(@as(usize, 2), cfg.phases().len);
-}
-
-test "init.config: omits docker when compose is not detected" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const opts = try Options.parse(&.{"demo"});
-    const json = try renderConfig(std.testing.allocator, "demo", .{ .opts = opts });
-    defer std.testing.allocator.free(json);
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-
-    try std.testing.expect(!cfg.dockerEnabled());
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"docker\"") == null);
 }
 
 test "init.detect: infers compose file" {
