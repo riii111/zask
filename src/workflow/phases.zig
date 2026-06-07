@@ -5,6 +5,7 @@ const config_value = @import("../model/config_value.zig");
 const configured_path = @import("configured_path.zig");
 const lifecycle_mod = @import("lifecycle.zig");
 const pathing = @import("pathing.zig");
+const process_probe = @import("../platform/process_probe.zig");
 const proc_runner = @import("../platform/runner.zig");
 const progress_mod = @import("progress.zig");
 const validate = @import("../model/validate.zig");
@@ -203,9 +204,40 @@ fn writePortFailure(ctx: anytype, phase: std.json.Value, profile: []const u8, po
     try writer.print("  phase: {s}\n", .{phase_label});
     try writer.print("  expected: localhost:{d}\n", .{port});
     try writer.print("  waited: {d}s\n", .{timeout});
-    if (service) |name| try writeLastLog(ctx, name, writer);
-    if (service) |name| try writeNextLogsHint(ctx, name, writer);
+    var observed = process_probe.ListenPorts.empty(.unavailable);
+    defer observed.deinit(ctx.gpa);
+    if (service) |name| {
+        observed = try observeListenPorts(ctx, name);
+        try writeListenPortObservation(writer, observed);
+        const log_context = try writeLastLog(ctx, name, writer);
+        defer ctx.gpa.free(log_context);
+        try writeStartupFailureHints(writer, name, port, observed, log_context);
+        try writeNextLogsHint(ctx, name, writer);
+    }
     try writer.flush();
+}
+
+fn observeListenPorts(ctx: anytype, service: []const u8) !process_probe.ListenPorts {
+    const info = ctx.tmux.paneInfo(service) catch return process_probe.ListenPorts.empty(.unavailable);
+    defer info.deinit(ctx.gpa);
+    if (info.dead) return process_probe.ListenPorts.empty(.none);
+    const pid = std.mem.trim(u8, info.pid, " \t\r\n");
+    return process_probe.observeDescendantListenPorts(ctx.gpa, ctx.runner, pid);
+}
+
+fn writeListenPortObservation(writer: *std.Io.Writer, observed: process_probe.ListenPorts) !void {
+    switch (observed.state) {
+        .unavailable => try writer.writeAll("  observed: unavailable\n"),
+        .none => try writer.writeAll("  observed: no listen port from service process\n"),
+        .ports => {
+            try writer.writeAll("  observed: ");
+            for (observed.ports, 0..) |port, index| {
+                if (index > 0) try writer.writeAll(", ");
+                try writer.print("localhost:{d}", .{port});
+            }
+            try writer.writeByte('\n');
+        },
+    }
 }
 
 fn serviceForPort(ctx: anytype, phase: std.json.Value, profile: []const u8, port: i64) !?[]const u8 {
@@ -410,10 +442,67 @@ fn writeDisplayLine(writer: *std.Io.Writer, line: []const u8) !void {
     }
 }
 
-fn writeLastLog(ctx: anytype, window: []const u8, writer: *std.Io.Writer) !void {
-    const line = try ctx.tmux.captureLastLine(window);
-    defer ctx.gpa.free(line);
-    if (line.len > 0) try writer.print("  last log: {s}\n", .{line});
+fn writeLastLog(ctx: anytype, window: []const u8, writer: *std.Io.Writer) ![]const u8 {
+    const tail = try ctx.tmux.captureTail(window, diagnostic_tail_lines);
+    defer tail.deinit(ctx.gpa);
+    if (tail.lines.len == 0) return ctx.gpa.dupe(u8, "");
+    try writer.print("  last log: {s}\n", .{tail.lines[tail.lines.len - 1]});
+
+    var out: std.Io.Writer.Allocating = .init(ctx.gpa);
+    errdefer out.deinit();
+    for (tail.lines, 0..) |line, index| {
+        if (index > 0) try out.writer.writeByte('\n');
+        try out.writer.writeAll(line);
+    }
+    return out.toOwnedSlice();
+}
+
+fn writeStartupFailureHints(writer: *std.Io.Writer, service: []const u8, expected_port: i64, observed: process_probe.ListenPorts, log_context: []const u8) !void {
+    if (observed.state == .ports and !observed.contains(expected_port) and observed.ports.len > 0) {
+        try writer.print("Hint: {s} is listening on {d}, but config port is {d}.\n", .{ service, observed.ports[0], expected_port });
+    }
+    if (startupFailureHint(log_context)) |hint| try writer.print("Hint: {s}\n", .{hint});
+}
+
+fn startupFailureHint(last_log: []const u8) ?[]const u8 {
+    if (last_log.len == 0) return null;
+    if (containsIgnoreCase(last_log, "address already in use") or containsIgnoreCase(last_log, "eaddrinuse"))
+        return "port is already in use; stop the existing process or change the configured port.";
+    if (containsIgnoreCase(last_log, "connection refused"))
+        return "a dependency refused the connection; check whether the upstream service is running.";
+    if (containsIgnoreCase(last_log, "environment variable") or
+        containsRequiredConfigToken(last_log) or
+        containsIgnoreCase(last_log, "missing required"))
+        return "required environment may be missing; check env_file or the service command environment.";
+    return null;
+}
+
+fn containsRequiredConfigToken(haystack: []const u8) bool {
+    const marker = " is required";
+    var offset: usize = 0;
+    while (offset < haystack.len) {
+        const relative = std.ascii.indexOfIgnoreCase(haystack[offset..], marker) orelse return false;
+        const marker_index = offset + relative;
+        offset = marker_index + marker.len;
+        if (marker_index == 0) continue;
+        var start = marker_index;
+        while (start > 0 and !std.ascii.isWhitespace(haystack[start - 1])) : (start -= 1) {}
+        const token = std.mem.trim(u8, haystack[start..marker_index], " \t\r\n`'\".:,;()[]{}");
+        if (token.len == 0) continue;
+        if (std.mem.indexOfScalar(u8, token, '_') != null or containsAsciiUpper(token)) return true;
+    }
+    return false;
+}
+
+fn containsAsciiUpper(value: []const u8) bool {
+    for (value) |byte| {
+        if (byte >= 'A' and byte <= 'Z') return true;
+    }
+    return false;
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    return std.ascii.indexOfIgnoreCase(haystack, needle) != null;
 }
 
 fn writeNextLogsHint(ctx: anytype, service: []const u8, writer: *std.Io.Writer) !void {
@@ -1047,7 +1136,92 @@ test "phases.runServicePhase: reports port readiness failure" {
         \\  phase: backend
         \\  expected: localhost:5432
         \\  waited: 5s
+        \\  observed: unavailable
         \\  last log: Error: address already in use
+        \\Hint: port is already in use; stop the existing process or change the configured port.
+        \\
+        \\Next:
+        \\  zask --config 'config.json' logs api
+        \\
+    , writer.buffered());
+}
+
+test "phases.runServicePhase: reports no observed port for dead pane" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":5432}]}],
+        \\  "startup_order": [{"name":"backend","group":"backend","wait_ports":[5432],"port_wait_timeout_seconds":0}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("1|130|12345|node\n", "", .{ .exited = 0 });
+    try recorder.enqueue("server exited\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [768]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.StartupFailed, runServicePhase(lifecycle, cfg.phases()[0], "all", &writer, .observe));
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "  observed: no listen port from service process\n") != null);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "lsof") == null);
+}
+
+test "phases.runServicePhase: reports mismatched observed listen port" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","port":5432}]}],
+        \\  "startup_order": [{"name":"backend","group":"backend","wait_ports":[5432],"port_wait_timeout_seconds":1}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("\n", "", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("Listening on 15432\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    try recorder.enqueue("0|0|12345|node\n", "", .{ .exited = 0 });
+    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    try recorder.enqueue(
+        \\COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+        \\node    12346 me     7u  IPv4 0x123      0t0  TCP *:15432 (LISTEN)
+        \\
+    , "", .{ .exited = 0 });
+    try recorder.enqueue("Listening on 15432\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [768]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.StartupFailed, runServicePhase(lifecycle, cfg.phases()[0], "all", &writer, .observe));
+
+    try std.testing.expectEqualStrings(
+        \\Starting api...
+        \\Waiting for api on localhost:5432...
+        \\
+        \\Error: api did not become ready
+        \\  phase: backend
+        \\  expected: localhost:5432
+        \\  waited: 1s
+        \\  observed: localhost:15432
+        \\  last log: Listening on 15432
+        \\Hint: api is listening on 15432, but config port is 5432.
         \\
         \\Next:
         \\  zask --config 'config.json' logs api
@@ -1091,6 +1265,41 @@ test "phases.runServicePhase: reports unmatched port without service hints" {
         \\  waited: 180s
         \\
     , writer.buffered());
+}
+
+test "phases.startupFailureHint: maps common startup failures" {
+    try std.testing.expectEqualStrings(
+        "required environment may be missing; check env_file or the service command environment.",
+        startupFailureHint("[ERROR] missing required environment variable API_TOKEN").?,
+    );
+    try std.testing.expectEqualStrings(
+        "a dependency refused the connection; check whether the upstream service is running.",
+        startupFailureHint("Connection refused while calling upstream").?,
+    );
+    try std.testing.expectEqualStrings(
+        "port is already in use; stop the existing process or change the configured port.",
+        startupFailureHint("listen EADDRINUSE 127.0.0.1:3000").?,
+    );
+    try std.testing.expectEqualStrings(
+        "required environment may be missing; check env_file or the service command environment.",
+        startupFailureHint("TypeError: client_id is required").?,
+    );
+    try std.testing.expectEqualStrings(
+        "required environment may be missing; check env_file or the service command environment.",
+        startupFailureHint("name is required\nTypeError: client_id is required").?,
+    );
+    try std.testing.expect(startupFailureHint("server exited") == null);
+    try std.testing.expect(startupFailureHint("name is required") == null);
+}
+
+test "phases.startupFailureHint: checks previous tail lines" {
+    try std.testing.expectEqualStrings(
+        "required environment may be missing; check env_file or the service command environment.",
+        startupFailureHint(
+            \\[ERROR] missing required environment variable API_TOKEN
+            \\    at main
+        ).?,
+    );
 }
 
 test "phases.phaseCwd: rejects path traversal" {

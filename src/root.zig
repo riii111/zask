@@ -12,6 +12,7 @@ pub const lock = @import("platform/lock.zig");
 pub const observations = @import("model/observations.zig");
 pub const phases = @import("workflow/phases.zig");
 pub const paths = @import("platform/paths.zig");
+pub const process_probe = @import("platform/process_probe.zig");
 pub const runner = @import("platform/runner.zig");
 pub const runtime = @import("workflow/runtime.zig");
 pub const shell = @import("platform/shell.zig");

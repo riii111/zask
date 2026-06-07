@@ -32,6 +32,7 @@ pub const Runtime = struct {
     tmux_impl: tmux_client.Client,
     docker_impl: docker_client.Compose,
     validate_configured_dirs: bool = true,
+    emit_env_file_tips: bool = true,
     lock_probe: lock.Probe = .system,
 
     pub fn status(self: Runtime, writer: *std.Io.Writer) !void {
@@ -166,7 +167,7 @@ pub const Runtime = struct {
         }
         try progress.step("Opening workspace...\n", .{});
         const tx = self.tmux();
-        try self.ensureOpenConfiguredDirs(scratch, progress.raw());
+        try self.ensureOpenConfiguredPaths(scratch, progress.raw());
         try self.openSessionWithDashboardWindow(scratch);
         errdefer tx.killSession() catch {};
         try self.installSessionOptions(scratch);
@@ -196,11 +197,6 @@ pub const Runtime = struct {
         };
         defer guard.release();
         try self.closeUnlockedWithProgress(progress);
-    }
-
-    fn closeUnlocked(self: Runtime, writer: *std.Io.Writer) !void {
-        var progress = progress_mod.Line.init(writer);
-        try self.closeUnlockedWithProgress(&progress);
     }
 
     /// Teardown order is load-bearing: stop services and docker first so their
@@ -281,6 +277,7 @@ pub const Runtime = struct {
             .tmux = self.tmux(),
             .docker = self.docker(),
             .validate_configured_dirs = self.validate_configured_dirs,
+            .emit_env_file_tips = self.emit_env_file_tips,
             .command_hint = self.command_hint,
         };
     }
@@ -337,7 +334,7 @@ pub const Runtime = struct {
         }
     }
 
-    fn ensureOpenConfiguredDirs(self: Runtime, scratch: std.mem.Allocator, writer: *std.Io.Writer) !void {
+    fn ensureOpenConfiguredPaths(self: Runtime, scratch: std.mem.Allocator, writer: *std.Io.Writer) !void {
         if (!self.validate_configured_dirs) return;
         const project_root = try self.cfg.projectRoot(scratch);
         try self.ensureConfiguredDir(scratch, writer, .{
@@ -354,6 +351,16 @@ pub const Runtime = struct {
                 .project_root = project_root,
                 .path = try self.cfg.serviceDir(scratch, service),
             });
+            const env_files = try config.Config.serviceEnvFiles(scratch, service);
+            for (env_files) |env_file| {
+                try self.ensureConfiguredFile(scratch, writer, .{
+                    .field = "env_file",
+                    .service = name,
+                    .configured = env_file.path,
+                    .project_root = project_root,
+                    .path = try self.cfg.serviceEnvFilePath(scratch, service, env_file),
+                });
+            }
         }
         if (self.cfg.dockerEnabled()) {
             try self.ensureConfiguredDir(scratch, writer, .{
@@ -367,6 +374,10 @@ pub const Runtime = struct {
 
     fn ensureConfiguredDir(self: Runtime, scratch: std.mem.Allocator, writer: *std.Io.Writer, problem: configured_path.Problem) !void {
         try configured_path.ensureDir(scratch, self.io, writer, problem);
+    }
+
+    fn ensureConfiguredFile(self: Runtime, scratch: std.mem.Allocator, writer: *std.Io.Writer, problem: configured_path.Problem) !void {
+        try configured_path.ensureFile(scratch, self.io, writer, problem);
     }
 
     fn focusDashboard(self: Runtime) !void {
@@ -419,6 +430,15 @@ fn composeStatusText(state: observations.ComposeState) []const u8 {
         .empty => "stopped",
         .unavailable => "unknown",
     };
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+fn testCloseUnlocked(runtime: Runtime, writer: *std.Io.Writer) !void {
+    var progress = progress_mod.Line.init(writer);
+    try runtime.closeUnlockedWithProgress(&progress);
 }
 
 test "runtime.status: maps observations to text" {
@@ -566,7 +586,7 @@ test "runtime.close: kills session after signaling services" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.closeUnlocked(&writer);
+    try testCloseUnlocked(runtime, &writer);
 
     try proc_runner.expectCommandOrder(&recorder, "C-c", "kill-session");
     const kill = recorder.commands.items[recorder.commands.items.len - 1];
@@ -598,7 +618,7 @@ test "runtime.close: kills session after resource stop" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.closeUnlocked(&writer);
+    try testCloseUnlocked(runtime, &writer);
 
     const kill_index = recorder.commands.items.len - 1;
     try proc_runner.expectCommandOrder(&recorder, "C-c", "down");
@@ -628,7 +648,7 @@ test "runtime.close: skips stop polling before killing session" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.closeUnlocked(&writer);
+    try testCloseUnlocked(runtime, &writer);
 
     const kill_index = recorder.commands.items.len - 1;
     try proc_runner.expectCommandOrder(&recorder, "C-c", "kill-session");
@@ -656,7 +676,7 @@ test "runtime.close: kills session even when a service signal fails" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.closeUnlocked(&writer);
+    try testCloseUnlocked(runtime, &writer);
 
     const kill = recorder.commands.items[recorder.commands.items.len - 1];
     try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "demo" });
@@ -682,7 +702,7 @@ test "runtime.close: kills session even when send-keys fails" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.closeUnlocked(&writer);
+    try testCloseUnlocked(runtime, &writer);
 
     try proc_runner.expectCommandContaining(&recorder, "C-c");
     const kill = recorder.commands.items[recorder.commands.items.len - 1];
@@ -918,6 +938,41 @@ test "runtime.open: reports missing service directory before creating session" {
 
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Error: configured directory not found") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "field: service.dir") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "service: api") != null);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "new-session") == null);
+}
+
+test "runtime.open: reports missing env file before creating session" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    const json = try std.fmt.allocPrint(gpa,
+        \\{{
+        \\  "project": {{"name":"demo","root":"{s}"}},
+        \\  "groups": [{{"name":"backend","services":[{{"name":"api","command":"serve","env_file":"missing.env"}}]}}]
+        \\}}
+    , .{root});
+    var recorder = proc_runner.Recorder.init(gpa);
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = gpa, .io = io, .recorder = &recorder };
+    const cfg = try config.Config.parse(gpa, json, "/home/me");
+    var runtime = testRuntime(gpa, run, cfg);
+    runtime.io = io;
+    runtime.validate_configured_dirs = true;
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var progress = progress_mod.Line.init(&writer);
+
+    try std.testing.expectError(error.ConfigPathNotFound, runtime.openUnlockedWithProgress("all", &progress));
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Error: configured file not found") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "field: env_file") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "service: api") != null);
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "new-session") == null);
 }
@@ -1574,5 +1629,6 @@ fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.C
         .tmux_impl = .{ .gpa = gpa, .runner = runner, .session = "demo" },
         .docker_impl = .{ .gpa = gpa, .runner = runner, .dir = "/tmp/demo", .file = "compose.yaml" },
         .validate_configured_dirs = false,
+        .emit_env_file_tips = false,
     };
 }
