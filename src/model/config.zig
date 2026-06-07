@@ -86,6 +86,7 @@ pub const Config = struct {
         return name;
     }
 
+    /// Returns borrowed config/home storage unless `~/...` expansion allocates.
     pub fn projectRoot(self: Config, gpa: std.mem.Allocator) ![]const u8 {
         return self.expandHome(gpa, try self.requiredString(&.{ "project", "root" }));
     }
@@ -98,12 +99,13 @@ pub const Config = struct {
         return self.optionalBool(&.{ "docker", "enabled" }, false);
     }
 
+    /// Returns `projectRoot` when no docker subdir is configured; otherwise
+    /// returns an allocated joined path.
     pub fn dockerDir(self: Config, gpa: std.mem.Allocator) ![]const u8 {
-        const root = try self.projectRoot(gpa);
         const dir = self.optionalString(&.{ "docker", "dir" }, "");
-        if (dir.len == 0) return root;
+        if (dir.len == 0) return self.projectRoot(gpa);
         try validate.relativeSubPath(dir);
-        return std.fs.path.join(gpa, &.{ root, dir });
+        return self.joinProjectRoot(gpa, &.{dir});
     }
 
     /// The compose directory relative to the project root. Callers already running
@@ -196,11 +198,10 @@ pub const Config = struct {
     pub fn serviceEnvFilePath(self: Config, gpa: std.mem.Allocator, service: Value, env_file: EnvFile) ![]const u8 {
         if (std.fs.path.isAbsolute(env_file.path) or std.mem.startsWith(u8, env_file.path, "~"))
             return self.expandHome(gpa, env_file.path);
-        const base = switch (env_file.base) {
-            .project => try self.projectRoot(gpa),
-            .service => try self.serviceDir(gpa, service),
-        };
-        return std.fs.path.join(gpa, &.{ base, env_file.path });
+        switch (env_file.base) {
+            .project => return self.joinProjectRoot(gpa, &.{env_file.path}),
+            .service => return self.resolveServiceDirPath(gpa, service, &.{env_file.path}),
+        }
     }
 
     pub fn serviceHealthcheckType(service: Value) []const u8 {
@@ -214,13 +215,7 @@ pub const Config = struct {
     }
 
     pub fn serviceDir(self: Config, gpa: std.mem.Allocator, service: Value) ![]const u8 {
-        const dir = config_value.optionalObjectString(service, "dir", ".");
-        const external = config_value.optionalObjectBool(service, "external", false);
-        if (external or std.fs.path.isAbsolute(dir) or std.mem.startsWith(u8, dir, "~")) {
-            return self.expandHome(gpa, dir);
-        }
-        try validate.relativeSubPath(dir);
-        return std.fs.path.join(gpa, &.{ try self.projectRoot(gpa), dir });
+        return self.resolveServiceDirPath(gpa, service, &.{});
     }
 
     pub fn serviceDirValue(service: Value) []const u8 {
@@ -242,6 +237,8 @@ pub const Config = struct {
         return error.UnknownService;
     }
 
+    /// Caller owns the returned outer slice; service names inside it borrow
+    /// strings from the parsed config.
     pub fn resolveGroup(self: Config, gpa: std.mem.Allocator, name: []const u8) ![][]const u8 {
         if (self.get(&.{ "group_aliases", name })) |alias| {
             if (alias == .array) return stringArray(gpa, alias.array.items);
@@ -345,6 +342,51 @@ pub const Config = struct {
             return std.fs.path.join(gpa, &.{ self.home, path[2..] });
         }
         return path;
+    }
+
+    fn joinProjectRoot(self: Config, gpa: std.mem.Allocator, parts: []const []const u8) ![]const u8 {
+        return self.joinExpandedBase(gpa, try self.configuredProjectRoot(), parts);
+    }
+
+    fn joinExpandedBase(self: Config, gpa: std.mem.Allocator, base: []const u8, parts: []const []const u8) ![]const u8 {
+        var join_parts: [4][]const u8 = undefined;
+        var count: usize = 0;
+
+        if (std.mem.eql(u8, base, "~")) {
+            join_parts[count] = self.home;
+            count += 1;
+        } else if (std.mem.startsWith(u8, base, "~/")) {
+            join_parts[count] = self.home;
+            count += 1;
+            join_parts[count] = base[2..];
+            count += 1;
+        } else {
+            join_parts[count] = base;
+            count += 1;
+        }
+
+        for (parts) |part| {
+            join_parts[count] = part;
+            count += 1;
+        }
+
+        return std.fs.path.join(gpa, join_parts[0..count]);
+    }
+
+    fn resolveServiceDirPath(self: Config, gpa: std.mem.Allocator, service: Value, parts: []const []const u8) ![]const u8 {
+        const dir = config_value.optionalObjectString(service, "dir", ".");
+        const external = config_value.optionalObjectBool(service, "external", false);
+        if (external or std.fs.path.isAbsolute(dir) or std.mem.startsWith(u8, dir, "~")) {
+            if (parts.len == 0) return self.expandHome(gpa, dir);
+            return self.joinExpandedBase(gpa, dir, parts);
+        }
+        try validate.relativeSubPath(dir);
+        if (parts.len == 0) return self.joinProjectRoot(gpa, &.{dir});
+
+        var join_parts: [4][]const u8 = undefined;
+        join_parts[0] = dir;
+        for (parts, 0..) |part, index| join_parts[index + 1] = part;
+        return self.joinProjectRoot(gpa, join_parts[0 .. parts.len + 1]);
     }
 };
 
@@ -996,6 +1038,24 @@ test "config.parse: loads defaults and resolves paths" {
     try std.testing.expectEqualStrings("api", group[0]);
 }
 
+test "config.dockerDir: joins expanded home root without leaking intermediate allocations" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"~/work/demo"},
+        \\  "docker": {"compose": "infra/compose.yaml"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try parseTestConfig(&arena, json);
+
+    const docker_dir = try cfg.dockerDir(std.testing.allocator);
+    defer std.testing.allocator.free(docker_dir);
+
+    try std.testing.expectEqualStrings("/home/me/work/demo/infra", docker_dir);
+}
+
 test "config.resolvePhaseGroup: resolves profiles and phase group overrides" {
     const json =
         \\{
@@ -1119,6 +1179,27 @@ test "config.env_file: normalizes project group and service scopes" {
     try std.testing.expectEqualStrings("/tmp/demo/.env", try cfg.serviceEnvFilePath(arena.allocator(), service, env_files[0]));
     try std.testing.expectEqualStrings("/tmp/demo/backend/.env", try cfg.serviceEnvFilePath(arena.allocator(), service, env_files[1]));
     try std.testing.expectEqualStrings("/tmp/demo/services/api/.env.local", try cfg.serviceEnvFilePath(arena.allocator(), service, env_files[2]));
+}
+
+test "config.serviceEnvFilePath: joins service-relative paths under expanded home root without leaking" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"~/work/demo"},
+        \\  "groups": [
+        \\    {"name":"backend","services":[{"name":"api","dir":"backend","command":"serve","env_file":".env.local"}]}
+        \\  ]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try parseTestConfig(&arena, json);
+    const service = try cfg.findService("api");
+    const env_files = try Config.serviceEnvFiles(arena.allocator(), service);
+
+    const env_path = try cfg.serviceEnvFilePath(std.testing.allocator, service, env_files[0]);
+    defer std.testing.allocator.free(env_path);
+
+    try std.testing.expectEqualStrings("/home/me/work/demo/backend/.env.local", env_path);
 }
 
 test "config.parse: rejects unknown service runtime" {
