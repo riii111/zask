@@ -73,7 +73,7 @@ pub fn parseSize(arg: []const u8) !u16 {
 fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
     const io = context.io orelse return error.MissingIo;
     var resolved = try resolveConfigPath(context.gpa, io, context, parsed);
-    defer resolved.deinit(context.gpa);
+    defer resolved.deinitExpectedProjectName(context.gpa);
     if (context.error_context) |err_ctx| {
         err_ctx.config_path = resolved.path;
         err_ctx.config_source = resolved.source;
@@ -126,7 +126,8 @@ const ResolvedConfigPath = struct {
     expected_project_name: ?[]const u8 = null,
     expected_project_name_owned: bool = false,
 
-    fn deinit(self: ResolvedConfigPath, gpa: std.mem.Allocator) void {
+    /// Frees only the temporary project-name copy used for named-config validation.
+    fn deinitExpectedProjectName(self: ResolvedConfigPath, gpa: std.mem.Allocator) void {
         if (self.expected_project_name_owned) {
             gpa.free(self.expected_project_name.?);
         }
@@ -209,11 +210,13 @@ fn inferNamedConfigPath(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env
     const project_name = try gpa.dupe(u8, project);
     errdefer gpa.free(project_name);
     const path = try projectConfigPath(gpa, environ, project);
-    errdefer gpa.free(path);
-    std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return error.ConfigNotFound,
-        else => return err,
-    };
+    {
+        errdefer gpa.free(path);
+        std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return error.ConfigNotFound,
+            else => return err,
+        };
+    }
     return .{
         .path = try absoluteOwnedConfigPath(gpa, io, path),
         .source = .inferred_named,
@@ -435,7 +438,7 @@ test "cli.context.inferNamedConfigPath: releases inferred project name" {
     }
 
     var resolved = try inferNamedConfigPath(gpa, io, &environ);
-    defer resolved.deinit(gpa);
+    defer resolved.deinitExpectedProjectName(gpa);
     defer gpa.free(resolved.path);
 
     try std.testing.expectEqual(ConfigSource.inferred_named, resolved.source);
