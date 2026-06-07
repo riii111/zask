@@ -100,6 +100,15 @@ test "initInference.result.deinit: empty result is a no-op" {
     result.deinit(std.testing.allocator);
 }
 
+test "initInference.result.deinit: releases owned command" {
+    const command = try std.testing.allocator.dupe(u8, "npm run dev");
+    const result: Result = .{
+        .service = .{ .name = "web", .command = command, .script = "dev" },
+    };
+
+    result.deinit(std.testing.allocator);
+}
+
 test "initInference.detect: selects package dev script deterministically" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

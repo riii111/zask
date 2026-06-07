@@ -80,6 +80,15 @@ const DetectedOptions = struct {
     service: ?init_inference.DetectedService = null,
     compose_file: ?[]const u8 = null,
 
+    /// Consumes owned detection outputs from `init_inference.Result`.
+    fn fromDetectionResult(opts: Options, detected: init_inference.Result) DetectedOptions {
+        return .{
+            .opts = opts,
+            .service = detected.service,
+            .compose_file = detected.compose_file,
+        };
+    }
+
     /// Frees owned values copied from detection helpers.
     pub fn deinit(self: DetectedOptions, gpa: std.mem.Allocator) void {
         if (self.service) |service| gpa.free(service.command);
@@ -119,14 +128,11 @@ fn resolveRootFromCwd(gpa: std.mem.Allocator, cwd: []const u8, root: []const u8)
 }
 
 fn applyDetections(gpa: std.mem.Allocator, io: std.Io, cwd: []const u8, opts: Options) !DetectedOptions {
-    var result = DetectedOptions{ .opts = opts };
     const detected = try init_inference.detect(gpa, io, cwd, .{
         .infer_service = true,
         .infer_compose_file = true,
     });
-    result.service = detected.service;
-    result.compose_file = detected.compose_file;
-    return result;
+    return DetectedOptions.fromDetectionResult(opts, detected);
 }
 
 fn renderConfig(gpa: std.mem.Allocator, project: []const u8, detected: DetectedOptions) ![]u8 {
@@ -238,23 +244,25 @@ fn testTmpPath(gpa: std.mem.Allocator, tmp: std.testing.TmpDir, name: []const u8
     return std.fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path, name });
 }
 
+fn testDetectedServiceOnly(gpa: std.mem.Allocator) !DetectedOptions {
+    const command = try gpa.dupe(u8, "pnpm run dev");
+    errdefer gpa.free(command);
+    return .{
+        .opts = try Options.parse(&.{ "demo", "--root", "." }),
+        .service = .{ .name = "web", .command = command, .script = "dev" },
+    };
+}
+
+fn testDetectedServiceAndDocker(gpa: std.mem.Allocator) !DetectedOptions {
+    var detected = try testDetectedServiceOnly(gpa);
+    detected.compose_file = "infra/compose.yaml";
+    return detected;
+}
+
 test "init.detectedOptions.deinit: empty result is a no-op" {
     const detected: DetectedOptions = .{ .opts = .{} };
 
     detected.deinit(std.testing.allocator);
-}
-
-fn testDetectedServiceOnly() !DetectedOptions {
-    return .{
-        .opts = try Options.parse(&.{ "demo", "--root", "." }),
-        .service = .{ .name = "web", .command = "pnpm run dev", .script = "dev" },
-    };
-}
-
-fn testDetectedServiceAndDocker() !DetectedOptions {
-    var detected = try testDetectedServiceOnly();
-    detected.compose_file = "infra/compose.yaml";
-    return detected;
 }
 
 test "init.options: parses scaffold flags" {
@@ -332,7 +340,8 @@ test "init.config: renders minimal config verbatim" {
 }
 
 test "init.config: renders service and docker config verbatim" {
-    const detected = try testDetectedServiceAndDocker();
+    const detected = try testDetectedServiceAndDocker(std.testing.allocator);
+    defer detected.deinit(std.testing.allocator);
     const json = try renderConfig(std.testing.allocator, "demo", detected);
     defer std.testing.allocator.free(json);
     try std.testing.expectEqualStrings(
@@ -371,7 +380,8 @@ test "init.config: renders service and docker config verbatim" {
 }
 
 test "init.config: renders service-only config verbatim" {
-    const detected = try testDetectedServiceOnly();
+    const detected = try testDetectedServiceOnly(std.testing.allocator);
+    defer detected.deinit(std.testing.allocator);
     const json = try renderConfig(std.testing.allocator, "demo", detected);
     defer std.testing.allocator.free(json);
     try std.testing.expectEqualStrings(
@@ -399,7 +409,8 @@ test "init.config: renders service-only config verbatim" {
 test "init.config: renders service and docker config" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const detected = try testDetectedServiceAndDocker();
+    const detected = try testDetectedServiceAndDocker(arena.allocator());
+    defer detected.deinit(arena.allocator());
     const json = try renderConfig(std.testing.allocator, "demo", detected);
     defer std.testing.allocator.free(json);
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
@@ -483,11 +494,9 @@ test "init.detect: infers package script" {
 test "init.report: prints detected values and omitted defaults" {
     var buffer: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    const detected = DetectedOptions{
-        .opts = .{},
-        .service = .{ .name = "web", .command = "npm run dev", .script = "dev" },
-        .compose_file = "docker-compose.yml",
-    };
+    var detected = try testDetectedServiceOnly(std.testing.allocator);
+    defer detected.deinit(std.testing.allocator);
+    detected.compose_file = "docker-compose.yml";
 
     try writeReport(&writer, "demo", detected);
 
