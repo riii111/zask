@@ -211,18 +211,20 @@ fn inferNamedConfigPath(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env
     const project_name = try gpa.dupe(u8, project);
     errdefer gpa.free(project_name);
     const path = try projectConfigPath(gpa, environ, project);
-    {
-        errdefer gpa.free(path);
-        std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
-            error.FileNotFound => return error.ConfigNotFound,
-            else => return err,
-        };
-    }
+    errdefer gpa.free(path);
+    try ensureConfigPathExists(io, path);
     return .{
         .path = try absoluteOwnedConfigPath(gpa, io, path),
         .source = .inferred_named,
         .expected_project_name = project_name,
         .expected_project_name_owned = true,
+    };
+}
+
+fn ensureConfigPathExists(io: std.Io, path: []const u8) !void {
+    std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.ConfigNotFound,
+        else => return err,
     };
 }
 

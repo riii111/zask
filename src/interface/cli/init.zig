@@ -80,8 +80,8 @@ const DetectedOptions = struct {
     service: ?init_inference.DetectedService = null,
     compose_file: ?[]const u8 = null,
 
-    /// Consumes owned detection outputs from `init_inference.Result`.
-    fn fromDetectionResult(opts: Options, detected: init_inference.Result) DetectedOptions {
+    /// Takes ownership of owned detection outputs from `init_inference.Result`.
+    fn fromOwnedDetectionResult(opts: Options, detected: init_inference.Result) DetectedOptions {
         return .{
             .opts = opts,
             .service = detected.service,
@@ -132,7 +132,7 @@ fn applyDetections(gpa: std.mem.Allocator, io: std.Io, cwd: []const u8, opts: Op
         .infer_service = true,
         .infer_compose_file = true,
     });
-    return DetectedOptions.fromDetectionResult(opts, detected);
+    return DetectedOptions.fromOwnedDetectionResult(opts, detected);
 }
 
 fn renderConfig(gpa: std.mem.Allocator, project: []const u8, detected: DetectedOptions) ![]u8 {
