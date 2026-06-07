@@ -200,16 +200,8 @@ pub const Config = struct {
             return self.expandHome(gpa, env_file.path);
         switch (env_file.base) {
             .project => return self.joinProjectRoot(gpa, &.{env_file.path}),
-            .service => {},
+            .service => return self.resolveServiceDirPath(gpa, service, &.{env_file.path}),
         }
-
-        const dir = config_value.optionalObjectString(service, "dir", ".");
-        const external = config_value.optionalObjectBool(service, "external", false);
-        if (external or std.fs.path.isAbsolute(dir) or std.mem.startsWith(u8, dir, "~")) {
-            return self.joinExpandedBase(gpa, dir, &.{env_file.path});
-        }
-        try validate.relativeSubPath(dir);
-        return self.joinProjectRoot(gpa, &.{ dir, env_file.path });
     }
 
     pub fn serviceHealthcheckType(service: Value) []const u8 {
@@ -223,13 +215,7 @@ pub const Config = struct {
     }
 
     pub fn serviceDir(self: Config, gpa: std.mem.Allocator, service: Value) ![]const u8 {
-        const dir = config_value.optionalObjectString(service, "dir", ".");
-        const external = config_value.optionalObjectBool(service, "external", false);
-        if (external or std.fs.path.isAbsolute(dir) or std.mem.startsWith(u8, dir, "~")) {
-            return self.expandHome(gpa, dir);
-        }
-        try validate.relativeSubPath(dir);
-        return self.joinProjectRoot(gpa, &.{dir});
+        return self.resolveServiceDirPath(gpa, service, &.{});
     }
 
     pub fn serviceDirValue(service: Value) []const u8 {
@@ -385,6 +371,22 @@ pub const Config = struct {
         }
 
         return std.fs.path.join(gpa, join_parts[0..count]);
+    }
+
+    fn resolveServiceDirPath(self: Config, gpa: std.mem.Allocator, service: Value, parts: []const []const u8) ![]const u8 {
+        const dir = config_value.optionalObjectString(service, "dir", ".");
+        const external = config_value.optionalObjectBool(service, "external", false);
+        if (external or std.fs.path.isAbsolute(dir) or std.mem.startsWith(u8, dir, "~")) {
+            if (parts.len == 0) return self.expandHome(gpa, dir);
+            return self.joinExpandedBase(gpa, dir, parts);
+        }
+        try validate.relativeSubPath(dir);
+        if (parts.len == 0) return self.joinProjectRoot(gpa, &.{dir});
+
+        var join_parts: [4][]const u8 = undefined;
+        join_parts[0] = dir;
+        for (parts, 0..) |part, index| join_parts[index + 1] = part;
+        return self.joinProjectRoot(gpa, join_parts[0 .. parts.len + 1]);
     }
 };
 
