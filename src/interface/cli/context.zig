@@ -72,7 +72,8 @@ pub fn parseSize(arg: []const u8) !u16 {
 
 fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
     const io = context.io orelse return error.MissingIo;
-    const resolved = try resolveConfigPath(context.gpa, io, context, parsed);
+    var resolved = try resolveConfigPath(context.gpa, io, context, parsed);
+    defer resolved.deinit(context.gpa);
     if (context.error_context) |err_ctx| {
         err_ctx.config_path = resolved.path;
         err_ctx.config_source = resolved.source;
@@ -101,8 +102,8 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
 fn commandHint(gpa: std.mem.Allocator, io: std.Io, resolved: ResolvedConfigPath, cfg: config.Config) !zask_command.InvocationHint {
     return switch (resolved.source) {
         .discovered => if (try cwdIsProjectRoot(gpa, io, cfg)) .local else .{ .config = resolved.path },
-        .named => .{ .named = resolved.project orelse try cfg.projectName() },
-        .inferred_named => .{ .named = resolved.project orelse try cfg.projectName() },
+        .named => .{ .named = resolved.expected_project_name orelse try cfg.projectName() },
+        .inferred_named => .{ .named = try cfg.projectName() },
         .explicit => .{ .config = resolved.path },
     };
 }
@@ -122,7 +123,14 @@ fn cwdIsProjectRoot(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config) !boo
 const ResolvedConfigPath = struct {
     path: []const u8,
     source: ConfigSource,
-    project: ?[]const u8 = null,
+    expected_project_name: ?[]const u8 = null,
+    expected_project_name_owned: bool = false,
+
+    fn deinit(self: ResolvedConfigPath, gpa: std.mem.Allocator) void {
+        if (self.expected_project_name_owned) {
+            gpa.free(self.expected_project_name.?);
+        }
+    }
 };
 
 fn resolveConfigPath(gpa: std.mem.Allocator, io: std.Io, context: CommandContext, parsed: ParsedArgs) !ResolvedConfigPath {
@@ -133,10 +141,11 @@ fn resolveConfigPath(gpa: std.mem.Allocator, io: std.Io, context: CommandContext
         };
     }
     if (parsed.project) |project| {
+        const path = try projectConfigPath(gpa, context.environ, project);
         return .{
-            .path = try absoluteConfigPath(gpa, io, try projectConfigPath(gpa, context.environ, project)),
+            .path = try absoluteOwnedConfigPath(gpa, io, path),
             .source = .named,
-            .project = project,
+            .expected_project_name = project,
         };
     }
     const discovered_path = discoverConfigPath(gpa, io) catch |err| switch (err) {
@@ -146,9 +155,12 @@ fn resolveConfigPath(gpa: std.mem.Allocator, io: std.Io, context: CommandContext
     return .{ .path = discovered_path, .source = .discovered };
 }
 
+/// Returns a config path owned by the caller.
 pub fn projectConfigPath(gpa: std.mem.Allocator, environ: ?*const env.Map, project: []const u8) ![]const u8 {
     try validate.identifier(project);
-    return std.fs.path.join(gpa, &.{ try paths.configBase(gpa, environ), project, "config.json" });
+    const base = try paths.configBase(gpa, environ);
+    defer gpa.free(base);
+    return std.fs.path.join(gpa, &.{ base, project, "config.json" });
 }
 
 fn absoluteConfigPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
@@ -157,6 +169,17 @@ fn absoluteConfigPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]c
         error.FileNotFound => return error.ConfigNotFound,
         else => return err,
     };
+}
+
+fn absoluteOwnedConfigPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
+    errdefer gpa.free(path);
+    if (std.fs.path.isAbsolute(path)) return path;
+    const absolute = std.Io.Dir.cwd().realPathFileAlloc(io, path, gpa) catch |err| switch (err) {
+        error.FileNotFound => return error.ConfigNotFound,
+        else => return err,
+    };
+    gpa.free(path);
+    return absolute;
 }
 
 fn discoverConfigPath(gpa: std.mem.Allocator, io: std.Io) ![:0]const u8 {
@@ -184,6 +207,7 @@ fn inferNamedConfigPath(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env
     const project = std.fs.path.basename(cwd);
     validate.identifier(project) catch return error.ConfigNotFound;
     const project_name = try gpa.dupe(u8, project);
+    errdefer gpa.free(project_name);
     const path = try projectConfigPath(gpa, environ, project);
     errdefer gpa.free(path);
     std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
@@ -191,14 +215,15 @@ fn inferNamedConfigPath(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env
         else => return err,
     };
     return .{
-        .path = try absoluteConfigPath(gpa, io, path),
+        .path = try absoluteOwnedConfigPath(gpa, io, path),
         .source = .inferred_named,
-        .project = project_name,
+        .expected_project_name = project_name,
+        .expected_project_name_owned = true,
     };
 }
 
 fn validateSelectedProjectName(context: CommandContext, resolved: ResolvedConfigPath, cfg: config.Config) !void {
-    const expected = resolved.project orelse return;
+    const expected = resolved.expected_project_name orelse return;
     const actual = try cfg.projectName();
     if (std.mem.eql(u8, expected, actual)) return;
     if (context.diagnostics) |diags| {
@@ -293,6 +318,18 @@ test "cli.context.discoverConfigPath: rejects missing local config" {
     try std.testing.expectError(error.ConfigNotFound, discoverConfigPath(gpa, io));
 }
 
+test "cli.context.projectConfigPath: caller owns returned path" {
+    const gpa = std.testing.allocator;
+    var environ = env.Map.init(gpa);
+    defer environ.deinit();
+    try environ.put("HOME", "/home/me");
+
+    const path = try projectConfigPath(gpa, &environ, "demo");
+    defer gpa.free(path);
+
+    try std.testing.expectEqualStrings("/home/me/.config/zask/demo/config.json", path);
+}
+
 test "cli.context.commandHint: maps config sources to command forms" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -321,7 +358,7 @@ test "cli.context.commandHint: maps config sources to command forms" {
     _ = try testWithCwd(gpa, io, nested);
     try std.testing.expectEqualDeep(zask_command.InvocationHint{ .config = "zask.json" }, try commandHint(gpa, io, .{ .path = "zask.json", .source = .discovered }, cfg));
     _ = try testWithCwd(gpa, io, root);
-    try std.testing.expectEqualDeep(zask_command.InvocationHint{ .named = "demo" }, try commandHint(gpa, io, .{ .path = "config.json", .source = .named, .project = "demo" }, cfg));
+    try std.testing.expectEqualDeep(zask_command.InvocationHint{ .named = "demo" }, try commandHint(gpa, io, .{ .path = "config.json", .source = .named, .expected_project_name = "demo" }, cfg));
     try std.testing.expectEqualDeep(zask_command.InvocationHint{ .config = "config.json" }, try commandHint(gpa, io, .{ .path = "config.json", .source = .explicit }, cfg));
 }
 
@@ -359,4 +396,48 @@ test "cli.context.loadRuntime: rejects named config with mismatched project name
     }, .{ .project = "demo", .config_source = .named, .command = "list", .args = &.{} }));
     try std.testing.expectEqualStrings("project.name", diags.slice()[0].path);
     try std.testing.expectEqualStrings("must match named config 'demo'", diags.slice()[0].message);
+}
+
+test "cli.context.inferNamedConfigPath: releases inferred project name" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var environ = env.Map.init(gpa);
+    defer environ.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(base);
+    const project_dir = try std.fs.path.join(gpa, &.{ base, "demo" });
+    defer gpa.free(project_dir);
+    const config_home = try std.fs.path.join(gpa, &.{ base, "xdg" });
+    defer gpa.free(config_home);
+    const config_dir = try std.fs.path.join(gpa, &.{ config_home, "zask", "demo" });
+    defer gpa.free(config_dir);
+    try tmp.dir.createDirPath(io, "demo");
+    _ = try std.Io.Dir.cwd().createDirPathStatus(io, config_dir, @enumFromInt(0o755));
+    try environ.put("HOME", "/home/me");
+    try environ.put("XDG_CONFIG_HOME", config_home);
+    const config_path = try std.fs.path.join(gpa, &.{ config_dir, "config.json" });
+    defer gpa.free(config_path);
+    try paths.writeFile(io, config_path,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": []
+        \\}
+    );
+
+    const previous = try testWithCwd(gpa, io, project_dir);
+    defer {
+        std.process.setCurrentPath(io, previous) catch unreachable;
+        gpa.free(previous);
+    }
+
+    var resolved = try inferNamedConfigPath(gpa, io, &environ);
+    defer resolved.deinit(gpa);
+    defer gpa.free(resolved.path);
+
+    try std.testing.expectEqual(ConfigSource.inferred_named, resolved.source);
+    try std.testing.expectEqualStrings("demo", resolved.expected_project_name.?);
 }
