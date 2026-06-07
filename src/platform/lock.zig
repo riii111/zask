@@ -2,10 +2,18 @@ const std = @import("std");
 const paths = @import("paths.zig");
 
 /// Process-liveness probe for stale-lock recovery. `system` queries the OS;
-/// `fake` lets tests model a known holder pid as alive or dead deterministically.
+/// `fake` lets tests model a known holder pid and stale-cleanup result
+/// deterministically.
 pub const Probe = union(enum) {
     system,
-    fake: struct { pid: std.c.pid_t, alive: bool },
+    fake: struct {
+        pid: std.c.pid_t,
+        alive: bool,
+        stale_cleanup: enum {
+            normal,
+            fail,
+        } = .normal,
+    },
 
     fn currentPid(self: Probe) std.c.pid_t {
         return switch (self) {
@@ -26,6 +34,16 @@ pub const Probe = union(enum) {
             .fake => |f| return f.alive and pid == f.pid,
         }
     }
+
+    fn cleanupStaleDir(self: Probe, io: std.Io, stale_dir: []const u8) void {
+        switch (self) {
+            .system => std.Io.Dir.cwd().deleteTree(io, stale_dir) catch {},
+            .fake => |f| switch (f.stale_cleanup) {
+                .normal => std.Io.Dir.cwd().deleteTree(io, stale_dir) catch {},
+                .fail => {},
+            },
+        }
+    }
 };
 
 pub const Lock = struct {
@@ -34,7 +52,9 @@ pub const Lock = struct {
     dir: []const u8,
 
     /// On success the returned Lock owns the on-disk lock directory; the caller
-    /// must release it with release().
+    /// must release it with release(). Stale-lock cleanup is best-effort, so a
+    /// recovered acquire may leave `<lock>.stale.<pid>` behind if deletion
+    /// fails after the new lock is created.
     pub fn acquire(gpa: std.mem.Allocator, io: std.Io, name: []const u8, base: []const u8, probe: Probe) !Lock {
         try ensurePrivateDir(io, base);
         const lock_name = try std.fmt.allocPrint(gpa, "{s}.lock", .{name});
@@ -52,12 +72,13 @@ pub const Lock = struct {
         const stale_dir = try std.fmt.allocPrint(gpa, "{s}.stale.{d}", .{ dir, probe.currentPid() });
         defer gpa.free(stale_dir);
         std.Io.Dir.renameAbsolute(dir, stale_dir, io) catch return error.LockBusy;
-        defer std.Io.Dir.cwd().deleteTree(io, stale_dir) catch {};
+        defer probe.cleanupStaleDir(io, stale_dir);
         if (!try acquireDir(io, dir)) return error.LockBusy;
         try writePid(gpa, io, probe, dir, pid);
         return .{ .gpa = gpa, .io = io, .dir = dir };
     }
 
+    /// Ignores cleanup failures while releasing the owned lock directory.
     pub fn release(self: Lock) void {
         std.Io.Dir.cwd().deleteTree(self.io, self.dir) catch {};
     }
@@ -194,4 +215,25 @@ test "lock.acquire: reports busy when stale rename cannot proceed" {
     try paths.writeFileMode(io, try std.fs.path.join(gpa, &.{ blocking_stale, "occupied" }), "x", private_file_permissions);
 
     try std.testing.expectError(error.LockBusy, Lock.acquire(gpa, io, "demo", base, probe));
+}
+
+test "lock.acquire: stale cleanup failure leaves renamed directory after recovery" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    const probe: Probe = .{ .fake = .{ .pid = 4242, .alive = false, .stale_cleanup = .fail } };
+    const base = try std.fmt.allocPrint(gpa, "/tmp/zask-test-lock-cleanup-{d}", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    const dir = try std.fs.path.join(gpa, &.{ base, "demo.lock" });
+    _ = try std.Io.Dir.cwd().createDirPathStatus(io, dir, private_dir_permissions);
+    try paths.writeFileMode(io, try std.fs.path.join(gpa, &.{ dir, "pid" }), "4242", private_file_permissions);
+
+    const recovered = try Lock.acquire(gpa, io, "demo", base, probe);
+    defer recovered.release();
+    try std.Io.Dir.cwd().access(io, recovered.dir, .{});
+
+    const stale_dir = try std.fmt.allocPrint(gpa, "{s}.stale.{d}", .{ dir, probe.fake.pid });
+    try std.Io.Dir.cwd().access(io, stale_dir, .{});
 }
