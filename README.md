@@ -119,7 +119,12 @@ the project root.
       "name": "backend",
       "env_file": "backend/.env",
       "services": [
-        {"name": "api", "dir": "backend", "command": "serve", "env_file": ".env.local"},
+        {"name": "api", "dir": "backend", "command": "serve", "env_file": ".env.local"}
+      ]
+    },
+    {
+      "name": "agent",
+      "services": [
         {"name": "agent", "dir": "../demo-agent", "command": "npm run dev", "env_file": ".env"}
       ]
     }

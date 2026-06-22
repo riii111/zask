@@ -1226,6 +1226,14 @@ test "config.env_file: allows parent-relative paths outside base directories" {
     const service = try cfg.findService("api");
     const env_files = try Config.serviceEnvFiles(arena.allocator(), service);
 
+    try std.testing.expectEqual(@as(usize, 3), env_files.len);
+    try std.testing.expectEqual(Config.EnvFileBase.project, env_files[0].base);
+    try std.testing.expectEqualStrings("../shared/.env", env_files[0].path);
+    try std.testing.expectEqual(Config.EnvFileBase.project, env_files[1].base);
+    try std.testing.expectEqualStrings("../platform/.env", env_files[1].path);
+    try std.testing.expectEqual(Config.EnvFileBase.service, env_files[2].base);
+    try std.testing.expectEqualStrings("../.env.local", env_files[2].path);
+
     try std.testing.expectEqualStrings("/tmp/demo/../shared/.env", try cfg.serviceEnvFilePath(arena.allocator(), service, env_files[0]));
     try std.testing.expectEqualStrings("/tmp/demo/../platform/.env", try cfg.serviceEnvFilePath(arena.allocator(), service, env_files[1]));
     try std.testing.expectEqualStrings("/tmp/demo/../agent/../.env.local", try cfg.serviceEnvFilePath(arena.allocator(), service, env_files[2]));
@@ -1592,7 +1600,7 @@ test "config.validateAll: accumulates diagnostics with field paths" {
         \\{
         \\  "project": {"name":"bad name","root":"/tmp/demo"},
         \\  "groups": [{"name":"backend","services":[
-        \\    {"name":"api.bad","dir":"../escape","runtime":"unknown","command":"serve"}
+        \\    {"name":"api.bad","dir":"backend","runtime":"unknown","command":"serve"}
         \\  ]}]
         \\}
     ;
