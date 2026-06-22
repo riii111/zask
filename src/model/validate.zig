@@ -23,6 +23,10 @@ pub fn relativeSubPath(value: []const u8) !void {
     }
 }
 
+pub fn relativePath(value: []const u8) !void {
+    if (std.fs.path.isAbsolute(value)) return error.InvalidPath;
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -71,4 +75,17 @@ test "validate.relativeSubPath: rejects parent traversal and absolute paths" {
     for (cases) |case| {
         try std.testing.expectError(error.InvalidPath, relativeSubPath(case));
     }
+}
+
+test "validate.relativePath: accepts parent traversal and rejects absolute paths" {
+    const cases = [_][]const u8{
+        "../sibling",
+        "backend/../agent",
+        ".",
+    };
+    for (cases) |case| {
+        try relativePath(case);
+    }
+
+    try std.testing.expectError(error.InvalidPath, relativePath("/tmp/escape"));
 }

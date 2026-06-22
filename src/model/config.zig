@@ -380,7 +380,7 @@ pub const Config = struct {
             if (parts.len == 0) return self.expandHome(gpa, dir);
             return self.joinExpandedBase(gpa, dir, parts);
         }
-        try validate.relativeSubPath(dir);
+        try validate.relativePath(dir);
         if (parts.len == 0) return self.joinProjectRoot(gpa, &.{dir});
 
         var join_parts: [4][]const u8 = undefined;
@@ -746,12 +746,13 @@ fn validateService(gpa: std.mem.Allocator, service: Value, path: []const u8, dia
     }
 }
 
-// Mirrors Config.serviceDir: only project-relative dirs are constrained.
+// Mirrors Config.serviceDir: authored relative dirs resolve from project root,
+// including sibling repositories outside that root.
 fn checkServiceDir(gpa: std.mem.Allocator, service: Value, path: []const u8, diags: *diagnostics.Diagnostics) !void {
     const dir = config_value.optionalObjectString(service, keys.dir, ".");
     const external = config_value.optionalObjectBool(service, keys.external, false);
     if (external or std.fs.path.isAbsolute(dir) or std.mem.startsWith(u8, dir, "~")) return;
-    validate.relativeSubPath(dir) catch try diags.add(try joinPath(gpa, path, "dir"), "must stay within the project root");
+    validate.relativePath(dir) catch try diags.add(try joinPath(gpa, path, "dir"), "must be a relative path");
 }
 
 fn validateStartupOrder(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics, refs: ValidationIndex) !void {
@@ -921,7 +922,7 @@ fn checkEnvFilePath(value: []const u8, path: []const u8, diags: *diagnostics.Dia
         try diags.add(path, "must use '~' or '~/' when starting with '~'");
         return;
     }
-    validate.relativeSubPath(value) catch try diags.add(path, "must stay within its base directory");
+    validate.relativePath(value) catch try diags.add(path, "must be a relative path");
 }
 
 fn checkIdentifier(gpa: std.mem.Allocator, node: Value, key: []const u8, path: []const u8, diags: *diagnostics.Diagnostics) !void {
@@ -1202,6 +1203,34 @@ test "config.serviceEnvFilePath: joins service-relative paths under expanded hom
     try std.testing.expectEqualStrings("/home/me/work/demo/backend/.env.local", env_path);
 }
 
+test "config.env_file: allows parent-relative paths outside base directories" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "env_file": "../shared/.env",
+        \\  "groups": [{
+        \\    "name":"backend",
+        \\    "env_file":["../platform/.env"],
+        \\    "services":[{
+        \\      "name":"api",
+        \\      "dir":"../agent",
+        \\      "command":"serve",
+        \\      "env_file":"../.env.local"
+        \\    }]
+        \\  }]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try parseTestConfig(&arena, json);
+    const service = try cfg.findService("api");
+    const env_files = try Config.serviceEnvFiles(arena.allocator(), service);
+
+    try std.testing.expectEqualStrings("/tmp/demo/../shared/.env", try cfg.serviceEnvFilePath(arena.allocator(), service, env_files[0]));
+    try std.testing.expectEqualStrings("/tmp/demo/../platform/.env", try cfg.serviceEnvFilePath(arena.allocator(), service, env_files[1]));
+    try std.testing.expectEqualStrings("/tmp/demo/../agent/../.env.local", try cfg.serviceEnvFilePath(arena.allocator(), service, env_files[2]));
+}
+
 test "config.parse: rejects unknown service runtime" {
     const json =
         \\{
@@ -1256,11 +1285,6 @@ test "config.parse: rejects malformed env_file values" {
         \\  "project": {"name":"demo","root":"/tmp/demo"},
         \\  "env_file": [""],
         \\  "groups": []
-        \\}
-        ,
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo"},
-        \\  "groups": [{"name":"backend","env_file":["../.env"],"services":[]}]
         \\}
         ,
         \\{
@@ -1520,7 +1544,7 @@ test "config.parse: rejects invalid identifiers in project and service names" {
     try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
 }
 
-test "config.parse: rejects project-relative service paths that escape root" {
+test "config.serviceDir: allows sibling service paths outside project root" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo"},
@@ -1530,7 +1554,9 @@ test "config.parse: rejects project-relative service paths that escape root" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
+    const cfg = try parseTestConfig(&arena, json);
+
+    try std.testing.expectEqualStrings("/tmp/demo/../escape", try cfg.serviceDir(arena.allocator(), try cfg.findService("api")));
 }
 
 test "config.serviceDir: allows external service paths outside project root" {
@@ -1580,17 +1606,14 @@ test "config.validateAll: accumulates diagnostics with field paths" {
 
     var found_project_name = false;
     var found_service_name = false;
-    var found_service_dir = false;
     var found_service_runtime = false;
     for (diags.slice()) |diagnostic| {
         if (std.mem.eql(u8, diagnostic.path, "project.name")) found_project_name = true;
         if (std.mem.eql(u8, diagnostic.path, "groups[0].services[0].name")) found_service_name = true;
-        if (std.mem.eql(u8, diagnostic.path, "groups[0].services[0].dir")) found_service_dir = true;
         if (std.mem.eql(u8, diagnostic.path, "groups[0].services[0].runtime") and std.mem.eql(u8, diagnostic.message, "unknown runtime 'unknown'")) found_service_runtime = true;
     }
     try std.testing.expect(found_project_name);
     try std.testing.expect(found_service_name);
-    try std.testing.expect(found_service_dir);
     try std.testing.expect(found_service_runtime);
 }
 
