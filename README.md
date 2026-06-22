@@ -107,9 +107,7 @@ Create a project config:
 
 `env_file` loads `KEY=value` files before a service command. Put it at the
 project or group level for project-root-relative files, or on a service for a
-file relative to that service directory. Service directories and env files may
-point at sibling repositories with `..`; `docker.compose` remains relative to
-the project root.
+file relative to that service directory:
 
 ```json
 {
