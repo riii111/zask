@@ -360,6 +360,61 @@ test "runtime: start, logs, stop, restart move service pane through its lifecycl
     try waitForPaneState(client, gpa, io, "api", .busy);
 }
 
+test "runtime.start: recreated service windows preserve configured order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-window-order", .{std.c.getpid()});
+    const client = tmuxClient(gpa, io, session);
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", "/tmp", "sleep 60");
+    defer client.killSession() catch {};
+    try client.newWindowAfter("dashboard", "api", "/tmp", try zask.zask_command.waitingPlaceholder(gpa, "api"));
+    try client.newWindowAfter("api", "worker", "/tmp", try zask.zask_command.waitingPlaceholder(gpa, "worker"));
+    try client.newWindowAfter("worker", "web", "/tmp", try zask.zask_command.waitingPlaceholder(gpa, "web"));
+
+    const cfg = try zask.config.Config.parse(gpa,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp"},
+        \\  "groups": [{"name":"backend","services":[
+        \\    {"name":"api","dir":".","command":"sleep 60"},
+        \\    {"name":"worker","dir":".","command":"sleep 60"},
+        \\    {"name":"web","dir":".","command":"sleep 60"}
+        \\  ]}]
+        \\}
+    , "/tmp");
+    const run_impl: zask.runner.Runner = .{ .gpa = gpa, .io = io };
+    const runtime = zask.runtime.Runtime{
+        .gpa = gpa,
+        .io = io,
+        .cfg = cfg,
+        .config_path = "/tmp/config.json",
+        .zask_path = "zask",
+        .command_hint = .{ .config = "/tmp/config.json" },
+        .runner_impl = run_impl,
+        .tmux_impl = client,
+        .docker_impl = .{ .gpa = gpa, .runner = run_impl, .dir = "/tmp", .file = "compose.yaml" },
+    };
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    const api_target = try std.fmt.allocPrint(gpa, "{s}:api", .{session});
+    const worker_target = try std.fmt.allocPrint(gpa, "{s}:worker", .{session});
+
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "kill-window", "-t", worker_target });
+    try runtime.start("worker", &writer);
+    try expectWindowOrder(gpa, io, session, &.{ "dashboard", "api", "worker", "web" });
+
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "kill-window", "-t", api_target });
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "kill-window", "-t", worker_target });
+    try runtime.start("worker", &writer);
+    try runtime.start("api", &writer);
+    try expectWindowOrder(gpa, io, session, &.{ "dashboard", "api", "worker", "web" });
+}
+
 fn tmuxClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) zask.tmux.Client {
     return .{
         .gpa = gpa,
@@ -402,6 +457,16 @@ fn expectWindowAutoSize(gpa: std.mem.Allocator, io: std.Io, session: []const u8)
         defer gpa.free(option.stderr);
         try std.testing.expectEqualStrings("latest", std.mem.trim(u8, option.stdout, " \t\r\n"));
     }
+}
+
+fn expectWindowOrder(gpa: std.mem.Allocator, io: std.Io, session: []const u8, expected: []const []const u8) !void {
+    const result = try run(gpa, io, &.{ build_options.tmux_path, "list-windows", "-t", session, "-F", "#{window_name}" });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+
+    var lines = std.mem.tokenizeScalar(u8, result.stdout, '\n');
+    for (expected) |window| try std.testing.expectEqualStrings(window, lines.next() orelse return error.WindowMissing);
+    try std.testing.expect(lines.next() == null);
 }
 
 fn run(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8) !std.process.RunResult {
