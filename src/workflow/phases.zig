@@ -1085,7 +1085,6 @@ test "phases.runServicePhase: honors wait_ports as a declared dependency" {
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
-    try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("\n", "", .{ .exited = 1 });
     try recorder.enqueue("", "", .{ .exited = 0 });
@@ -1117,7 +1116,6 @@ test "phases.runServicePhase: reports port readiness failure" {
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
-    try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("\n", "", .{ .exited = 1 });
     try recorder.enqueue("", "", .{ .exited = 0 });
@@ -1161,7 +1159,6 @@ test "phases.runServicePhase: reports no observed port for dead pane" {
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
-    try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("\n", "", .{ .exited = 1 });
     try recorder.enqueue("", "", .{ .exited = 0 });
@@ -1191,7 +1188,6 @@ test "phases.runServicePhase: reports mismatched observed listen port" {
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
-    try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("\n", "", .{ .exited = 1 });
     try recorder.enqueue("", "", .{ .exited = 0 });
@@ -1244,7 +1240,6 @@ test "phases.runServicePhase: reports unmatched port without service hints" {
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
-    try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("\n", "", .{ .exited = 1 });
     try recorder.enqueue("", "", .{ .exited = 0 });

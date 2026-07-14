@@ -295,31 +295,20 @@ pub const Lifecycle = struct {
         const value = try self.cfg.findService(service);
         var recreate_window = false;
         if (mode == .observe) {
-            switch (self.tmux.observeWindow(service)) {
-                .present => {},
-                .missing => recreate_window = true,
-                .unavailable => {
+            const pane = self.tmux.observePane(service);
+            defer pane.deinit(self.gpa);
+            switch (serviceStartDecision(pane)) {
+                .no_op => {
+                    try progress.info("{s} already running\n", .{service});
+                    return;
+                },
+                .send_start => {},
+                .recreate_window => recreate_window = true,
+                .tmux_unavailable => {
                     try progress.failContext();
                     try progress.warn("Warning: tmux unavailable for {s}\n", .{service});
                     return error.TmuxUnavailable;
                 },
-            }
-            if (!recreate_window) {
-                const pane = self.tmux.observePane(service);
-                defer pane.deinit(self.gpa);
-                switch (serviceStartDecision(pane)) {
-                    .no_op => {
-                        try progress.info("{s} already running\n", .{service});
-                        return;
-                    },
-                    .send_start => {},
-                    .recreate_window => recreate_window = true,
-                    .tmux_unavailable => {
-                        try progress.failContext();
-                        try progress.warn("Warning: tmux unavailable for {s}\n", .{service});
-                        return error.TmuxUnavailable;
-                    },
-                }
             }
         }
         const project_root = try self.cfg.projectRoot(self.gpa);
@@ -1177,7 +1166,6 @@ test "lifecycle.startAll: starts idle docker before service command" {
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("\n", "", .{ .exited = 1 });
     try recorder.enqueue("", "", .{ .exited = 0 });
-    try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("\n", "", .{ .exited = 1 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
@@ -1221,7 +1209,6 @@ test "lifecycle.startAll: honors docker startup order step" {
     try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("api\n", "", .{ .exited = 0 });
     try recorder.enqueue("docker ready\n", "", .{ .exited = 0 });
-    try recorder.enqueue("", "", .{ .exited = 0 });
     try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
     try recorder.enqueue("\n", "", .{ .exited = 1 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
