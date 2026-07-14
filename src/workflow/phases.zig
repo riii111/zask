@@ -1044,7 +1044,7 @@ test "phases.runCommandPhase: capture limit warning continues" {
     , writer.buffered());
 }
 
-test "phases.runServicePhase: propagates window-not-ready as startup failure" {
+test "phases.runServicePhase: recreates missing service window" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo"},
@@ -1056,18 +1056,21 @@ test "phases.runServicePhase: propagates window-not-ready as startup failure" {
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
-    recorder.term = .{ .exited = 1 };
+    try recorder.enqueue("", "missing window", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [512]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectError(error.WindowNotReady, runServicePhase(lifecycle, cfg.phases()[0], "all", &writer, .observe));
-    const out = writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, out, "Error: api window is not ready") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "window: api") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "zask --config 'config.json' open") != null);
+    try runServicePhase(lifecycle, cfg.phases()[0], "all", &writer, .observe);
+
+    try proc_runner.expectCommandOrder(&recorder, "new-window", "respawn-pane");
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting api...") != null);
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
 test "phases.runServicePhase: honors wait_ports as a declared dependency" {

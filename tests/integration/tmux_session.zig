@@ -120,7 +120,7 @@ test "tmux_setup.bindControlKeys: refreshes stale list binding in existing sessi
     try std.testing.expect(std.mem.indexOf(u8, binding.stdout, "#{client_height}") != null);
 }
 
-test "cli.start: window not ready exits cleanly after diagnostics" {
+test "cli.start: recreates missing service window" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
@@ -136,7 +136,7 @@ test "cli.start: window not ready exits cleanly after diagnostics" {
         \\{{
         \\  "project": {{"name":"{s}","root":"."}},
         \\  "groups": [{{"name":"backend","services":[
-        \\    {{"name":"api","dir":".","command":"serve"}}
+        \\    {{"name":"api","dir":".","command":"/bin/sleep 60"}}
         \\  ]}}]
         \\}}
     , .{session});
@@ -149,12 +149,11 @@ test "cli.start: window not ready exits cleanly after diagnostics" {
     defer env_map.deinit();
     try env_map.put("HOME", project_root);
     try env_map.put("XDG_CONFIG_HOME", project_root);
-    if (std.fs.path.dirname(build_options.tmux_path)) |tmux_dir| {
-        try env_map.put("PATH", tmux_dir);
-    } else {
-        const parent_path = if (std.c.getenv("PATH")) |path| std.mem.span(path) else "";
+    const parent_path = if (std.c.getenv("PATH")) |path| std.mem.span(path) else "";
+    if (std.fs.path.dirname(build_options.tmux_path)) |tmux_dir|
+        try env_map.put("PATH", try std.fmt.allocPrint(gpa, "{s}:{s}", .{ tmux_dir, parent_path }))
+    else
         try env_map.put("PATH", parent_path);
-    }
 
     client.killSession() catch {};
     try client.newSession("dashboard", project_root, "sleep 60");
@@ -175,12 +174,12 @@ test "cli.start: window not ready exits cleanly after diagnostics" {
     defer std.testing.allocator.free(result.stdout);
     defer std.testing.allocator.free(result.stderr);
 
-    try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Warning: api has no port; zask cannot check readiness for this service") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Error: api window is not ready") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "zask close") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Starting api...") != null);
     try std.testing.expectEqual(@as(usize, 0), result.stderr.len);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "WindowNotReady") == null);
+    const api_target = try std.fmt.allocPrint(gpa, "{s}:api", .{session});
+    try expectPaneAlive(gpa, io, api_target);
 }
 
 test "tmux_setup.applySessionOptions: keeps global attach hook while refreshing size hook" {
@@ -353,6 +352,8 @@ test "runtime: start, logs, stop, restart move service pane through its lifecycl
     try runtime.stop("api", &writer);
 
     try waitForPaneState(client, gpa, io, "api", .idle);
+    const api_target = try std.fmt.allocPrint(gpa, "{s}:api", .{session});
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "kill-window", "-t", api_target });
 
     try runtime.restart("api", &writer);
 

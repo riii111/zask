@@ -8,6 +8,7 @@ const paths = @import("../platform/paths.zig");
 const pathing = @import("pathing.zig");
 const proc_runner = @import("../platform/runner.zig");
 const progress_mod = @import("progress.zig");
+const session_layout = @import("session_layout.zig");
 const shell = @import("../platform/shell.zig");
 const tmux_client = @import("../platform/tmux.zig");
 const waits = @import("waits.zig");
@@ -292,37 +293,33 @@ pub const Lifecycle = struct {
 
     fn ensureServiceRunning(self: Lifecycle, service: []const u8, progress: anytype, mode: StartMode) !void {
         const value = try self.cfg.findService(service);
+        var recreate_window = false;
         if (mode == .observe) {
-            waits.ensureWindowReady(self, service) catch |err| switch (err) {
-                error.WindowNotReady => {
-                    try progress.failContext();
-                    try self.writeWindowNotReady(progress, service, service);
-                    return error.WindowNotReady;
-                },
-                error.TmuxUnavailable => {
+            switch (self.tmux.observeWindow(service)) {
+                .present => {},
+                .missing => recreate_window = true,
+                .unavailable => {
                     try progress.failContext();
                     try progress.warn("Warning: tmux unavailable for {s}\n", .{service});
                     return error.TmuxUnavailable;
                 },
-            };
-            const pane = self.tmux.observePane(service);
-            defer pane.deinit(self.gpa);
-            switch (serviceStartDecision(pane)) {
-                .no_op => {
-                    try progress.info("{s} already running\n", .{service});
-                    return;
-                },
-                .send_start => {},
-                .window_not_ready => {
-                    try progress.failContext();
-                    try self.writeWindowNotReady(progress, service, service);
-                    return error.WindowNotReady;
-                },
-                .tmux_unavailable => {
-                    try progress.failContext();
-                    try progress.warn("Warning: tmux unavailable for {s}\n", .{service});
-                    return error.TmuxUnavailable;
-                },
+            }
+            if (!recreate_window) {
+                const pane = self.tmux.observePane(service);
+                defer pane.deinit(self.gpa);
+                switch (serviceStartDecision(pane)) {
+                    .no_op => {
+                        try progress.info("{s} already running\n", .{service});
+                        return;
+                    },
+                    .send_start => {},
+                    .recreate_window => recreate_window = true,
+                    .tmux_unavailable => {
+                        try progress.failContext();
+                        try progress.warn("Warning: tmux unavailable for {s}\n", .{service});
+                        return error.TmuxUnavailable;
+                    },
+                }
             }
         }
         const project_root = try self.cfg.projectRoot(self.gpa);
@@ -339,9 +336,51 @@ pub const Lifecycle = struct {
         try self.writeEnvFileTip(value, service_dir, progress);
         const start_command = try config.Config.serviceStartCommand(self.gpa, value);
         const launch_command = try self.serviceLaunchCommand(value, start_command);
+        if (recreate_window) {
+            self.recreateServiceWindow(service, service_dir) catch |err| switch (err) {
+                error.WindowNotReady => {
+                    try progress.failContext();
+                    try self.writeWindowNotReady(progress, service, service);
+                    return error.WindowNotReady;
+                },
+                error.TmuxUnavailable => {
+                    try progress.failContext();
+                    try progress.warn("Warning: tmux unavailable for {s}\n", .{service});
+                    return error.TmuxUnavailable;
+                },
+                else => return err,
+            };
+        }
         try progress.step("Starting {s}...\n", .{service});
         try progress.command("{s}\n", .{start_command});
         try self.tmux.respawnPane(service, service_dir, launch_command);
+    }
+
+    fn recreateServiceWindow(self: Lifecycle, service: []const u8, service_dir: []const u8) !void {
+        var previous_window: ?[]const u8 = null;
+        switch (self.tmux.observeWindow(session_layout.dashboard_window)) {
+            .present => previous_window = session_layout.dashboard_window,
+            .missing => {},
+            .unavailable => return error.TmuxUnavailable,
+        }
+        for (try self.cfg.services()) |candidate| {
+            const name = try config.Config.serviceName(candidate);
+            if (std.mem.eql(u8, name, service)) break;
+            switch (self.tmux.observeWindow(name)) {
+                .present => previous_window = name,
+                .missing => {},
+                .unavailable => return error.TmuxUnavailable,
+            }
+        }
+
+        const placeholder = try zask_command.waitingPlaceholder(self.gpa, service);
+        defer self.gpa.free(placeholder);
+        if (previous_window) |anchor| {
+            try self.tmux.newWindowAfter(anchor, service, service_dir, placeholder);
+        } else {
+            try self.tmux.newWindow(service, service_dir, placeholder);
+        }
+        try waits.ensureWindowReady(self, service);
     }
 
     /// Returned command is borrowed when no env files are configured and owned by
@@ -580,6 +619,13 @@ fn sessionNotRunning(writer: *std.Io.Writer) !void {
 
 const writeProgress = waits.writeProgress;
 
+const ServiceStartDecision = enum {
+    no_op,
+    send_start,
+    recreate_window,
+    tmux_unavailable,
+};
+
 const StartDecision = enum {
     no_op,
     send_start,
@@ -593,13 +639,18 @@ const StopDecision = enum {
     tmux_unavailable,
 };
 
-fn serviceStartDecision(pane: observations.PaneObservation) StartDecision {
+fn serviceStartDecision(pane: observations.PaneObservation) ServiceStartDecision {
     // Raw-field exception: when the pane's current command is a shell, the
     // service process is not the foreground process, so it must be (re)started
     // even if pgrep made the pane look busy. Every other case is decided from
     // the observed state alone.
     if (pane.command.len > 0 and tmux_client.isShellCommand(pane.command)) return .send_start;
-    return startDecisionForState(pane.state);
+    return switch (pane.state) {
+        .busy => .no_op,
+        .idle, .dead => .send_start,
+        .window_missing => .recreate_window,
+        .tmux_unavailable => .tmux_unavailable,
+    };
 }
 
 fn startDecisionForState(state: observations.PaneState) StartDecision {
@@ -666,19 +717,20 @@ fn testLifecycleWithDockerDir(gpa: std.mem.Allocator, run: proc_runner.Runner, c
 test "lifecycle.decision: maps pane observations to start and stop decisions" {
     const cases = [_]struct {
         state: observations.PaneState,
-        start: StartDecision,
+        service_start: ServiceStartDecision,
+        docker_start: StartDecision,
         stop: StopDecision,
     }{
-        .{ .state = .busy, .start = .no_op, .stop = .send_stop },
-        .{ .state = .idle, .start = .send_start, .stop = .no_op },
-        .{ .state = .dead, .start = .send_start, .stop = .no_op },
-        .{ .state = .window_missing, .start = .window_not_ready, .stop = .no_op },
-        .{ .state = .tmux_unavailable, .start = .tmux_unavailable, .stop = .tmux_unavailable },
+        .{ .state = .busy, .service_start = .no_op, .docker_start = .no_op, .stop = .send_stop },
+        .{ .state = .idle, .service_start = .send_start, .docker_start = .send_start, .stop = .no_op },
+        .{ .state = .dead, .service_start = .send_start, .docker_start = .send_start, .stop = .no_op },
+        .{ .state = .window_missing, .service_start = .recreate_window, .docker_start = .window_not_ready, .stop = .no_op },
+        .{ .state = .tmux_unavailable, .service_start = .tmux_unavailable, .docker_start = .tmux_unavailable, .stop = .tmux_unavailable },
     };
 
     for (cases) |case| {
-        try std.testing.expectEqual(case.start, serviceStartDecision(observations.PaneObservation.empty(case.state)));
-        try std.testing.expectEqual(case.start, dockerStartDecision(observations.PaneObservation.empty(case.state)));
+        try std.testing.expectEqual(case.service_start, serviceStartDecision(observations.PaneObservation.empty(case.state)));
+        try std.testing.expectEqual(case.docker_start, dockerStartDecision(observations.PaneObservation.empty(case.state)));
         try std.testing.expectEqual(case.stop, serviceStopDecision(case.state));
     }
 }
@@ -686,7 +738,7 @@ test "lifecycle.decision: maps pane observations to start and stop decisions" {
 test "lifecycle.serviceStartDecision: treats shell pane as startable" {
     const pane = observations.PaneObservation{ .state = .busy, .command = "zsh" };
 
-    try std.testing.expectEqual(StartDecision.send_start, serviceStartDecision(pane));
+    try std.testing.expectEqual(ServiceStartDecision.send_start, serviceStartDecision(pane));
 }
 
 test "lifecycle.dockerStartDecision: treats shell pane as startable" {
@@ -839,7 +891,7 @@ test "lifecycle.startAll: wraps service command with env files" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting api...") != null);
 }
 
-test "lifecycle.startAll: rejects missing env_file before respawn" {
+test "lifecycle.startAll: rejects missing env_file before recreating window" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -858,6 +910,7 @@ test "lifecycle.startAll: rejects missing env_file before respawn" {
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
+    try recorder.enqueue("", "missing window", .{ .exited = 1 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     var lifecycle = testLifecycle(arena.allocator(), run, cfg);
@@ -865,10 +918,11 @@ test "lifecycle.startAll: rejects missing env_file before respawn" {
     var buffer: [768]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectError(error.ConfigPathNotFound, lifecycle.startAll("all", &writer, .prime));
+    try std.testing.expectError(error.ConfigPathNotFound, lifecycle.startAll("all", &writer, .observe));
 
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "field: env_file") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "configured: missing.env") != null);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "new-window") == null);
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "respawn-pane") == null);
 }
 
@@ -1373,7 +1427,7 @@ test "waits.ensureWindowReady: retries missing windows until timeout" {
     try std.testing.expectEqual(@as(usize, waits.windowReadyAttempts()), recorder.commands.items.len);
 }
 
-test "lifecycle.startAll: reports missing window as failure" {
+test "lifecycle.startAll: recreates missing service window before start" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo"},
@@ -1384,18 +1438,27 @@ test "lifecycle.startAll: reports missing window as failure" {
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
-    recorder.term = .{ .exited = 1 };
+    try recorder.enqueue("", "missing window", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);
     const lifecycle = testLifecycle(arena.allocator(), run, cfg);
     var buffer: [512]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectError(error.WindowNotReady, lifecycle.startAll("all", &writer, .observe));
-    const out = writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, out, "Error: api window is not ready") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "reason: tmux window was not found") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "zask --config 'config.json' close") != null);
+    try lifecycle.startAll("all", &writer, .observe);
+
+    const new_window = proc_runner.findCommandContaining(&recorder, "new-window") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArg(new_window, 3, "-a");
+    try proc_runner.expectCommandArg(new_window, 5, "demo:dashboard");
+    try proc_runner.expectCommandArg(new_window, 7, "api");
+    try proc_runner.expectCommandArg(new_window, 9, "/tmp/demo/backend");
+    try proc_runner.expectCommandArgContains(new_window, 10, "Waiting for start command");
+    try proc_runner.expectCommandOrder(&recorder, "new-window", "respawn-pane");
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting api...") != null);
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
 test "lifecycle.stopTarget: stop and restart require an active session" {
