@@ -236,7 +236,7 @@ const Monitor = struct {
         const printed = &output.writer;
         if (runOperation(self.runtime.withAllocator(scratch), operation, target, printed)) |outcome| switch (outcome) {
             .done => self.setNotice("{s} {s}", .{ operation.done(), target.name }),
-            .incomplete => self.setNotice("{s} {s} incomplete: {s}", .{ operation.verb(), target.name, lastOutputLine(printed.buffered(), "see its window") }),
+            .incomplete => self.setNotice("{s} {s} incomplete: {s}", .{ operation.verb(), target.name, incompleteReason(operation, printed.buffered()) }),
         } else |err| {
             self.setNotice("{s} {s} failed: {s}", .{ operation.verb(), target.name, lastOutputLine(printed.buffered(), @errorName(err)) });
         }
@@ -424,6 +424,15 @@ fn runOperation(runtime: Runtime, operation: Operation, target: Target, writer: 
         },
     }
     return .done;
+}
+
+/// Only the stop step makes an operation incomplete. A restart prints its
+/// start step after the stop warning, so the last line would not explain it.
+fn incompleteReason(operation: Operation, output: []const u8) []const u8 {
+    return switch (operation) {
+        .restart => "the previous process did not stop",
+        .show, .start, .stop => lastOutputLine(output, "see its window"),
+    };
 }
 
 /// The last line the operation printed, which carries the workflow's own

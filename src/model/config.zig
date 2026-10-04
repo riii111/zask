@@ -582,6 +582,8 @@ fn classifyStartupStep(step: Value) !StartupStepKind {
 // single source of config validation; normalizeConfig assumes validated input.
 // -----------------------------------------------------------------------------
 
+const reserved_dashboard_window = "dashboard";
+
 pub fn validateAll(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics) !void {
     if (source != .object) {
         try diags.add("", "config must be a JSON object");
@@ -602,8 +604,11 @@ pub fn validateAll(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Di
     // Build the reference index before validating references: startup_order and
     // profile overrides may point at groups or aliases declared later in the file.
     try validateGroups(gpa, source, diags, &refs);
-    // The Compose window is named `docker`, so a service of that name would
-    // share its tmux window and receive the other's start / stop keys.
+    // Service windows share the session with zask's own windows (see
+    // workflow/session_layout.zig), so a service of the same name would share a
+    // tmux window and receive the other's start / stop keys.
+    if (refs.services.contains(reserved_dashboard_window))
+        try diags.add("groups", "service name 'dashboard' is reserved for the zask dashboard window");
     if (source.object.get(keys.docker) != null and refs.services.contains(keys.docker))
         try diags.add("groups", "service name 'docker' is reserved while docker is configured");
     try refs.collectAliases(source);
@@ -1444,6 +1449,18 @@ test "config.validateAll: rejects negative startup port wait timeout" {
     try std.testing.expectEqual(@as(usize, 1), diags.slice().len);
     try std.testing.expectEqualStrings("startup_order[0].port_wait_timeout_seconds", diags.slice()[0].path);
     try std.testing.expectEqualStrings("must be >= 0", diags.slice()[0].message);
+}
+
+test "config.parse: rejects a service named dashboard" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"web","services":[{"name":"dashboard","command":"serve"}]}]
+        \\}
+    ));
 }
 
 test "config.parse: rejects a service named docker only while docker is configured" {
