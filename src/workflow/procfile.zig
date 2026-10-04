@@ -10,8 +10,8 @@ pub const Service = struct {
 };
 
 /// Parses Procfile `name: command` lines. Blank lines and lines starting with
-/// `#` are skipped; the command is everything after the first colon, so
-/// colons and inner whitespace survive. Every problem is added to `diags` as
+/// `#` are skipped; the command is everything after the first colon and its
+/// following spaces, so later colons and whitespace survive. Every problem is added to `diags` as
 /// `<source>:<line>` before failing with `error.InvalidProcfile`.
 /// Returned names and commands borrow from `bytes`; pass an arena for `gpa`.
 pub fn parse(gpa: std.mem.Allocator, source: []const u8, bytes: []const u8, diags: *diagnostics.Diagnostics) ![]const Service {
@@ -22,8 +22,10 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, bytes: []const u8, diag
     var line_number: usize = 0;
     while (lines.next()) |raw_line| {
         line_number += 1;
-        const line = std.mem.trim(u8, raw_line, " \t\r");
-        if (line.len == 0 or line[0] == '#') continue;
+        // Only the line ending is dropped: trailing whitespace can be part of
+        // the command (`foo\ ` escapes a space), so it is kept verbatim.
+        const line = std.mem.trimStart(u8, std.mem.trimEnd(u8, raw_line, "\r"), " \t");
+        if (std.mem.trimEnd(u8, line, " \t").len == 0 or line[0] == '#') continue;
 
         const location = try std.fmt.allocPrint(gpa, "{s}:{d}", .{ source, line_number });
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse {
@@ -31,12 +33,12 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, bytes: []const u8, diag
             continue;
         };
         const name = line[0..colon];
-        const command = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        const command = std.mem.trimStart(u8, line[colon + 1 ..], " \t");
         validate.identifier(name) catch {
             try diags.addFmt(location, "invalid service name '{s}' (use letters, digits, '_' or '-')", .{name});
             continue;
         };
-        if (command.len == 0) {
+        if (std.mem.trimEnd(u8, command, " \t").len == 0) {
             try diags.addFmt(location, "missing command for '{s}'", .{name});
             continue;
         }
@@ -112,7 +114,8 @@ test "procfile.parse: keeps colons and inner whitespace in commands" {
     }{
         .{ .line = "web: bin/rails server -b 0.0.0.0:3000", .command = "bin/rails server -b 0.0.0.0:3000" },
         .{ .line = "web:npm run dev", .command = "npm run dev" },
-        .{ .line = "web:\tenv  A=1   npm run dev  \r", .command = "env  A=1   npm run dev" },
+        .{ .line = "web:\tenv  A=1   npm run dev\r", .command = "env  A=1   npm run dev" },
+        .{ .line = "web: printf '%s' foo\\ \r", .command = "printf '%s' foo\\ " },
         .{ .line = "web: echo 'a: b' # not a comment", .command = "echo 'a: b' # not a comment" },
     };
     for (cases) |case| {
@@ -143,6 +146,12 @@ test "procfile.parse: reports every invalid line with its location" {
         .{ .path = "Procfile.dev:4", .message = "invalid service name '-web' (use letters, digits, '_' or '-')" },
         .{ .path = "Procfile.dev:5", .message = "missing command for 'worker'" },
         .{ .path = "Procfile.dev:6", .message = "duplicate service 'web' (first defined at line 1)" },
+    });
+}
+
+test "procfile.parse: rejects whitespace-only commands" {
+    try testExpectProblems("web: npm run dev\n \t\r\nworker: \t \r\n", &.{
+        .{ .path = "Procfile.dev:3", .message = "missing command for 'worker'" },
     });
 }
 
