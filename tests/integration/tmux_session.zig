@@ -610,18 +610,6 @@ fn runZask(gpa: std.mem.Allocator, io: std.Io, project: ServiceProject, args: []
     });
 }
 
-fn waitForPaneText(gpa: std.mem.Allocator, io: std.Io, target: []const u8, needle: []const u8) !void {
-    for (0..pane_ready_attempts) |_| {
-        const result = try run(gpa, io, &.{ build_options.tmux_path, "capture-pane", "-p", "-t", target });
-        defer gpa.free(result.stdout);
-        defer gpa.free(result.stderr);
-
-        if (std.mem.indexOf(u8, result.stdout, needle) != null) return;
-        try std.Io.sleep(io, pane_ready_interval, .awake);
-    }
-    return error.PaneTextTimeout;
-}
-
 test "monitor: keys move selection, toggle the filter, and quit restores the terminal" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

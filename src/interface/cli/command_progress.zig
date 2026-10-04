@@ -1,7 +1,7 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 const env = @import("../../platform/env.zig");
+const terminal = @import("../../platform/terminal.zig");
 
 const clear_line = "\r\x1b[2K";
 const clear_previous_line = "\x1b[1A\r\x1b[2K";
@@ -39,7 +39,7 @@ pub const Progress = struct {
             .writer = writer,
             .transient = tty,
             .color = color,
-            .width = terminalWidth(io, stdout) catch default_width,
+            .width = terminal.columns(io, stdout) orelse default_width,
         };
     }
 
@@ -285,23 +285,6 @@ fn displayLine(gpa: std.mem.Allocator, text: []const u8) ![]const u8 {
         if (byte.* == '\r' or byte.* == '\n') byte.* = ' ';
     }
     return normalized;
-}
-
-fn terminalWidth(io: std.Io, file: std.Io.File) !usize {
-    if (builtin.os.tag == .windows) return default_width;
-    var winsize: std.c.winsize = .{
-        .row = 0,
-        .col = 0,
-        .xpixel = 0,
-        .ypixel = 0,
-    };
-    const err = (try io.operate(.{ .device_io_control = .{
-        .file = file,
-        .code = std.c.T.IOCGWINSZ,
-        .arg = &winsize,
-    } })).device_io_control;
-    if (err < 0 or winsize.col == 0) return default_width;
-    return winsize.col;
 }
 
 fn displayRows(prefix_width: usize, text: []const u8, width: usize) usize {
