@@ -421,19 +421,30 @@ fn serverUnavailable(stderr: []const u8) bool {
 
 /// `cat` writes each read immediately, so the output a process prints just
 /// before it dies reaches the file even while the dead pane keeps the pipe
-/// open. tmux expands both formats and strftime sequences in the pipe
-/// command, so every '#' and '%' is doubled to reach the shell unchanged.
+/// open. When the log stops accepting writes mid-run (disk full, size limit),
+/// a notice is written to the pane's own terminal, where the output continues.
+/// tmux expands both formats and strftime sequences in the pipe command, so
+/// every '#' and '%' is doubled to reach the shell unchanged.
 fn buildOutputPipe(gpa: std.mem.Allocator, log: OutputLog) ![]const u8 {
     const header = try shell.quote(gpa, log.header);
     defer gpa.free(header);
     const path = try shell.quote(gpa, log.path);
     defer gpa.free(path);
-    const command = try std.fmt.allocPrint(gpa, "{{ printf '%s' {s}; exec cat; }} >> {s}", .{ header, path });
+    const notice_text = try std.fmt.allocPrint(gpa, "zask: output is no longer saved to {s}", .{log.path});
+    defer gpa.free(notice_text);
+    const notice = try shell.quote(gpa, notice_text);
+    defer gpa.free(notice);
+    const command = try std.fmt.allocPrint(gpa, "{{ printf '%s' {s}; cat; }} >> {s} || printf '\\r\\n%s\\r\\n' {s} > {s}", .{ header, path, notice, pane_tty_placeholder });
     defer gpa.free(command);
     const formats_escaped = try std.mem.replaceOwned(u8, gpa, command, "#", "##");
     defer gpa.free(formats_escaped);
-    return std.mem.replaceOwned(u8, gpa, formats_escaped, "%", "%%");
+    const escaped = try std.mem.replaceOwned(u8, gpa, formats_escaped, "%", "%%");
+    defer gpa.free(escaped);
+    return std.mem.replaceOwned(u8, gpa, escaped, pane_tty_placeholder, "'#{pane_tty}'");
 }
+
+/// Contains neither '#' nor '%', so it survives escaping until it is replaced.
+const pane_tty_placeholder = "\x00pane_tty\x00";
 
 fn tailNonEmptyLines(gpa: std.mem.Allocator, pane: []const u8, max_lines: usize) !PaneTail {
     if (max_lines == 0) return .{ .lines = try gpa.alloc([]const u8, 0) };
@@ -785,7 +796,7 @@ test "tmux.respawnPaneWithOutputLog: appends output to the log in the respawn in
     try runner.expectCommandArg(recorder.commands.items[0], 1, "respawn-pane");
     try runner.expectCommandArgContains(recorder.commands.items[0], 9, "npm run dev");
     try runner.expectCommandArgv(.{ .argv = argv[10..], .cwd = null, .interactive = false }, &.{
-        ";",                "pipe-pane",  "-t", "demo:api", "{ printf '%%s' '=== api ===\n'; exec cat; } >> '/state/it'\\''s ##1 100%%/api.log'",
+        ";",                "pipe-pane",  "-t", "demo:api", "{ printf '%%s' '=== api ===\n'; cat; } >> '/state/it'\\''s ##1 100%%/api.log' || printf '\\r\\n%%s\\r\\n' 'zask: output is no longer saved to /state/it'\\''s ##1 100%%/api.log' > '#{pane_tty}'",
         ";",                "set-option", "-p", "-t",       "demo:api",
         "@zask_started_at", "1700000000",
     });

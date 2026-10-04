@@ -11,8 +11,12 @@ pub fn dataBase(gpa: std.mem.Allocator, environ: ?*const env.Map) ![]const u8 {
     return std.fs.path.join(gpa, &.{ try home(environ), ".local", "share", "zask" });
 }
 
+/// Follows the XDG rule that an empty or relative XDG_STATE_HOME is ignored:
+/// a relative base would resolve differently in each pane's directory.
 pub fn stateBase(gpa: std.mem.Allocator, environ: ?*const env.Map) ![]const u8 {
-    if (env.get(environ, "XDG_STATE_HOME")) |value| return std.fs.path.join(gpa, &.{ value, "zask" });
+    if (env.get(environ, "XDG_STATE_HOME")) |value| {
+        if (std.fs.path.isAbsolute(value)) return std.fs.path.join(gpa, &.{ value, "zask" });
+    }
     return std.fs.path.join(gpa, &.{ try home(environ), ".local", "state", "zask" });
 }
 
@@ -49,6 +53,21 @@ pub fn writeFileMode(io: std.Io, path: []const u8, contents: []const u8, permiss
 
 test "paths.home: requires HOME in environment map" {
     try std.testing.expectError(error.HomeNotSet, home(null));
+}
+
+test "paths.stateBase: ignores empty and relative XDG_STATE_HOME" {
+    const cases = [_][]const u8{ "", "state" };
+    for (cases) |value| {
+        var environ = env.Map.init(std.testing.allocator);
+        defer environ.deinit();
+        try environ.put("HOME", "/home/me");
+        try environ.put("XDG_STATE_HOME", value);
+
+        const path = try stateBase(std.testing.allocator, &environ);
+        defer std.testing.allocator.free(path);
+
+        try std.testing.expectEqualStrings("/home/me/.local/state/zask", path);
+    }
 }
 
 test "paths.runtimeBase: fallback is scoped by uid" {

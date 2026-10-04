@@ -138,8 +138,10 @@ read with `grep` or an editor after `zask close`.
   replacing the older one, and a new log begins.
 - The log keeps the output as the terminal received it, including color codes
   and `\r\n` line endings.
-- If the log cannot be written, zask warns and starts the service anyway; its
-  output then stays only in the tmux window.
+- If the log cannot be written at start, zask warns and starts the service
+  anyway; its output then stays only in the tmux window. If writing fails
+  while the service runs (for example, a full disk), a
+  `zask: output is no longer saved to ...` line appears in the service window.
 
 Docker Compose output is not saved.
 
