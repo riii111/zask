@@ -24,13 +24,10 @@ pub fn prepareAppend(io: std.Io, path: []const u8, rotated_path: []const u8, rot
     defer lock.close(io);
 
     try restrictExisting(io, rotated_path);
-    if (try existingSize(io, path) >= rotate_at) {
-        try restrictExisting(io, path);
-        try cwd.rename(path, cwd, rotated_path, io);
-    }
+    try restrictExisting(io, path);
+    if (try existingSize(io, path) >= rotate_at) try cwd.rename(path, cwd, rotated_path, io);
     var file = try cwd.createFile(io, path, .{ .truncate = false, .permissions = private_file_permissions });
     defer file.close(io);
-    try file.setPermissions(io, private_file_permissions);
     return file.length(io);
 }
 
@@ -41,11 +38,16 @@ fn ensurePrivateDir(io: std.Io, path: []const u8) !void {
     try dir.setPermissions(io, private_dir_permissions);
 }
 
+/// Only a regular file is changed. Anything else at a log path is reported as
+/// error.NotRegularFile: a directory would lose its search permission, and
+/// following a symlink would change the mode of an unrelated file.
 fn restrictExisting(io: std.Io, path: []const u8) !void {
-    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+    const stat = std.Io.Dir.cwd().statFile(io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
+    if (stat.kind != .file) return error.NotRegularFile;
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
     try file.setPermissions(io, private_file_permissions);
 }
@@ -245,4 +247,50 @@ test "log_file.prepareAppend: concurrent calls rotate one generation once" {
         defer gpa.free(kept);
         try std.testing.expectEqualStrings(previous, kept);
     }
+}
+
+test "log_file.prepareAppend: rejects a non-file log path without changing it" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cases = [_]struct { log: []const u8, rotated: []const u8 }{
+        .{ .log = "api.log", .rotated = "api.log.1" },
+        .{ .log = "api.log.1", .rotated = "api.log" },
+    };
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(io, .{ .sub_path = case.rotated, .data = "x" });
+        try tmp.dir.createDirPath(io, case.log);
+        try testSetMode(io, tmp.dir, case.log, 0o755);
+        const path = try testPath(gpa, io, tmp.dir, "api.log");
+        defer gpa.free(path);
+        const rotated = try testPath(gpa, io, tmp.dir, "api.log.1");
+        defer gpa.free(rotated);
+
+        try std.testing.expectError(error.NotRegularFile, prepareAppend(io, path, rotated, 64));
+
+        try std.testing.expectEqual(@as(u32, 0o755), try testMode(io, tmp.dir, case.log));
+    }
+}
+
+test "log_file.prepareAppend: rejects a symlinked log without changing its target" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "shared.txt", .data = "not a log" });
+    try testSetMode(io, tmp.dir, "shared.txt", 0o644);
+    try tmp.dir.symLink(io, "shared.txt", "api.log", .{});
+    const path = try testPath(gpa, io, tmp.dir, "api.log");
+    defer gpa.free(path);
+    const rotated = try testPath(gpa, io, tmp.dir, "api.log.1");
+    defer gpa.free(rotated);
+
+    try std.testing.expectError(error.NotRegularFile, prepareAppend(io, path, rotated, 64));
+
+    try std.testing.expectEqual(@as(u32, 0o644), try testMode(io, tmp.dir, "shared.txt"));
 }
