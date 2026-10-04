@@ -11,6 +11,9 @@ pub const Runner = struct {
     /// error.Timeout. The child is killed and reaped, so none is left behind.
     /// Interactive runs ignore it.
     deadline_ms: ?i64 = null,
+    /// Applies to captured runs that do not set `RunOptions.timeout`, so a
+    /// caller can bound every probe made through adapters built on this runner.
+    timeout: ?std.Io.Duration = null,
 
     pub fn run(self: Runner, argv: []const []const u8, options: RunOptions) !RunOutput {
         if (self.recorder) |recorder| {
@@ -25,7 +28,13 @@ pub const Runner = struct {
             if (options.check) try checkTerm(term);
             return .{ .term = term };
         }
-        const result = (if (self.deadline_ms) |deadline_ms|
+        const relative_timeout = options.timeout orelse self.timeout;
+        const relative_deadline = if (relative_timeout) |duration| self.nowMilliseconds() + duration.toMilliseconds() else null;
+        const effective_deadline = if (self.deadline_ms) |absolute|
+            if (relative_deadline) |relative| @min(absolute, relative) else absolute
+        else
+            relative_deadline;
+        const result = (if (effective_deadline) |deadline_ms|
             self.runUntilDeadline(argv, options.cwd, deadline_ms)
         else if (options.cwd) |cwd|
             std.process.run(self.gpa, self.io, .{
@@ -165,7 +174,9 @@ pub const Runner = struct {
     }
 
     fn recordedRun(self: Runner, recorder: *Recorder, argv: []const []const u8, options: RunOptions) !RunOutput {
-        const result = recorder.record(argv, options.cwd, options.interactive) catch |err| switch (err) {
+        var recorded = options;
+        recorded.timeout = options.timeout orelse self.timeout;
+        const result = recorder.record(argv, recorded) catch |err| switch (err) {
             error.StreamTooLong => return error.OutputTooLarge,
             else => return err,
         };
@@ -196,6 +207,8 @@ pub const RunOptions = struct {
     check: bool = false,
     discard: bool = false,
     interactive: bool = false,
+    /// Captured runs only. Expiry returns error.Timeout.
+    timeout: ?std.Io.Duration = null,
 };
 
 pub const RunOutput = union(enum) {
@@ -274,14 +287,15 @@ pub const Recorder = struct {
         if (self.advance_clock_on_sleep) self.now_seconds += duration.toSeconds();
     }
 
-    fn record(self: *Recorder, argv: []const []const u8, cwd: ?[]const u8, interactive: bool) !std.process.RunResult {
+    fn record(self: *Recorder, argv: []const []const u8, options: RunOptions) !std.process.RunResult {
         self.now_seconds += self.seconds_per_command;
         const owned_argv = try self.gpa.alloc([]const u8, argv.len);
         for (argv, 0..) |arg, index| owned_argv[index] = try self.gpa.dupe(u8, arg);
         try self.commands.append(self.gpa, .{
             .argv = owned_argv,
-            .cwd = if (cwd) |value| try self.gpa.dupe(u8, value) else null,
-            .interactive = interactive,
+            .cwd = if (options.cwd) |value| try self.gpa.dupe(u8, value) else null,
+            .interactive = options.interactive,
+            .timeout = if (options.interactive) null else options.timeout,
         });
         if (self.responses.items.len > 0) {
             const response = self.responses.orderedRemove(0);
@@ -306,6 +320,7 @@ pub const RecordedCommand = struct {
     argv: []const []const u8,
     cwd: ?[]const u8,
     interactive: bool,
+    timeout: ?std.Io.Duration = null,
 };
 
 pub const RecordedSleep = struct {
@@ -472,6 +487,36 @@ test "runner.run: maps stream-too-long to output-too-large" {
     try std.testing.expectError(error.OutputTooLarge, run.run(&.{"docker"}, .{}));
 }
 
+test "runner.run: kills a child that outlives its timeout" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const run = Runner{ .gpa = std.testing.allocator, .io = threaded.io() };
+
+    try std.testing.expectError(error.Timeout, run.run(&.{ "sleep", "5" }, .{ .timeout = .fromMilliseconds(50) }));
+}
+
+test "runner.recorder: records the requested timeout" {
+    var recorder = Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+
+    _ = try run.run(&.{"probe"}, .{ .discard = true, .timeout = .fromSeconds(3) });
+
+    try std.testing.expectEqual(@as(?std.Io.Duration, .fromSeconds(3)), recorder.commands.items[0].timeout);
+}
+
+test "runner.recorder: falls back to the runner timeout" {
+    var recorder = Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder, .timeout = .fromSeconds(2) };
+
+    _ = try run.run(&.{"probe"}, .{ .discard = true });
+    _ = try run.run(&.{"probe"}, .{ .discard = true, .timeout = .fromSeconds(9) });
+
+    try std.testing.expectEqual(@as(?std.Io.Duration, .fromSeconds(2)), recorder.commands.items[0].timeout);
+    try std.testing.expectEqual(@as(?std.Io.Duration, .fromSeconds(9)), recorder.commands.items[1].timeout);
+}
+
 test "runner.checked: rejects non-zero exits" {
     const cases = [_]struct {
         argv: []const []const u8,
@@ -490,5 +535,27 @@ test "runner.checked: rejects non-zero exits" {
         const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
 
         try std.testing.expectError(error.CommandFailed, run.run(case.argv, case.options));
+    }
+}
+
+test "runner.run: earlier relative or absolute deadline also bounds a child with closed output" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cases = [_]struct { absolute_ms: i64, relative_ms: i64 }{
+        .{ .absolute_ms = 50, .relative_ms = 5000 },
+        .{ .absolute_ms = 5000, .relative_ms = 50 },
+    };
+    for (cases) |case| {
+        const before = std.Io.Clock.awake.now(io);
+        const run = Runner{
+            .gpa = std.testing.allocator,
+            .io = io,
+            .deadline_ms = std.Io.Clock.real.now(io).toMilliseconds() + case.absolute_ms,
+        };
+        try std.testing.expectError(error.Timeout, run.run(&.{ "/bin/sh", "-c", "exec >/dev/null 2>&1; exec sleep 5" }, .{
+            .timeout = .fromMilliseconds(case.relative_ms),
+        }));
+        try std.testing.expect(before.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() < 2000);
     }
 }

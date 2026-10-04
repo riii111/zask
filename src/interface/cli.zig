@@ -110,7 +110,7 @@ const command_specs = [_]CommandSpec{
     .{ .command = .restart, .names = &.{"restart"}, .usage = "restart <svc|group|docker>", .description = "Restart service, group, or docker", .completion = .restart_target },
     .{ .command = .list, .names = &.{"list"}, .usage = "list", .description = "List configured services" },
     .{ .command = .status, .names = &.{"status"}, .usage = "status [--json]", .description = "Show service state" },
-    .{ .command = .check, .names = &.{"check"}, .usage = "check", .description = "Check config without opening a session" },
+    .{ .command = .check, .names = &.{"check"}, .usage = "check [--prechecks]", .description = "Check config and environment without opening a session" },
     .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service> [--tail <n>]", .description = "Focus service window, or print its last n lines", .completion = .service },
     .{ .command = .init, .names = &.{"init"}, .usage = "init [project] [--root <path>] [--from <Procfile>] [--force]", .description = "Create project config", .completion = .init_options, .global = true },
     .{ .command = .wait, .names = &.{"wait"}, .usage = "wait <svc|group>... [--timeout <sec>]", .description = "Wait until services are ready" },
@@ -198,7 +198,7 @@ fn exitWithTextError(stdout: *std.Io.Writer, err: anyerror, err_ctx: cli_context
             try stdout.flush();
             std.process.exit(2);
         },
-        error.SessionNotRunning, error.TmuxUnavailable, error.ServiceStopIncomplete, error.StartupFailed, error.WindowNotReady, error.ServiceNotFound, error.ServiceWindowMissing, error.LogOutputTooLarge, error.ServiceNotRunning, error.ReadinessUnavailable, error.WaitTimedOut => {
+        error.EnvironmentCheckFailed, error.SessionNotRunning, error.TmuxUnavailable, error.ServiceStopIncomplete, error.StartupFailed, error.WindowNotReady, error.ServiceNotFound, error.ServiceWindowMissing, error.LogOutputTooLarge, error.ServiceNotRunning, error.ReadinessUnavailable, error.WaitTimedOut => {
             try stdout.flush();
             std.process.exit(1);
         },
@@ -708,9 +708,16 @@ test "cli.open: prints usage for invalid profile" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Usage:\n  zask <command>") != null);
 }
 
-fn testRunCheck(gpa: std.mem.Allocator, io: std.Io, config_path: []const u8, writer: *std.Io.Writer) !void {
+/// Runs `check` with PATH limited to `<tmp>/bin`, which holds fake `tools`.
+fn testRunCheck(gpa: std.mem.Allocator, io: std.Io, tmp: std.testing.TmpDir, tools: []const []const u8, config_path: []const u8, writer: *std.Io.Writer) !void {
+    try tmp.dir.createDirPath(io, "bin");
+    for (tools) |tool| {
+        const sub_path = try std.fs.path.join(gpa, &.{ "bin", tool });
+        try tmp.dir.writeFile(io, .{ .sub_path = sub_path, .data = "#!/bin/sh\n", .flags = .{ .permissions = .executable_file } });
+    }
     var environ = env.Map.init(gpa);
     try environ.put("HOME", "/home/me");
+    try environ.put("PATH", try tmp.dir.realPathFileAlloc(io, "bin", gpa));
     var diags = diagnostics.Diagnostics.init(gpa);
     var err_ctx: cli_context.ErrorContext = .{};
     try runWithArgs(.{
@@ -744,9 +751,9 @@ test "cli.check: reports success for a valid config with existing paths" {
     var buffer: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try testRunCheck(gpa, io, config_path, &writer);
+    try testRunCheck(gpa, io, tmp, &.{ "tmux", "serve" }, config_path, &writer);
 
-    try std.testing.expectEqualStrings(try std.fmt.allocPrint(gpa, "Config OK: {s}\n", .{config_path}), writer.buffered());
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(gpa, "Config OK: {s}\nEnvironment OK\n", .{config_path}), writer.buffered());
 }
 
 test "cli.check: lists every validation problem and skips path checks" {
@@ -764,7 +771,7 @@ test "cli.check: lists every validation problem and skips path checks" {
     var buffer: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectError(error.CheckFailed, testRunCheck(gpa, io, config_path, &writer));
+    try std.testing.expectError(error.CheckFailed, testRunCheck(gpa, io, tmp, &.{}, config_path, &writer));
 
     try std.testing.expectEqualStrings(try std.fmt.allocPrint(gpa,
         \\Error: 3 config problems
@@ -772,7 +779,7 @@ test "cli.check: lists every validation problem and skips path checks" {
         \\  groups[0].services[0].comand: unknown key; did you mean 'command'?
         \\  groups[0].services[0]: missing required string 'command'
         \\  startup_order[0].group: unknown group 'bee'; did you mean 'be'?
-        \\Path checks were skipped; fix the problems above and run check again.
+        \\Path and environment checks were skipped; fix the problems above and run check again.
         \\
     , .{config_path}), writer.buffered());
 }
@@ -795,13 +802,14 @@ test "cli.check: lists every missing configured path" {
     var buffer: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectError(error.CheckFailed, testRunCheck(gpa, io, config_path, &writer));
+    try std.testing.expectError(error.CheckFailed, testRunCheck(gpa, io, tmp, &.{ "tmux", "dev" }, config_path, &writer));
 
     try std.testing.expectEqualStrings(try std.fmt.allocPrint(gpa,
         \\Error: 2 config problems
         \\Config: {s}
         \\  groups[be].services[api].dir: directory not found: {s}/backend
         \\  groups[be].services[web].env_file: file not found: {s}/.env
+        \\Environment OK
         \\
     , .{ config_path, project_root, project_root }), writer.buffered());
 }
@@ -904,4 +912,31 @@ test "cli.completion: offers shell names for completion command" {
 
     try std.testing.expectEqualStrings("zsh\nbash\nfish\n", try testComplete(arena.allocator(), "zask", &.{ "completion", "" }));
     try std.testing.expectEqualStrings("", try testComplete(arena.allocator(), "zask", &.{ "completion", "zsh", "" }));
+}
+
+test "cli.check: fails with environment problems after a clean config" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const config_path = try testWriteConfig(gpa, io, tmp,
+        \\"prechecks":[{"name":"db","command":"pg_isready"}],
+        \\"groups":[{"name":"be","services":[{"name":"api","command":"serve"}]}]
+    );
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.EnvironmentCheckFailed, testRunCheck(gpa, io, tmp, &.{ "serve", "bash" }, config_path, &writer));
+
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(gpa,
+        \\Config OK: {s}
+        \\Error: 1 environment problem
+        \\  tmux: not found in PATH; zask runs every service in a tmux session
+        \\    Fix: install tmux or add it to PATH
+        \\Prechecks: 1 not run; add --prechecks to run them
+        \\
+    , .{config_path}), writer.buffered());
 }
