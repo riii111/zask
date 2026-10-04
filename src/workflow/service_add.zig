@@ -2,6 +2,7 @@ const std = @import("std");
 const config = @import("../model/config.zig");
 const config_edit = @import("../model/config_edit.zig");
 const diagnostics = @import("../model/diagnostics.zig");
+const lock = @import("../platform/lock.zig");
 
 pub const NewService = config_edit.NewService;
 
@@ -11,6 +12,8 @@ pub const Target = struct {
     /// The exact content the selected config was loaded from.
     bytes: []const u8,
     home: []const u8,
+    /// Directory for the lock that serializes edits of the same config.
+    lock_dir: []const u8,
 };
 
 pub const Outcome = union(enum) {
@@ -20,8 +23,12 @@ pub const Outcome = union(enum) {
     group_required: []const []const u8,
     /// The edited config fails validation; the diagnostics hold the reasons.
     invalid,
+    /// The edited config would exceed the size zask loads.
+    too_large,
     /// The file changed after it was loaded.
     changed,
+    /// Another `zask add` is editing the same config.
+    busy,
 };
 
 /// Comment-preserving edits are not supported yet, so `.jsonc` configs are
@@ -42,25 +49,39 @@ pub fn addService(gpa: std.mem.Allocator, io: std.Io, target: Target, group: ?[]
         .group_not_found => |names| return .{ .group_not_found = names },
         .group_required => |names| return .{ .group_required = names },
     };
+    if (!config.fitsLoadLimit(added.bytes.len)) return .too_large;
     _ = config.Config.parseWithDiagnostics(gpa, added.bytes, target.home, diags) catch |err| switch (err) {
         error.InvalidConfig => return .invalid,
         else => return err,
     };
-    if (!try replaceIfUnchanged(gpa, io, target.path, target.bytes, added.bytes)) return .changed;
+    const replaced = replaceIfUnchanged(gpa, io, target, added.bytes) catch |err| switch (err) {
+        error.LockBusy => return .busy,
+        else => return err,
+    };
+    if (!replaced) return .changed;
     return .{ .added = added };
 }
 
-/// Writes `contents` to a temporary file next to the real file behind `path`
-/// and renames it over the original only if the original still equals
-/// `expected`. A failure before the rename leaves the original as it was and
-/// removes the temporary file. The original permissions are kept, and a
-/// symlinked config keeps its link because the rename targets the real file.
-fn replaceIfUnchanged(gpa: std.mem.Allocator, io: std.Io, path: []const u8, expected: []const u8, contents: []const u8) !bool {
-    const real_path = std.Io.Dir.cwd().realPathFileAlloc(io, path, gpa) catch |err| switch (err) {
+/// Writes `contents` to a temporary file next to the real file behind
+/// `target.path` and renames it over the original only if the original still
+/// equals `target.bytes`. A failure before the rename leaves the original as
+/// it was and removes the temporary file. The original permissions are kept,
+/// and a symlinked config keeps its link because the rename targets the real
+/// file. A lock keyed by the real path spans the comparison and the rename, so
+/// a concurrent `zask add` either sees this edit or reports error.LockBusy;
+/// editors do not take the lock, which leaves only the short window between
+/// the comparison and the rename.
+fn replaceIfUnchanged(gpa: std.mem.Allocator, io: std.Io, target: Target, contents: []const u8) !bool {
+    const expected = target.bytes;
+    const real_path = std.Io.Dir.cwd().realPathFileAlloc(io, target.path, gpa) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
     };
     defer gpa.free(real_path);
+    const lock_name = try editLockName(gpa, real_path);
+    defer gpa.free(lock_name);
+    const held = try lock.Lock.acquire(gpa, io, lock_name, target.lock_dir, .system);
+    defer held.release();
     var dir = try std.Io.Dir.openDirAbsolute(io, std.fs.path.dirname(real_path) orelse "/", .{});
     defer dir.close(io);
     const name = std.fs.path.basename(real_path);
@@ -70,8 +91,8 @@ fn replaceIfUnchanged(gpa: std.mem.Allocator, io: std.Io, path: []const u8, expe
     defer atomic.deinit(io);
     try atomic.file.writeStreamingAll(io, contents);
 
-    // Checked after the temporary file is complete to keep the window
-    // between this read and the rename small.
+    // Checked after the temporary file is complete to keep the window for
+    // editors between this read and the rename small.
     const current = dir.readFileAlloc(io, name, gpa, .limited(expected.len + 1)) catch |err| switch (err) {
         error.FileNotFound, error.StreamTooLong => return false,
         else => return err,
@@ -80,6 +101,10 @@ fn replaceIfUnchanged(gpa: std.mem.Allocator, io: std.Io, path: []const u8, expe
     if (!std.mem.eql(u8, current, expected)) return false;
     try atomic.replace(io);
     return true;
+}
+
+fn editLockName(gpa: std.mem.Allocator, real_path: []const u8) ![]u8 {
+    return std.fmt.allocPrint(gpa, "config-{x:0>16}", .{std.hash.Wyhash.hash(0, real_path)});
 }
 
 // -----------------------------------------------------------------------------
@@ -100,6 +125,11 @@ const TestFile = struct {
     tmp: std.testing.TmpDir,
     dir_path: []const u8,
     path: []const u8,
+    lock_dir: []const u8,
+
+    fn target(self: TestFile, path: []const u8, bytes: []const u8) Target {
+        return .{ .path = path, .bytes = bytes, .home = "/home/me", .lock_dir = self.lock_dir };
+    }
 };
 
 fn testWriteConfig(gpa: std.mem.Allocator, io: std.Io, contents: []const u8) !TestFile {
@@ -107,11 +137,16 @@ fn testWriteConfig(gpa: std.mem.Allocator, io: std.Io, contents: []const u8) !Te
     errdefer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "zask.json", .data = contents });
     const dir_path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-    return .{ .tmp = tmp, .dir_path = dir_path, .path = try std.fs.path.join(gpa, &.{ dir_path, "zask.json" }) };
+    return .{
+        .tmp = tmp,
+        .dir_path = dir_path,
+        .path = try std.fs.path.join(gpa, &.{ dir_path, "zask.json" }),
+        .lock_dir = try std.fs.path.join(gpa, &.{ dir_path, "locks" }),
+    };
 }
 
 fn testRead(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
-    return std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20));
+    return std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(config.max_config_bytes));
 }
 
 test "service_add.addService: writes the edited config" {
@@ -124,7 +159,7 @@ test "service_add.addService: writes the edited config" {
     defer file.tmp.cleanup();
     var diags = diagnostics.Diagnostics.init(gpa);
 
-    const outcome = try addService(gpa, io, .{ .path = file.path, .bytes = test_config, .home = "/home/me" }, null, .{ .name = "api", .command = "cargo run" }, &diags);
+    const outcome = try addService(gpa, io, file.target(file.path, test_config), null, .{ .name = "api", .command = "cargo run" }, &diags);
 
     try std.testing.expect(outcome == .added);
     try std.testing.expectEqualStrings(
@@ -149,7 +184,7 @@ test "service_add.addService: leaves the file when the result is invalid" {
     defer file.tmp.cleanup();
     var diags = diagnostics.Diagnostics.init(gpa);
 
-    const outcome = try addService(gpa, io, .{ .path = file.path, .bytes = test_config, .home = "/home/me" }, null, .{ .name = "bad name", .command = "x" }, &diags);
+    const outcome = try addService(gpa, io, file.target(file.path, test_config), null, .{ .name = "bad name", .command = "x" }, &diags);
 
     try std.testing.expect(outcome == .invalid);
     try std.testing.expectEqualStrings("groups[0].services.bad name", diags.slice()[0].path);
@@ -167,7 +202,7 @@ test "service_add.addService: leaves the file when it changed after loading" {
     defer file.tmp.cleanup();
     var diags = diagnostics.Diagnostics.init(gpa);
 
-    const outcome = try addService(gpa, io, .{ .path = file.path, .bytes = test_config, .home = "/home/me" }, null, .{ .name = "api", .command = "x" }, &diags);
+    const outcome = try addService(gpa, io, file.target(file.path, test_config), null, .{ .name = "api", .command = "x" }, &diags);
 
     try std.testing.expect(outcome == .changed);
     try std.testing.expectEqualStrings(edited_elsewhere, try testRead(gpa, io, file.path));
@@ -185,7 +220,7 @@ test "service_add.addService: keeps the original on write failure" {
     try std.Io.Dir.cwd().setFilePermissions(io, file.dir_path, @enumFromInt(0o555), .{});
     defer std.Io.Dir.cwd().setFilePermissions(io, file.dir_path, @enumFromInt(0o755), .{}) catch {};
 
-    const result = addService(gpa, io, .{ .path = file.path, .bytes = test_config, .home = "/home/me" }, null, .{ .name = "api", .command = "x" }, &diags);
+    const result = addService(gpa, io, file.target(file.path, test_config), null, .{ .name = "api", .command = "x" }, &diags);
 
     try std.testing.expectError(error.AccessDenied, result);
     try std.testing.expectEqualStrings(test_config, try testRead(gpa, io, file.path));
@@ -203,13 +238,71 @@ test "service_add.addService: updates the target of a symlinked config" {
     const link = try std.fs.path.join(gpa, &.{ file.dir_path, "link.json" });
     var diags = diagnostics.Diagnostics.init(gpa);
 
-    const outcome = try addService(gpa, io, .{ .path = link, .bytes = test_config, .home = "/home/me" }, null, .{ .name = "api", .command = "x" }, &diags);
+    const outcome = try addService(gpa, io, file.target(link, test_config), null, .{ .name = "api", .command = "x" }, &diags);
 
     try std.testing.expect(outcome == .added);
     var target_buf: [std.fs.max_path_bytes]u8 = undefined;
     const target_len = try file.tmp.dir.readLink(io, "link.json", &target_buf);
     try std.testing.expectEqualStrings("zask.json", target_buf[0..target_len]);
     try std.testing.expectEqualStrings(outcome.added.bytes, try testRead(gpa, io, file.path));
+}
+
+test "service_add.addService: reports busy while another edit holds the lock" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var file = try testWriteConfig(gpa, io, test_config);
+    defer file.tmp.cleanup();
+    var diags = diagnostics.Diagnostics.init(gpa);
+    const held = try lock.Lock.acquire(gpa, io, try editLockName(gpa, file.path), file.lock_dir, .system);
+    defer held.release();
+
+    const outcome = try addService(gpa, io, file.target(file.path, test_config), null, .{ .name = "api", .command = "x" }, &diags);
+
+    try std.testing.expect(outcome == .busy);
+    try std.testing.expectEqualStrings(test_config, try testRead(gpa, io, file.path));
+}
+
+test "service_add.addService: refuses results the loader would reject as too large" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    const service: NewService = .{ .name = "api", .command = "x" };
+    var probe = try testWriteConfig(gpa, io, test_config);
+    defer probe.tmp.cleanup();
+    var probe_diags = diagnostics.Diagnostics.init(gpa);
+    const growth = (try addService(gpa, io, probe.target(probe.path, test_config), null, service, &probe_diags)).added.bytes.len - test_config.len;
+    const cases = [_]struct { result_len: usize, added: bool }{
+        .{ .result_len = config.max_config_bytes - 1, .added = true },
+        .{ .result_len = config.max_config_bytes, .added = false },
+    };
+
+    for (cases) |case| {
+        const padded = try std.mem.concat(gpa, u8, &.{ test_config, try testSpaces(gpa, case.result_len - growth - test_config.len) });
+        var file = try testWriteConfig(gpa, io, padded);
+        defer file.tmp.cleanup();
+        var diags = diagnostics.Diagnostics.init(gpa);
+
+        const outcome = try addService(gpa, io, file.target(file.path, padded), null, service, &diags);
+
+        if (case.added) {
+            try std.testing.expectEqual(case.result_len, outcome.added.bytes.len);
+            _ = try config.loadPath(gpa, io, file.path, "/home/me");
+        } else {
+            try std.testing.expect(outcome == .too_large);
+            try std.testing.expect(std.mem.eql(u8, padded, try testRead(gpa, io, file.path)));
+        }
+    }
+}
+
+fn testSpaces(gpa: std.mem.Allocator, len: usize) ![]u8 {
+    const spaces = try gpa.alloc(u8, len);
+    @memset(spaces, ' ');
+    return spaces;
 }
 
 test "service_add.ensureEditable: rejects jsonc paths" {

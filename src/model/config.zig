@@ -5,7 +5,7 @@ const diagnostics = @import("diagnostics.zig");
 const watch = @import("watch.zig");
 
 const Value = std.json.Value;
-const max_config_bytes = 10 * 1024 * 1024;
+pub const max_config_bytes = 10 * 1024 * 1024;
 
 /// ユーザーが zask.json に書く公開キー名の単一定義。
 /// validate の許可リスト・normalize の入力読み取り・init の生成で共有する。
@@ -478,6 +478,12 @@ pub const ConfigFile = struct {
 pub fn loadFileWithDiagnostics(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []const u8, diags: *diagnostics.Diagnostics) !ConfigFile {
     const bytes = try readConfigBytes(gpa, io, path);
     return .{ .bytes = bytes, .cfg = try Config.parseWithDiagnostics(gpa, bytes, home, diags) };
+}
+
+/// Whether a config of `len` bytes can be loaded; the read limit counts a
+/// file that reaches it as too large.
+pub fn fitsLoadLimit(len: usize) bool {
+    return len < max_config_bytes;
 }
 
 /// Returns the file content owned by the caller, with the same size limit

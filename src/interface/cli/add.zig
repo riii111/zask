@@ -1,5 +1,6 @@
 const std = @import("std");
 const diagnostics = @import("../../model/diagnostics.zig");
+const paths = @import("../../platform/paths.zig");
 const service_add = @import("../../workflow/service_add.zig");
 const Context = @import("context.zig").Context;
 
@@ -59,7 +60,12 @@ pub fn run(ctx: *Context, opts: Options) !void {
 
     var diags = diagnostics.Diagnostics.init(gpa);
     defer diags.deinit();
-    const target: service_add.Target = .{ .path = path, .bytes = file.bytes, .home = file.cfg.home };
+    const target: service_add.Target = .{
+        .path = path,
+        .bytes = file.bytes,
+        .home = file.cfg.home,
+        .lock_dir = try paths.runtimeBase(gpa, ctx.base.environ),
+    };
     const service: service_add.NewService = .{ .name = opts.name, .command = opts.command, .port = opts.port };
     const outcome = service_add.addService(gpa, io, target, opts.group, service, &diags) catch |err| switch (err) {
         error.OutOfMemory => return err,
@@ -101,6 +107,17 @@ pub fn run(ctx: *Context, opts: Options) !void {
             for (diags.slice()) |diagnostic| try writer.print("  {s}: {s}\n", .{ diagnostic.path, diagnostic.message });
             try writeUnchanged(writer, path);
             return error.ServiceNotAdded;
+        },
+        .too_large => {
+            try writer.print("Error: adding service '{s}' would make the config too large to load\n", .{opts.name});
+            try writeUnchanged(writer, path);
+            return error.ServiceNotAdded;
+        },
+        .busy => {
+            try writer.writeAll("Error: another zask add is editing the config\n");
+            try writeUnchanged(writer, path);
+            try writer.writeAll("Run the command again.\n");
+            return error.ConfigBusy;
         },
         .changed => {
             try writer.writeAll("Error: the config changed while zask add was editing it\n");
@@ -144,6 +161,7 @@ fn testRunAdd(gpa: std.mem.Allocator, config_name: []const u8, contents: []const
     const path = try tmp.dir.realPathFileAlloc(io, config_name, gpa);
     var environ = env.Map.init(gpa);
     try environ.put("HOME", "/home/me");
+    try environ.put("XDG_RUNTIME_DIR", try tmp.dir.realPathFileAlloc(io, ".", gpa));
     var diags = diagnostics.Diagnostics.init(gpa);
     const output = try gpa.alloc(u8, 4096);
     var writer: std.Io.Writer = .fixed(output);
@@ -206,7 +224,21 @@ test "add.run: reports the added entry and edited config" {
         \\  "web": {"command": "npm run dev", "port": 5173}
         \\
     , run_result.output);
-    try std.testing.expect(std.mem.indexOf(u8, run_result.config, "\"web\": {\n") != null);
+    try std.testing.expectEqualStrings(
+        \\{
+        \\  "project": {"name": "demo", "root": "/tmp/demo"},
+        \\  "groups": [
+        \\    {"name": "backend", "services": [{"name": "api", "command": "serve"}]},
+        \\    {"name": "frontend", "services": {
+        \\      "web": {
+        \\        "command": "npm run dev",
+        \\        "port": 5173
+        \\      }
+        \\    }}
+        \\  ]
+        \\}
+        \\
+    , run_result.config);
 }
 
 test "add.run: leaves the config on refusal" {
