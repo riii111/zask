@@ -122,12 +122,15 @@ pub const Runner = struct {
             .raw = .{ .nanoseconds = @as(i96, deadline_ms) * std.time.ns_per_ms },
             .clock = .real,
         } };
-        while (multi_reader.fill(64, timeout)) |_| {
+        while (true) {
+            multi_reader.fill(64, timeout) catch |err| switch (err) {
+                error.EndOfStream => break,
+                // OS timers may wake before the requested wall-clock deadline.
+                error.Timeout => if (self.nowMilliseconds() < deadline_ms) continue else return error.Timeout,
+                else => |e| return e,
+            };
             if (multi_reader.reader(0).buffered().len > captured_output_limit) return error.StreamTooLong;
             if (multi_reader.reader(1).buffered().len > captured_output_limit) return error.StreamTooLong;
-        } else |err| switch (err) {
-            error.EndOfStream => {},
-            else => |e| return e,
         }
         try multi_reader.checkAnyError();
 
