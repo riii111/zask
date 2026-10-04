@@ -74,6 +74,8 @@ const Monitor = struct {
     notice: ?[]const u8 = null,
     previous: []u8 = &.{},
     input: keys.Decoder = .{},
+    /// When the pending incomplete sequence in `input` started; null when none is pending.
+    pending_since: ?std.Io.Timestamp = null,
 
     fn deinit(self: *Monitor) void {
         self.selection.deinit(self.gpa);
@@ -91,12 +93,18 @@ const Monitor = struct {
             const elapsed = refreshed_at.untilNow(self.io, .awake).toMilliseconds();
             const remaining: i32 = @intCast(std.math.clamp(refresh_interval_ms - elapsed, 0, refresh_interval_ms));
             if (interactive) {
-                const timeout = if (self.input.pending()) @min(remaining, escape_timeout_ms) else remaining;
+                // A pending sequence waits on its own deadline, not the refresh
+                // timer; it is resolved only once poll reports no further bytes.
+                const escape_remaining = self.escapeRemaining();
+                const timeout = if (escape_remaining) |left| @min(remaining, left) else remaining;
                 switch (try terminal.waitReadable(terminal.stdin, timeout)) {
                     .input => if (try self.readKeys() == .quit) return,
                     .closed => return,
-                    .timeout => if (self.input.flush()) |key| {
-                        if (try self.handleKey(key) == .quit) return;
+                    .timeout => if (self.escapeRemaining() == 0) {
+                        self.pending_since = null;
+                        if (self.input.flush()) |key| {
+                            if (try self.handleKey(key) == .quit) return;
+                        }
                     },
                 }
             } else {
@@ -116,7 +124,20 @@ const Monitor = struct {
         while (self.input.next()) |key| {
             if (try self.handleKey(key) == .quit) return .quit;
         }
+        if (!self.input.pending()) {
+            self.pending_since = null;
+        } else if (self.pending_since == null) {
+            self.pending_since = std.Io.Clock.awake.now(self.io);
+        }
         return .keep;
+    }
+
+    /// Milliseconds left before a pending incomplete sequence is resolved as-is;
+    /// null when nothing is pending.
+    fn escapeRemaining(self: Monitor) ?i32 {
+        const since = self.pending_since orelse return null;
+        const age = since.untilNow(self.io, .awake).toMilliseconds();
+        return @intCast(std.math.clamp(escape_timeout_ms - age, 0, escape_timeout_ms));
     }
 
     fn handleKey(self: *Monitor, key: keys.Key) !Control {
