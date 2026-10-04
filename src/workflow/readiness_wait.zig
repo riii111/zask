@@ -47,39 +47,43 @@ pub fn waitReady(cfg: config.Config, observer: service_observation.Observer, tar
         .unavailable => return waits.reportTmuxUnavailable(writer),
     }
 
-    // null once the service is done; otherwise its last pending health, which
-    // the timeout report explains.
-    const pending = try gpa.alloc(?observations.HealthObservation, services.len);
-    defer gpa.free(pending);
-    @memset(pending, .waiting);
+    // Last health per service for the timeout report; null until observed.
+    const last = try gpa.alloc(?observations.HealthObservation, services.len);
+    defer gpa.free(last);
+    @memset(last, null);
+    const reported = try gpa.alloc(bool, services.len);
+    defer gpa.free(reported);
+    @memset(reported, false);
+
+    // Every round re-observes all targets, so one that became ready and then
+    // exited still fails the wait. The deadline is checked before each
+    // observation as well, so a slow round overruns it by at most one probe.
     const deadline = observer.runner.nowSeconds() + timeout_seconds;
     while (true) {
-        var remaining: usize = 0;
-        for (services, pending) |service, *last| {
-            if (last.* == null) continue;
+        var all_ready = true;
+        for (services, last, reported) |service, *health, *was_reported| {
+            if (observer.runner.nowSeconds() > deadline) return reportTimeout(writer, services, last, timeout_seconds);
             const name = try config.Config.serviceName(service);
             const observation = try observer.observeService(service);
             defer observation.deinit(gpa);
+            health.* = observation.health();
             switch (waitDecision(observation.health())) {
-                .ready => {
-                    last.* = null;
+                .ready => if (!was_reported.*) {
+                    was_reported.* = true;
                     try waits.writeProgress(writer, "{s} ready\n", .{name});
                 },
-                .running_without_check => {
-                    last.* = null;
+                .running_without_check => if (!was_reported.*) {
+                    was_reported.* = true;
                     try waits.writeProgress(writer, "{s} running (no port to check)\n", .{name});
                 },
-                .pending => {
-                    last.* = observation.health();
-                    remaining += 1;
-                },
+                .pending => all_ready = false,
                 .not_running => return reportNotRunning(writer, name, observation.pane),
                 .unobservable => return reportUnobservable(writer, name, observation),
             }
         }
-        if (remaining == 0) return;
         const now = observer.runner.nowSeconds();
-        if (now >= deadline) return reportTimeout(writer, services, pending, timeout_seconds);
+        if (all_ready and now <= deadline) return;
+        if (now >= deadline) return reportTimeout(writer, services, last, timeout_seconds);
         observer.runner.sleep(std.Io.Duration.fromSeconds(@min(poll_interval_seconds, deadline - now)));
     }
 }
@@ -139,17 +143,27 @@ fn reportUnobservable(writer: *std.Io.Writer, name: []const u8, observation: obs
     return error.ReadinessUnavailable;
 }
 
-fn reportTimeout(writer: *std.Io.Writer, services: []const std.json.Value, pending: []const ?observations.HealthObservation, timeout_seconds: u32) !void {
+fn reportTimeout(writer: *std.Io.Writer, services: []const std.json.Value, last: []const ?observations.HealthObservation, timeout_seconds: u32) !void {
     try writer.print("Timed out after {d}s waiting for:\n", .{timeout_seconds});
-    for (services, pending) |service, last| {
-        const health = last orelse continue;
+    var listed: usize = 0;
+    for (services, last) |service, health| {
         const name = try config.Config.serviceName(service);
         const port = config.Config.servicePort(service) orelse 0;
-        switch (health) {
+        const observed = health orelse {
+            listed += 1;
+            try writer.print("  {s}: not checked before the deadline\n", .{name});
+            continue;
+        };
+        switch (observed) {
+            .waiting => try writer.print("  {s}: port {d} not listening\n", .{ name, port }),
             .degraded => try writer.print("  {s}: HTTP check on port {d} failing\n", .{ name, port }),
-            else => try writer.print("  {s}: port {d} not listening\n", .{ name, port }),
+            // Not reaching the deadline check: not_running / unavailable end
+            // the wait at once.
+            .ready, .no_check, .not_running, .unavailable => continue,
         }
+        listed += 1;
     }
+    if (listed == 0) try writer.writeAll("  all targets became ready only after the deadline\n");
     try writer.flush();
     return error.WaitTimedOut;
 }
@@ -313,16 +327,80 @@ test "readiness_wait.waitReady: waits for every service of a group" {
     try h.enqueue(test_pane_running, 0);
     try h.enqueue(test_pane_running, 0);
     try h.enqueue("", 1);
-    // round 2: only web is observed again
+    // round 2: every service is observed again; api and worker are not reported twice
+    try h.enqueue(test_pane_running, 0);
+    try h.enqueue("", 0);
+    try h.enqueue("", 0);
+    try h.enqueue(test_pane_running, 0);
     try h.enqueue(test_pane_running, 0);
     try h.enqueue("", 0);
 
     try h.wait(&.{ "backend", "api" }, 30);
 
     try std.testing.expectEqualStrings("api ready\nworker running (no port to check)\nweb ready\n", h.output());
-    try std.testing.expectEqual(@as(usize, 3), h.commandCount("nc"));
+    try std.testing.expectEqual(@as(usize, 4), h.commandCount("nc"));
     try proc_runner.expectNoRemainingResponses(&h.recorder);
     try h.expectReadOnly();
+}
+
+test "readiness_wait.waitReady: fails when a ready service exits before the others are ready" {
+    var h: TestHarness = undefined;
+    h.init();
+    defer h.deinit();
+    try h.enqueue(test_session_active, 0);
+    try h.enqueue(test_pane_running, 0);
+    try h.enqueue("", 0);
+    try h.enqueue("", 0);
+    try h.enqueue(test_pane_running, 0);
+    try h.enqueue("", 1);
+    try h.enqueue("1|1|100|node|900\n", 0);
+
+    try std.testing.expectError(error.ServiceNotRunning, h.wait(&.{ "api", "web" }, 30));
+
+    try std.testing.expectEqualStrings("api ready\napi exited with code 1\n", h.output());
+    try proc_runner.expectNoRemainingResponses(&h.recorder);
+}
+
+test "readiness_wait.waitReady: does not succeed when observing outlasts the deadline" {
+    var h: TestHarness = undefined;
+    h.init();
+    defer h.deinit();
+    h.recorder.seconds_per_command = 1;
+    try h.enqueue(test_session_active, 0);
+    try h.enqueue(test_pane_running, 0);
+    try h.enqueue("", 0);
+    try h.enqueue("", 0);
+
+    try std.testing.expectError(error.WaitTimedOut, h.wait(&.{ "api", "web" }, 1));
+
+    try std.testing.expectEqualStrings(
+        \\api ready
+        \\Timed out after 1s waiting for:
+        \\  web: not checked before the deadline
+        \\
+    , h.output());
+    try std.testing.expectEqual(@as(usize, 2), h.commandCount("tmux"));
+    try proc_runner.expectNoRemainingResponses(&h.recorder);
+}
+
+test "readiness_wait.waitReady: times out when the last round ends past the deadline" {
+    var h: TestHarness = undefined;
+    h.init();
+    defer h.deinit();
+    h.recorder.seconds_per_command = 1;
+    try h.enqueue(test_session_active, 0);
+    try h.enqueue(test_pane_running, 0);
+    try h.enqueue("", 0);
+    try h.enqueue("", 0);
+
+    try std.testing.expectError(error.WaitTimedOut, h.wait(&.{"api"}, 1));
+
+    try std.testing.expectEqualStrings(
+        \\api ready
+        \\Timed out after 1s waiting for:
+        \\  all targets became ready only after the deadline
+        \\
+    , h.output());
 }
 
 test "readiness_wait.waitReady: fails when a service exits while waiting" {

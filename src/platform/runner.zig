@@ -122,9 +122,10 @@ pub const Recorder = struct {
     stderr: []const u8 = "",
     term: std.process.Child.Term = .{ .exited = 0 },
     now_seconds: i64 = 0,
-    /// Lets deadline-based loops see time pass; off by default so existing tests
-    /// keep a fixed clock across recorded sleeps.
+    /// Let deadline-based loops see time pass during sleeps and commands; off by
+    /// default so existing tests keep a fixed clock.
     advance_clock_on_sleep: bool = false,
+    seconds_per_command: i64 = 0,
 
     pub fn init(gpa: std.mem.Allocator) Recorder {
         return .{ .gpa = gpa, .commands = .empty, .responses = .empty, .errors = .empty, .sleeps = .empty };
@@ -166,6 +167,7 @@ pub const Recorder = struct {
     }
 
     fn record(self: *Recorder, argv: []const []const u8, cwd: ?[]const u8, interactive: bool) !std.process.RunResult {
+        self.now_seconds += self.seconds_per_command;
         const owned_argv = try self.gpa.alloc([]const u8, argv.len);
         for (argv, 0..) |arg, index| owned_argv[index] = try self.gpa.dupe(u8, arg);
         try self.commands.append(self.gpa, .{
