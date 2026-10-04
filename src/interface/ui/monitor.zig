@@ -344,6 +344,8 @@ const MonitorStatus = enum {
 };
 
 const RowKind = enum { service, docker };
+// ':' is excluded from service identifiers, so this key cannot collide.
+const docker_selection_key = ":docker";
 
 const MonitorRow = struct {
     name: []const u8,
@@ -354,6 +356,10 @@ const MonitorRow = struct {
     port: []const u8,
     /// Last non-empty pane line; only captured for rows that are not live.
     log: []const u8 = "",
+
+    fn selectionKey(self: MonitorRow) []const u8 {
+        return if (self.kind == .docker) docker_selection_key else self.name;
+    }
 };
 
 const Snapshot = struct {
@@ -400,7 +406,7 @@ fn selectedTarget(snapshot: Snapshot, selection: Selection) ?Target {
     const name = selection.name orelse return null;
     for (snapshot.rows) |row| {
         if (!isVisible(row, snapshot.mode)) continue;
-        if (std.mem.eql(u8, rowKey(row), name)) return .{ .name = row.name, .kind = row.kind };
+        if (std.mem.eql(u8, row.selectionKey(), name)) return .{ .name = row.name, .kind = row.kind };
     }
     return null;
 }
@@ -448,24 +454,12 @@ fn lastOutputLine(output: []const u8, fallback: []const u8) []const u8 {
     return fallback;
 }
 
-/// Not a valid service identifier, so a service named `docker` stays a
-/// different row from Compose.
-const docker_row_key = "@docker";
-
-/// What the selection remembers for `row`.
-fn rowKey(row: MonitorRow) []const u8 {
-    return switch (row.kind) {
-        .service => row.name,
-        .docker => docker_row_key,
-    };
-}
-
 /// Caller owns the returned slice; the keys borrow from `snapshot`.
 fn visibleNames(gpa: std.mem.Allocator, snapshot: Snapshot) ![]const []const u8 {
     var names: std.ArrayList([]const u8) = .empty;
     errdefer names.deinit(gpa);
     for (snapshot.rows) |row| {
-        if (isVisible(row, snapshot.mode)) try names.append(gpa, rowKey(row));
+        if (isVisible(row, snapshot.mode)) try names.append(gpa, row.selectionKey());
     }
     return names.toOwnedSlice(gpa);
 }
@@ -500,7 +494,7 @@ fn writeFrame(gpa: std.mem.Allocator, writer: *std.Io.Writer, cfg: config.Config
     for (snapshot.rows) |row| {
         if (!isVisible(row, snapshot.mode)) continue;
         if (view.selected) |name| {
-            if (std.mem.eql(u8, name, rowKey(row))) selected_index = visible.items.len;
+            if (std.mem.eql(u8, name, row.selectionKey())) selected_index = visible.items.len;
         }
         try visible.append(gpa, row);
     }
@@ -1211,7 +1205,7 @@ test "monitor.selectedTarget: resolves only a visible selected row" {
     const rows = [_]MonitorRow{ docker_row, testRow("api", .live), testRow("web", .dead) };
     var api = try testSelection("api");
     defer api.deinit(std.testing.allocator);
-    var docker = try testSelection(docker_row_key);
+    var docker = try testSelection(docker_selection_key);
     defer docker.deinit(std.testing.allocator);
 
     const all = selectedTarget(.{ .rows = &rows }, api) orelse return error.MissingTarget;
@@ -1308,7 +1302,7 @@ test "monitor.selectedTarget: a service named docker stays apart from Compose" {
     const rows = [_]MonitorRow{ compose_row, testRow("docker", .dead) };
     var service = try testSelection("docker");
     defer service.deinit(std.testing.allocator);
-    var compose = try testSelection(docker_row_key);
+    var compose = try testSelection(docker_selection_key);
     defer compose.deinit(std.testing.allocator);
 
     const service_target = selectedTarget(.{ .rows = &rows }, service) orelse return error.MissingTarget;
