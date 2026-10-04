@@ -56,6 +56,8 @@ test "wait: a tmux call that never returns fails at the deadline" {
     }{
         .{ .name = "output open", .script = "#!/bin/sh\nexec /bin/sleep 30\n" },
         .{ .name = "output closed", .script = "#!/bin/sh\nexec /bin/sleep 30 >/dev/null 2>&1\n" },
+        // An ignored signal stays ignored across exec.
+        .{ .name = "SIGTERM ignored", .script = "#!/bin/sh\ntrap '' TERM\nexec /bin/sleep 30\n" },
     };
 
     for (cases) |case| {

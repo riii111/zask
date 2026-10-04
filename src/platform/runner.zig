@@ -88,6 +88,12 @@ pub const Runner = struct {
         // No-op once waitUntilDeadline has reaped the child; otherwise kills
         // and reaps it.
         defer child.kill(self.io);
+        // Child.kill only sends SIGTERM and then waits without a limit, so a
+        // child ignoring SIGTERM would hold us past the deadline. SIGKILL first
+        // leaves Child.kill just reaping the already-dead child.
+        errdefer if (child.id) |pid| {
+            _ = std.c.kill(pid, .KILL);
+        };
 
         var output = try self.readUntilDeadline(&child, deadline_ms);
         errdefer output.deinit(self.gpa);
