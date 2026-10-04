@@ -909,8 +909,7 @@ test "runtime.logsTail: writes recent lines without moving windows" {
         var recorder = proc_runner.Recorder.init(arena.allocator());
         defer recorder.deinit();
         try recorder.enqueue("", "", .{ .exited = 0 });
-        try recorder.enqueue("%1|0\n", "", .{ .exited = 0 });
-        try recorder.enqueue(case.pane, "", .{ .exited = 0 });
+        try recorder.enqueue(try std.mem.concat(arena.allocator(), u8, &.{ "0\n", case.pane }), "", .{ .exited = 0 });
         const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
         var runtime = testRuntime(arena.allocator(), run, try testLogsConfig(arena.allocator()));
         runtime.environ = &environ;
@@ -961,7 +960,6 @@ test "runtime.logsTail: reports failures instead of an empty log" {
             try recorder.enqueue("", stderr, .{ .exited = 1 });
         } else {
             try recorder.enqueue("", "", .{ .exited = 0 });
-            try recorder.enqueue("%1|0\n", "", .{ .exited = 0 });
             if (case.capture_error) |err| try recorder.enqueueError(err);
         }
         const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };

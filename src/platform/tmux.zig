@@ -253,28 +253,26 @@ pub const Client = struct {
     /// error.TmuxUnavailable when tmux cannot run or its socket is unusable.
     /// Trailing blank lines are dropped because tmux pads the capture with the
     /// unused rows of the screen, so an empty pane yields an empty slice.
-    /// Like paneInfo, a split window is read from its first pane.
     pub fn captureRecentLines(self: Client, window: []const u8, max_lines: u32) ![]const u8 {
         if (max_lines == 0) return self.gpa.dupe(u8, "");
-        const pane = try self.paneHistory(window);
-        defer self.gpa.free(pane.id);
+        const window_target = try self.target(window);
+        defer self.gpa.free(window_target);
 
         // -S counts screen rows, but wrapped rows join into fewer lines and the
         // first row may continue a line that started above it. Widen the range
         // until one more line than requested is captured (the possibly cut first
-        // line is then dropped), or the range already starts at the top of the
-        // history observed above.
+        // line is then dropped), or the range starts at the top of the history
+        // reported together with that capture.
         var rows: u64 = max_lines;
         while (true) {
-            const reaches_top = rows >= pane.history_size;
-            const text = try self.capturePaneRows(pane.id, rows);
-            defer self.gpa.free(text);
-            const content = withoutTrailingBlankLines(text);
-            if (reaches_top or lineCount(content) > max_lines) {
+            const capture = try self.captureRowsWithHistory(window_target, rows);
+            defer self.gpa.free(capture.output);
+            const content = withoutTrailingBlankLines(capture.text);
+            if (rows >= capture.history_size or lineCount(content) > max_lines) {
                 if (content.len == 0) return self.gpa.dupe(u8, "");
                 return std.mem.concat(self.gpa, u8, &.{ lastLines(content, max_lines), "\n" });
             }
-            rows = @min(rows * 2, pane.history_size);
+            rows = @min(rows * 2, capture.history_size);
         }
     }
 
@@ -343,31 +341,21 @@ pub const Client = struct {
         return std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ self.session, window });
     }
 
-    /// Caller owns the returned id. list-panes is used rather than
-    /// display-message, which falls back to another pane when the target
-    /// window is missing.
-    fn paneHistory(self: Client, window: []const u8) !PaneHistory {
-        const window_target = try self.target(window);
-        defer self.gpa.free(window_target);
-        const output = try self.paneQuery(&.{ self.tmux_path, "list-panes", "-t", window_target, "-F", "#{pane_id}|#{history_size}" });
-        defer self.gpa.free(output);
-
-        // Strict parse: the format is fixed here, so a malformed first line is
-        // a contract violation rather than a history size to guess.
-        var lines = std.mem.splitScalar(u8, output, '\n');
-        var fields = std.mem.splitScalar(u8, lines.first(), '|');
-        const id = fields.next() orelse return error.InvalidPaneHistoryOutput;
-        const size_text = fields.next() orelse return error.InvalidPaneHistoryOutput;
-        if (id.len == 0 or fields.next() != null) return error.InvalidPaneHistoryOutput;
-        const history_size = std.fmt.parseUnsigned(u64, size_text, 10) catch return error.InvalidPaneHistoryOutput;
-        return .{ .id = try self.gpa.dupe(u8, id), .history_size = history_size };
-    }
-
-    /// Caller owns the returned text.
-    fn capturePaneRows(self: Client, pane_id: []const u8, rows: u64) ![]const u8 {
+    /// Caller frees `output`; `text` borrows from it. The history size and the
+    /// capture come from one tmux invocation, so output written in between
+    /// cannot make the size stale. display-message falls back to another pane
+    /// when the window is missing, but capture-pane then fails the invocation.
+    fn captureRowsWithHistory(self: Client, window_target: []const u8, rows: u64) !RowsCapture {
         const start = try std.fmt.allocPrint(self.gpa, "-{d}", .{rows});
         defer self.gpa.free(start);
-        return self.paneQuery(&.{ self.tmux_path, "capture-pane", "-p", "-J", "-t", pane_id, "-S", start });
+        const output = try self.paneQuery(&.{ self.tmux_path, "display-message", "-p", "-t", window_target, "#{history_size}", ";", "capture-pane", "-p", "-J", "-t", window_target, "-S", start });
+        errdefer self.gpa.free(output);
+
+        // Strict parse: the first line has a fixed format, so a non-numeric
+        // value is a contract violation rather than a history size to guess.
+        const newline = std.mem.indexOfScalar(u8, output, '\n') orelse return error.InvalidPaneHistoryOutput;
+        const history_size = std.fmt.parseUnsigned(u64, output[0..newline], 10) catch return error.InvalidPaneHistoryOutput;
+        return .{ .output = output, .text = output[newline + 1 ..], .history_size = history_size };
     }
 
     /// Caller owns the returned stdout. Maps tmux failures the way paneInfo
@@ -512,8 +500,9 @@ pub fn freeClientInfos(gpa: std.mem.Allocator, clients: []ClientInfo) void {
     gpa.free(clients);
 }
 
-const PaneHistory = struct {
-    id: []const u8,
+const RowsCapture = struct {
+    output: []const u8,
+    text: []const u8,
     history_size: u64,
 };
 
@@ -999,19 +988,17 @@ test "tmux.captureTail: returns empty tail when no lines are requested" {
     try std.testing.expectEqual(@as(usize, 0), tail.lines.len);
 }
 
-test "tmux.captureRecentLines: captures the first pane from its history" {
+test "tmux.captureRecentLines: reads history size and rows in one invocation" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
-    try recorder.enqueue("%3|0\n%4|9\n", "", .{ .exited = 0 });
-    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0\n", "", .{ .exited = 0 });
     const client = testClient(&recorder);
 
     const output = try client.captureRecentLines("api", 100);
     defer std.testing.allocator.free(output);
 
-    try std.testing.expectEqual(@as(usize, 2), recorder.commands.items.len);
-    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "list-panes", "-t", "demo:api", "-F", "#{pane_id}|#{history_size}" });
-    try runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "capture-pane", "-p", "-J", "-t", "%3", "-S", "-100" });
+    try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
+    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "display-message", "-p", "-t", "demo:api", "#{history_size}", ";", "capture-pane", "-p", "-J", "-t", "demo:api", "-S", "-100" });
 }
 
 test "tmux.captureRecentLines: keeps the last lines of the pane" {
@@ -1021,19 +1008,18 @@ test "tmux.captureRecentLines: keeps the last lines of the pane" {
         max_lines: u32,
         expected: []const u8,
     }{
-        .{ .name = "more than requested", .stdout = "one\ntwo\nthree\nfour\n", .max_lines = 2, .expected = "three\nfour\n" },
-        .{ .name = "fewer than requested", .stdout = "one\ntwo\n", .max_lines = 100, .expected = "one\ntwo\n" },
-        .{ .name = "blank screen padding", .stdout = "one\n\ntwo\n\n  \n\n", .max_lines = 100, .expected = "one\n\ntwo\n" },
-        .{ .name = "inner blank kept in tail", .stdout = "one\ntwo\n\nthree\n\n\n", .max_lines = 2, .expected = "\nthree\n" },
-        .{ .name = "empty pane", .stdout = "\n\n\n", .max_lines = 100, .expected = "" },
-        .{ .name = "raw text unchanged", .stdout = "a\tb \x1b[1m  \n\n", .max_lines = 1, .expected = "a\tb \x1b[1m  \n" },
+        .{ .name = "more than requested", .stdout = "0\none\ntwo\nthree\nfour\n", .max_lines = 2, .expected = "three\nfour\n" },
+        .{ .name = "fewer than requested", .stdout = "0\none\ntwo\n", .max_lines = 100, .expected = "one\ntwo\n" },
+        .{ .name = "blank screen padding", .stdout = "0\none\n\ntwo\n\n  \n\n", .max_lines = 100, .expected = "one\n\ntwo\n" },
+        .{ .name = "inner blank kept in tail", .stdout = "0\none\ntwo\n\nthree\n\n\n", .max_lines = 2, .expected = "\nthree\n" },
+        .{ .name = "empty pane", .stdout = "0\n\n\n\n", .max_lines = 100, .expected = "" },
+        .{ .name = "raw text unchanged", .stdout = "0\na\tb \x1b[1m  \n\n", .max_lines = 1, .expected = "a\tb \x1b[1m  \n" },
     };
 
     for (cases) |case| {
         errdefer std.debug.print("case: {s}\n", .{case.name});
         var recorder = runner.Recorder.init(std.testing.allocator);
         defer recorder.deinit();
-        try recorder.enqueue("%3|0\n", "", .{ .exited = 0 });
         try recorder.enqueue(case.stdout, "", .{ .exited = 0 });
         const client = testClient(&recorder);
 
@@ -1047,59 +1033,55 @@ test "tmux.captureRecentLines: keeps the last lines of the pane" {
 test "tmux.captureRecentLines: widens the range past wrapped rows" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
-    try recorder.enqueue("%3|100\n", "", .{ .exited = 0 });
-    try recorder.enqueue("cut\nwrapped line\n", "", .{ .exited = 0 });
-    try recorder.enqueue("cut\nfirst\nwrapped line\n", "", .{ .exited = 0 });
+    try recorder.enqueue("100\ncut\nwrapped line\n", "", .{ .exited = 0 });
+    try recorder.enqueue("100\ncut\nfirst\nwrapped line\n", "", .{ .exited = 0 });
     const client = testClient(&recorder);
 
     const output = try client.captureRecentLines("api", 2);
     defer std.testing.allocator.free(output);
 
     try std.testing.expectEqualStrings("first\nwrapped line\n", output);
-    try runner.expectCommandArgv(recorder.commands.items[2], &.{ "tmux", "capture-pane", "-p", "-J", "-t", "%3", "-S", "-4" });
+    try std.testing.expectEqual(@as(usize, 2), recorder.commands.items.len);
+    try runner.expectCommandArg(recorder.commands.items[1], 13, "-4");
 }
 
 test "tmux.captureRecentLines: stops widening at the top of history" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
-    try recorder.enqueue("%3|3\n", "", .{ .exited = 0 });
-    try recorder.enqueue("only\n", "", .{ .exited = 0 });
-    try recorder.enqueue("first\nonly\n", "", .{ .exited = 0 });
+    try recorder.enqueue("3\nonly\n", "", .{ .exited = 0 });
+    try recorder.enqueue("3\nfirst\nonly\n", "", .{ .exited = 0 });
     const client = testClient(&recorder);
 
     const output = try client.captureRecentLines("api", 2);
     defer std.testing.allocator.free(output);
 
     try std.testing.expectEqualStrings("first\nonly\n", output);
-    try std.testing.expectEqual(@as(usize, 3), recorder.commands.items.len);
-    try runner.expectCommandArgv(recorder.commands.items[2], &.{ "tmux", "capture-pane", "-p", "-J", "-t", "%3", "-S", "-3" });
+    try std.testing.expectEqual(@as(usize, 2), recorder.commands.items.len);
+    try runner.expectCommandArg(recorder.commands.items[1], 13, "-3");
 }
 
 test "tmux.captureRecentLines: reports query failures as errors" {
     const cases = [_]struct {
         name: []const u8,
-        capture_stage: bool = false,
         term: ?std.process.Child.Term,
         stdout: []const u8 = "",
         stderr: []const u8 = "",
         spawn_error: ?anyerror = null,
         expected: anyerror,
     }{
-        .{ .name = "missing window", .term = .{ .exited = 1 }, .stderr = "can't find window: api", .expected = error.WindowMissing },
+        .{ .name = "missing window", .term = .{ .exited = 1 }, .stdout = "12\n", .stderr = "can't find window: api", .expected = error.WindowMissing },
         .{ .name = "permission denied", .term = .{ .exited = 1 }, .stderr = "error connecting to /tmp/tmux-501/default (Permission denied)", .expected = error.TmuxUnavailable },
         .{ .name = "signaled", .term = .{ .signal = @enumFromInt(9) }, .expected = error.TmuxUnavailable },
         .{ .name = "spawn error", .term = null, .spawn_error = error.FileNotFound, .expected = error.TmuxUnavailable },
-        .{ .name = "malformed history", .term = .{ .exited = 0 }, .stdout = "%3\n", .expected = error.InvalidPaneHistoryOutput },
-        .{ .name = "pane gone before capture", .capture_stage = true, .term = .{ .exited = 1 }, .stderr = "can't find pane: %3", .expected = error.WindowMissing },
-        .{ .name = "capture spawn error", .capture_stage = true, .term = null, .spawn_error = error.FileNotFound, .expected = error.TmuxUnavailable },
-        .{ .name = "capture too large", .capture_stage = true, .term = null, .spawn_error = error.OutputTooLarge, .expected = error.OutputTooLarge },
+        .{ .name = "too large", .term = null, .spawn_error = error.OutputTooLarge, .expected = error.OutputTooLarge },
+        .{ .name = "non-numeric history", .term = .{ .exited = 0 }, .stdout = "rows\nline\n", .expected = error.InvalidPaneHistoryOutput },
+        .{ .name = "missing history line", .term = .{ .exited = 0 }, .stdout = "", .expected = error.InvalidPaneHistoryOutput },
     };
 
     for (cases) |case| {
         errdefer std.debug.print("case: {s}\n", .{case.name});
         var recorder = runner.Recorder.init(std.testing.allocator);
         defer recorder.deinit();
-        if (case.capture_stage) try recorder.enqueue("%3|0\n", "", .{ .exited = 0 });
         if (case.spawn_error) |err| try recorder.enqueueError(err) else try recorder.enqueue(case.stdout, case.stderr, case.term.?);
         const client = testClient(&recorder);
 
