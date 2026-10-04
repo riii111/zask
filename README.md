@@ -235,6 +235,27 @@ the editor checks. For a project-local `zask.json`, point `"$schema"` at that
 file or at a copy of `schema/zask.schema.json`. Configs without `$schema` keep
 working.
 
+## Service logs
+
+zask saves the terminal output of each service to
+`$XDG_STATE_HOME/zask/<project>/logs/<service>.log` (`~/.local/state/zask/...`
+when `XDG_STATE_HOME` is unset), so the output of a failed start can still be
+read with `grep` or an editor after `zask close`.
+
+- Every start, including a restart, appends to the log after a
+  `=== zask: <service> started at <UTC time> ===` line, so the previous run
+  stays readable.
+- When the log has reached 8 MiB at a start, it moves to `<service>.log.1`,
+  replacing the older one, and a new log begins.
+- The log keeps the output as the terminal received it, including color codes
+  and `\r\n` line endings.
+- If the log cannot be written at start, zask warns and starts the service
+  anyway; its output then stays only in the tmux window. If writing fails
+  while the service runs (for example, a full disk), a
+  `zask: output is no longer saved to ...` line appears in the service window.
+
+Docker Compose output is not saved.
+
 ## Requirements
 
 - tmux

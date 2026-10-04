@@ -35,6 +35,8 @@ pub const Runtime = struct {
     validate_configured_dirs: bool = true,
     emit_env_file_tips: bool = true,
     lock_probe: lock.Probe = .system,
+    /// See Lifecycle.service_log_dir.
+    service_log_dir: ?[]const u8 = null,
 
     pub fn status(self: Runtime, writer: *std.Io.Writer) !void {
         switch (self.tmux().observeSession()) {
@@ -326,6 +328,7 @@ pub const Runtime = struct {
             .validate_configured_dirs = self.validate_configured_dirs,
             .emit_env_file_tips = self.emit_env_file_tips,
             .command_hint = self.command_hint,
+            .service_log_dir = self.service_log_dir,
         };
     }
 
