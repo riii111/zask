@@ -62,6 +62,32 @@ zask close
 Run `zask help` for the full command list.
 Commands exit with `1` for runtime or environment failures, and `2` for usage or config errors.
 
+### Status as JSON
+
+`zask status --json` prints exactly one JSON document to stdout for scripts and
+agents. On exit `0` it describes the workspace, including when the session is
+not running:
+
+```json
+{"schema_version":1,"project":"demo","session":"active","docker":null,"services":[
+  {"name":"api","group":"backend","state":"running","health":"ready","port":18080,
+   "listen":"passed","http":"not_configured","exit_code":null,
+   "uptime":{"state":"known","seconds":42}}]}
+```
+
+- `session`: `active` or `missing`.
+- `state`: `running`, `stopped`, `exited`, `window_missing`, `session_missing`, or `unavailable`.
+- `health`: `ready`, `waiting` (port not listening yet), `degraded` (HTTP check failing), `no_check`, `not_running`, or `unavailable`.
+- `port` is the configured port; `listen` and `http` are the probe results: `passed`, `failed`, `not_configured`, `not_observed`, or `unavailable` (probe command missing).
+- `exit_code` is set only for `exited`.
+- `uptime.state` is `known` with `seconds`, `unknown` when the start time is not recorded (e.g. a session opened by an older zask), or `not_running`.
+- `docker` is `null` without a `docker` section; otherwise it has `state`, `compose` (`running`, `empty`, `unavailable`, `not_observed`), `exit_code`, and `uptime`.
+
+On failure the document is `{"schema_version":1,"error":{"code":...,"message":...,"config":...,"diagnostics":[...]}}`
+with exit `1` (`tmux_unavailable`) or `2` (`config_not_found`, `ambiguous_config`,
+`invalid_config_syntax`, `invalid_config`, `config_too_large`). Invalid
+arguments still print usage text and exit `2`.
+
 Named configs are stored under the same name as `project.name`. For example,
 `zask demo open` loads the `demo` config, and that config must set
 `"project": {"name": "demo", ...}`.

@@ -31,6 +31,9 @@ pub const ErrorContext = struct {
     config_path: ?[]const u8 = null,
     /// Source is recorded after discovery so diagnostics only mention real selections.
     config_source: ?ConfigSource = null,
+    /// Set by commands whose stdout is a single JSON document, so failures are
+    /// written as that document instead of text.
+    json_output: bool = false,
 };
 
 pub const CommandContext = struct {
@@ -51,6 +54,10 @@ pub const Context = struct {
 
     pub fn help(self: *Context) !void {
         try self.print_help(self.writer);
+    }
+
+    pub fn useJsonOutput(self: *Context) void {
+        if (self.base.error_context) |err_ctx| err_ctx.json_output = true;
     }
 
     pub fn runtime(self: *Context) !Runtime {
