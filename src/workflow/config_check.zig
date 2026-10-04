@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("../model/config.zig");
+const config_value = @import("../model/config_value.zig");
 const diagnostics = @import("../model/diagnostics.zig");
 const configured_path = @import("configured_path.zig");
 const pathing = @import("pathing.zig");
@@ -19,8 +20,7 @@ pub fn collectPathProblems(gpa: std.mem.Allocator, io: std.Io, cfg: config.Confi
     if (!try checker.check("project.root", project_root, .directory)) return;
 
     for (try cfg.services()) |service| {
-        const name = try config.Config.serviceName(service);
-        const label = try std.fmt.allocPrint(gpa, "groups[{s}].services[{s}]", .{ config.Config.serviceGroup(service), name });
+        const label = try serviceLabel(gpa, service);
         const dir_ok = try checker.check(try joinLabel(gpa, label, "dir"), try cfg.serviceDir(gpa, service), .directory);
         for (try config.Config.serviceEnvFiles(gpa, service)) |env_file| {
             if (!dir_ok and dependsOnServiceDir(env_file)) continue;
@@ -46,6 +46,18 @@ pub fn collectPathProblems(gpa: std.mem.Allocator, io: std.Io, cfg: config.Confi
         const label = try std.fmt.allocPrint(gpa, "startup_order[{d}].dir", .{index});
         _ = try checker.check(label, try std.fs.path.join(gpa, &.{ project_root, dir }), .directory);
     }
+
+    for (cfg.prechecks(), 0..) |precheck, index| {
+        const dir = config_value.optionalObjectString(precheck, "dir", "");
+        if (dir.len == 0) continue;
+        const label = try std.fmt.allocPrint(gpa, "prechecks[{d}].dir", .{index});
+        _ = try checker.check(label, try std.fs.path.join(gpa, &.{ project_root, dir }), .directory);
+    }
+}
+
+/// Names a service the way it is authored, e.g. `groups[be].services[api]`.
+pub fn serviceLabel(gpa: std.mem.Allocator, service: std.json.Value) ![]const u8 {
+    return std.fmt.allocPrint(gpa, "groups[{s}].services[{s}]", .{ config.Config.serviceGroup(service), try config.Config.serviceName(service) });
 }
 
 const Checker = struct {
@@ -161,7 +173,8 @@ test "config_check.collectPathProblems: reports every missing path once" {
         \\  {"name":"api","dir":"backend","command":"serve","env_file":[".env.local","/nonexistent/zask-check.env"]},
         \\  {"name":"web","dir":"web","command":"dev","env_file":".env.local"}
         \\]}],
-        \\"startup_order":[{"group":"be"},{"command":"setup","dir":"scripts"}]
+        \\"startup_order":[{"group":"be"},{"command":"setup","dir":"scripts"}],
+        \\"prechecks":[{"command":"true"},{"command":"lint","dir":"tools"}]
     );
     var diags = diagnostics.Diagnostics.init(gpa);
 
@@ -176,6 +189,7 @@ test "config_check.collectPathProblems: reports every missing path once" {
         .{ .path = "groups[be].services[web].env_file", .message = try std.fmt.allocPrint(gpa, "file not found: {s}/web/.env.local", .{r}) },
         .{ .path = "docker.compose", .message = try std.fmt.allocPrint(gpa, "not a directory: {s}/notdir", .{r}) },
         .{ .path = "startup_order[1].dir", .message = try std.fmt.allocPrint(gpa, "directory not found: {s}/scripts", .{r}) },
+        .{ .path = "prechecks[1].dir", .message = try std.fmt.allocPrint(gpa, "directory not found: {s}/tools", .{r}) },
     }, diags.slice());
 }
 

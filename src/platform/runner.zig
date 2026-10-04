@@ -6,6 +6,9 @@ pub const Runner = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     recorder: ?*Recorder = null,
+    /// Applies to captured runs that do not set `RunOptions.timeout`, so a
+    /// caller can bound every probe made through adapters built on this runner.
+    timeout: ?std.Io.Duration = null,
 
     pub fn run(self: Runner, argv: []const []const u8, options: RunOptions) !RunOutput {
         if (self.recorder) |recorder| {
@@ -20,18 +23,21 @@ pub const Runner = struct {
             if (options.check) try checkTerm(term);
             return .{ .term = term };
         }
+        const timeout = self.deadline(options.timeout orelse self.timeout);
         const result = (if (options.cwd) |cwd|
             std.process.run(self.gpa, self.io, .{
                 .argv = argv,
                 .cwd = .{ .path = cwd },
                 .stdout_limit = .limited(captured_output_limit),
                 .stderr_limit = .limited(captured_output_limit),
+                .timeout = timeout,
             })
         else
             std.process.run(self.gpa, self.io, .{
                 .argv = argv,
                 .stdout_limit = .limited(captured_output_limit),
                 .stderr_limit = .limited(captured_output_limit),
+                .timeout = timeout,
             })) catch |err| switch (err) {
             error.StreamTooLong => return error.OutputTooLarge,
             else => return err,
@@ -55,8 +61,18 @@ pub const Runner = struct {
         std.Io.sleep(self.io, duration, .awake) catch {};
     }
 
+    // A single deadline covers the whole read loop, so a child that keeps
+    // trickling output cannot extend it. On expiry the direct child is killed;
+    // processes it forked may outlive it.
+    fn deadline(self: Runner, timeout: ?std.Io.Duration) std.Io.Timeout {
+        const duration = timeout orelse return .none;
+        return .{ .deadline = .fromNow(self.io, .{ .raw = duration, .clock = .awake }) };
+    }
+
     fn recordedRun(self: Runner, recorder: *Recorder, argv: []const []const u8, options: RunOptions) !RunOutput {
-        const result = recorder.record(argv, options.cwd, options.interactive) catch |err| switch (err) {
+        var recorded = options;
+        recorded.timeout = options.timeout orelse self.timeout;
+        const result = recorder.record(argv, recorded) catch |err| switch (err) {
             error.StreamTooLong => return error.OutputTooLarge,
             else => return err,
         };
@@ -82,6 +98,8 @@ pub const RunOptions = struct {
     check: bool = false,
     discard: bool = false,
     interactive: bool = false,
+    /// Captured runs only. Expiry returns error.Timeout.
+    timeout: ?std.Io.Duration = null,
 };
 
 pub const RunOutput = union(enum) {
@@ -154,13 +172,14 @@ pub const Recorder = struct {
             std.debug.panic("failed to record sleep: {s}", .{@errorName(err)});
     }
 
-    fn record(self: *Recorder, argv: []const []const u8, cwd: ?[]const u8, interactive: bool) !std.process.RunResult {
+    fn record(self: *Recorder, argv: []const []const u8, options: RunOptions) !std.process.RunResult {
         const owned_argv = try self.gpa.alloc([]const u8, argv.len);
         for (argv, 0..) |arg, index| owned_argv[index] = try self.gpa.dupe(u8, arg);
         try self.commands.append(self.gpa, .{
             .argv = owned_argv,
-            .cwd = if (cwd) |value| try self.gpa.dupe(u8, value) else null,
-            .interactive = interactive,
+            .cwd = if (options.cwd) |value| try self.gpa.dupe(u8, value) else null,
+            .interactive = options.interactive,
+            .timeout = if (options.interactive) null else options.timeout,
         });
         if (self.responses.items.len > 0) {
             const response = self.responses.orderedRemove(0);
@@ -185,6 +204,7 @@ pub const RecordedCommand = struct {
     argv: []const []const u8,
     cwd: ?[]const u8,
     interactive: bool,
+    timeout: ?std.Io.Duration = null,
 };
 
 pub const RecordedSleep = struct {
@@ -349,6 +369,36 @@ test "runner.run: maps stream-too-long to output-too-large" {
     const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
 
     try std.testing.expectError(error.OutputTooLarge, run.run(&.{"docker"}, .{}));
+}
+
+test "runner.run: kills a child that outlives its timeout" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const run = Runner{ .gpa = std.testing.allocator, .io = threaded.io() };
+
+    try std.testing.expectError(error.Timeout, run.run(&.{ "sleep", "5" }, .{ .timeout = .fromMilliseconds(50) }));
+}
+
+test "runner.recorder: records the requested timeout" {
+    var recorder = Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+
+    _ = try run.run(&.{"probe"}, .{ .discard = true, .timeout = .fromSeconds(3) });
+
+    try std.testing.expectEqual(@as(?std.Io.Duration, .fromSeconds(3)), recorder.commands.items[0].timeout);
+}
+
+test "runner.recorder: falls back to the runner timeout" {
+    var recorder = Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder, .timeout = .fromSeconds(2) };
+
+    _ = try run.run(&.{"probe"}, .{ .discard = true });
+    _ = try run.run(&.{"probe"}, .{ .discard = true, .timeout = .fromSeconds(9) });
+
+    try std.testing.expectEqual(@as(?std.Io.Duration, .fromSeconds(2)), recorder.commands.items[0].timeout);
+    try std.testing.expectEqual(@as(?std.Io.Duration, .fromSeconds(9)), recorder.commands.items[1].timeout);
 }
 
 test "runner.checked: rejects non-zero exits" {

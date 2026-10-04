@@ -61,7 +61,10 @@ zask close
 ```
 
 Run `zask help` for the full command list.
-`zask check` lists config mistakes and missing configured paths without opening a session.
+`zask check` lists config mistakes, missing configured paths, and environment problems without opening a session.
+The environment check looks for tmux, Docker when `docker.compose` is set, service commands in `PATH`, and service ports already taken by other processes.
+It never starts or stops anything; compound shell commands and probes that do not answer within a few seconds are listed as not verified.
+User-defined `prechecks` run only with `zask check --prechecks`, each with a 10 second limit.
 Commands exit with `1` for runtime or environment failures, and `2` for usage or config errors.
 
 Named configs are stored under the same name as `project.name`. For example,

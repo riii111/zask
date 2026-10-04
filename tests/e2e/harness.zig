@@ -22,6 +22,8 @@ pub const SpawnOptions = struct {
     cwd: []const u8,
     xdg_config_home: []const u8,
     home: []const u8,
+    /// PATH for the child; unset when null.
+    path: ?[]const u8 = null,
 };
 
 pub fn spawnZask(
@@ -39,6 +41,7 @@ pub fn spawnZask(
     defer env_map.deinit();
     try env_map.put("HOME", opts.home);
     try env_map.put("XDG_CONFIG_HOME", opts.xdg_config_home);
+    if (opts.path) |path| try env_map.put("PATH", path);
 
     const output_limit = 1024 * 1024;
     const result = try std.process.run(gpa, io, .{
@@ -98,6 +101,19 @@ pub const Workspace = struct {
         var project_dir = try self.tmp.dir.openDir(io, "project", .{});
         defer project_dir.close(io);
         try project_dir.writeFile(io, .{ .sub_path = sub_path, .data = contents });
+    }
+
+    /// Creates `<workspace>/bin` holding empty executables named `fakes` and
+    /// symlinks to the real `links`; returns the caller-owned bin path.
+    pub fn toolDir(self: Workspace, gpa: std.mem.Allocator, io: std.Io, fakes: []const []const u8, links: []const []const u8) ![:0]u8 {
+        try self.tmp.dir.createDirPath(io, "bin");
+        var bin = try self.tmp.dir.openDir(io, "bin", .{});
+        defer bin.close(io);
+        for (fakes) |name| {
+            try bin.writeFile(io, .{ .sub_path = name, .data = "#!/bin/sh\n", .flags = .{ .permissions = .executable_file } });
+        }
+        for (links) |target| try bin.symLink(io, target, std.fs.path.basename(target), .{});
+        return self.tmp.dir.realPathFileAlloc(io, "bin", gpa);
     }
 
     pub fn writeNamedConfig(self: Workspace, gpa: std.mem.Allocator, io: std.Io, project_name: []const u8, contents: []const u8) !void {
