@@ -66,18 +66,27 @@ pub fn writePaneTail(ctx: anytype, window: []const u8, progress: anytype) !void 
     try progress.detail(tail.lines);
 }
 
-/// Returns false when the pane was still busy after the last attempt; the
-/// warning is already printed, so callers decide only whether to report it.
+/// Returns false when the pane was still busy after the last attempt or could
+/// not be observed; the warning is already printed, so callers decide only
+/// whether to report it.
 pub fn waitForStopped(ctx: anytype, service: []const u8, writer: *std.Io.Writer) !bool {
     var attempt: usize = 0;
     try writeStopProgress(writer, service, 1);
     while (attempt < stop_attempts) : (attempt += 1) {
         const pane = ctx.tmux.observePane(service);
         defer pane.deinit(ctx.gpa);
-        if (pane.state != .busy) {
-            try writer.print("\r  {s} ... stopped\n", .{service});
-            try writer.flush();
-            return true;
+        switch (pane.state) {
+            .busy => {},
+            .idle, .dead, .window_missing => {
+                try writer.print("\r  {s} ... stopped\n", .{service});
+                try writer.flush();
+                return true;
+            },
+            .tmux_unavailable => {
+                try writer.print("\r  {s} ... warning: tmux unavailable; could not confirm it stopped\n", .{service});
+                try writer.flush();
+                return false;
+            },
         }
         ctx.runner.sleep(stop_interval);
         try writeStopProgress(writer, service, (attempt % 3) + 1);

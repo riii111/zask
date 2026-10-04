@@ -1199,6 +1199,28 @@ test "lifecycle.stopServiceTarget: ignores a group with the same name" {
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
+test "lifecycle.stopServiceTarget: unobservable pane after the signal is incomplete" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|sleep\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueueError(error.FileNotFound);
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), test_shared_name_json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    const outcome = try lifecycle.stopServiceTarget("api", &writer);
+
+    try std.testing.expectEqual(Outcome.incomplete, outcome);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "could not confirm it stopped") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api ... stopped") == null);
+}
+
 test "lifecycle.startServiceTarget: ignores a group with the same name" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
