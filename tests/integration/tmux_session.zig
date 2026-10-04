@@ -468,13 +468,14 @@ test "runtime.watch: restarts running service, skips stopping one, and ends with
         .runner_impl = run_impl,
         .tmux_impl = client,
         .docker_impl = .{ .gpa = gpa, .runner = run_impl, .dir = project_root, .file = "compose.yaml" },
-        .stop_marks = try zask.stop_marks.StopMarks.init(gpa, io, try zask.paths.runtimeBase(gpa, &environ), session),
+        .stop_marks = try zask.stop_marks.StopMarks.forSession(gpa, io, session),
     };
+    defer std.Io.Dir.cwd().deleteTree(io, runtime.stop_marks.?.dir) catch {};
     var buffer: [4096]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    // The tmux server's environment is not the test's, so pass the runtime dir
-    // the stop commands below use.
-    const watch_command = try std.fmt.allocPrint(gpa, "XDG_RUNTIME_DIR={s} {s}", .{ runtime_dir, try zask.zask_command.invokeWatch(gpa, build_options.zask_path, config_path) });
+    // The stop command below runs with its own XDG_RUNTIME_DIR, unlike the
+    // watcher started by the tmux server; both must still share stop marks.
+    const watch_command = try zask.zask_command.invokeWatch(gpa, build_options.zask_path, config_path);
 
     client.killSession() catch {};
     try client.newSession("dashboard", project_root, "sleep 60");

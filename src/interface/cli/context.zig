@@ -86,7 +86,7 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
         try config.loadPath(context.gpa, io, resolved.path, home);
     try validateSelectedProjectName(context, resolved, cfg);
     const runner: proc_runner.Runner = .{ .gpa = context.gpa, .io = io };
-    const stop_marks = try StopMarks.init(context.gpa, io, try paths.runtimeBase(context.gpa, context.environ), try cfg.projectName());
+    const stop_marks = try StopMarks.forSession(context.gpa, io, try cfg.projectName());
     return .{
         .gpa = context.gpa,
         .io = io,

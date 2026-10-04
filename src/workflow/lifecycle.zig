@@ -45,6 +45,9 @@ pub const Lifecycle = struct {
     launch_notice: ?[]const u8 = null,
     /// Records user stops for the file watcher. Null skips recording.
     stop_marks: ?stop_marks_mod.StopMarks = null,
+    /// Set for watcher restarts: start only if no stop is recorded, checked
+    /// under the service lock, and never clear a recorded stop.
+    respect_stop_mark: bool = false,
 
     pub fn startAll(self: Lifecycle, profile: []const u8, writer: *std.Io.Writer, mode: StartMode) !void {
         var progress = progress_mod.Line.init(writer);
@@ -176,12 +179,9 @@ pub const Lifecycle = struct {
     /// while this restart waits for the old process to exit.
     pub fn restartServiceWithNotice(self: Lifecycle, service: []const u8, notice: []const u8, writer: *std.Io.Writer) !void {
         try self.ensureServiceStopped(service, writer);
-        if (self.observeStopMark(service) != .not_stopped) {
-            try writeProgress(writer, "  {s} was stopped; not starting it\n", .{service});
-            return;
-        }
         var noticed = self;
         noticed.launch_notice = notice;
+        noticed.respect_stop_mark = true;
         try noticed.startService(service, writer, .observe);
     }
 
@@ -224,6 +224,14 @@ pub const Lifecycle = struct {
         _ = try self.cfg.findService(service);
         if (!self.recordStop(service)) try writeProgress(writer, stop_not_recorded, .{service});
         try self.ensureServiceStopped(service, writer);
+    }
+
+    /// Held across the stop-mark check and respawn so a concurrent `zask stop`
+    /// either lands first and prevents the start, or waits and then stops the
+    /// started process.
+    fn holdStopMark(self: Lifecycle, service: []const u8) !?stop_marks_mod.StopMarks.Held {
+        const marks = self.stop_marks orelse return null;
+        return try marks.hold(self.gpa, service);
     }
 
     /// Marks before signaling so the watcher sees the stop while the process is
@@ -376,10 +384,18 @@ pub const Lifecycle = struct {
                 else => return err,
             };
         }
+        const held = if (self.respect_stop_mark) try self.holdStopMark(service) else null;
+        defer if (held) |h| h.release();
+        if (self.respect_stop_mark and self.observeStopMark(service) != .not_stopped) {
+            try progress.info("  {s} was stopped; not starting it\n", .{service});
+            return;
+        }
         try progress.step("Starting {s}...\n", .{service});
         try progress.command("{s}\n", .{start_command});
-        if (self.stop_marks) |marks| marks.clear(self.gpa, service) catch
-            try progress.warn("Warning: could not clear the stop record for {s}; file watch will not restart it\n", .{service});
+        if (!self.respect_stop_mark) {
+            if (self.stop_marks) |marks| marks.clear(self.gpa, service) catch
+                try progress.warn("Warning: could not clear the stop record for {s}; file watch will not restart it\n", .{service});
+        }
         try self.tmux.respawnPane(service, service_dir, try self.withLaunchNotice(launch_command));
     }
 
@@ -1176,6 +1192,7 @@ test "lifecycle.restartServiceWithNotice: leaves service stopped when a stop is 
     defer tmp.cleanup();
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
+    try recorder.enqueue("1|1|123|serve\n", "", .{ .exited = 0 });
     try recorder.enqueue("1|1|123|serve\n", "", .{ .exited = 0 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = std.testing.io, .recorder = &recorder };
     const cfg = try parseTestConfig(arena.allocator(), json);

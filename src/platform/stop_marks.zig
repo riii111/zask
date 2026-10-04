@@ -1,8 +1,8 @@
 //! Records which services the user stopped, so the file watcher leaves them
 //! stopped even while a stopping process still keeps its pane busy. Each mark
-//! is an empty file named after the service under
-//! `<runtime base>/<project>.stopped/`; service names are identifiers, so they
-//! are safe as file names.
+//! is an empty file named after the service under `<base>/<project>.stopped/`,
+//! next to a `<service>.lock` file that orders marking against the watcher's
+//! check-and-start. Service names are identifiers, so neither name collides.
 
 const std = @import("std");
 const observations = @import("../model/observations.zig");
@@ -13,6 +13,16 @@ pub const StopMarks = struct {
     /// Absolute directory holding the marks. Borrowed; must outlive this value.
     dir: []const u8,
 
+    /// Marks shared by every zask process of a session. The base ignores
+    /// XDG_RUNTIME_DIR because the CLI and the tmux server that runs the
+    /// watcher can see different values; only the uid scopes it. Free `.dir`
+    /// with `gpa`.
+    pub fn forSession(gpa: std.mem.Allocator, io: std.Io, project: []const u8) !StopMarks {
+        const base = try paths.runtimeBase(gpa, null);
+        defer gpa.free(base);
+        return init(gpa, io, base, project);
+    }
+
     /// Returns the directory path owned by the caller in `.dir`; free it with
     /// `gpa` when the marks are no longer used.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, runtime_base: []const u8, project: []const u8) !StopMarks {
@@ -21,8 +31,11 @@ pub const StopMarks = struct {
         return .{ .io = io, .dir = try std.fs.path.join(gpa, &.{ runtime_base, name }) };
     }
 
+    /// Waits for a watcher holding the service lock, so a start it already
+    /// decided on finishes first and the caller's stop then sees it.
     pub fn mark(self: StopMarks, gpa: std.mem.Allocator, service: []const u8) !void {
-        try paths.ensurePrivateDir(self.io, self.dir);
+        const held = try self.hold(gpa, service);
+        defer held.release();
         const path = try self.markPath(gpa, service);
         defer gpa.free(path);
         try paths.writeFileMode(self.io, path, "", paths.private_file_permissions);
@@ -48,6 +61,32 @@ pub const StopMarks = struct {
         return .stopped;
     }
 
+    /// Blocks until the service lock is free. Hold it across reading the mark
+    /// and starting the service; call `release` on the result. The OS drops
+    /// the lock if the process dies, so a crash cannot block later stops.
+    pub fn hold(self: StopMarks, gpa: std.mem.Allocator, service: []const u8) !Held {
+        try paths.ensurePrivateDir(self.io, self.dir);
+        const name = try std.fmt.allocPrint(gpa, "{s}.lock", .{service});
+        defer gpa.free(name);
+        const path = try std.fs.path.join(gpa, &.{ self.dir, name });
+        defer gpa.free(path);
+        const file = try std.Io.Dir.cwd().createFile(self.io, path, .{
+            .truncate = false,
+            .lock = .exclusive,
+            .permissions = paths.private_file_permissions,
+        });
+        return .{ .io = self.io, .file = file };
+    }
+
+    pub const Held = struct {
+        io: std.Io,
+        file: std.Io.File,
+
+        pub fn release(self: Held) void {
+            self.file.close(self.io);
+        }
+    };
+
     fn markPath(self: StopMarks, gpa: std.mem.Allocator, service: []const u8) ![]const u8 {
         return std.fs.path.join(gpa, &.{ self.dir, service });
     }
@@ -56,6 +95,10 @@ pub const StopMarks = struct {
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
+
+fn testMark(marks: StopMarks) void {
+    marks.mark(std.testing.allocator, "api") catch |err| std.debug.panic("mark failed: {s}", .{@errorName(err)});
+}
 
 test "stop_marks: mark and clear toggle the observation" {
     var tmp = std.testing.tmpDir(.{});
@@ -76,6 +119,28 @@ test "stop_marks: mark and clear toggle the observation" {
     try std.testing.expectEqual(observations.StopMarkObservation.stopped, marked);
     try std.testing.expectEqual(observations.StopMarkObservation.not_stopped, other);
     try std.testing.expectEqual(observations.StopMarkObservation.not_stopped, cleared);
+}
+
+test "stop_marks.mark: waits while the service lock is held" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(base);
+    const marks = try StopMarks.init(std.testing.allocator, std.testing.io, base, "demo");
+    defer std.testing.allocator.free(marks.dir);
+    const held = try marks.hold(std.testing.allocator, "api");
+    var released = false;
+    defer if (!released) held.release();
+
+    const thread = try std.Thread.spawn(.{}, testMark, .{marks});
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(100), .awake);
+    const while_held = marks.observe(std.testing.allocator, "api");
+    held.release();
+    released = true;
+    thread.join();
+
+    try std.testing.expectEqual(observations.StopMarkObservation.not_stopped, while_held);
+    try std.testing.expectEqual(observations.StopMarkObservation.stopped, marks.observe(std.testing.allocator, "api"));
 }
 
 test "stop_marks.clear: no-op without a mark" {
