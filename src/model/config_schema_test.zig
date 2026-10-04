@@ -102,6 +102,14 @@ const TestSchemaChecker = struct {
             }
             return true;
         }
+        if (std.mem.eql(u8, keyword, "propertyNames")) {
+            if (instance != .object) return true;
+            var fields = instance.object.iterator();
+            while (fields.next()) |field| {
+                if (!try self.check(arg, .{ .string = field.key_ptr.* })) return false;
+            }
+            return true;
+        }
         if (std.mem.eql(u8, keyword, "items")) {
             if (instance != .array) return true;
             for (instance.array.items) |item| if (!try self.check(arg, item)) return false;
@@ -114,8 +122,13 @@ const TestSchemaChecker = struct {
     fn resolveRef(self: TestSchemaChecker, ref: Value) !Value {
         const prefix = "#/definitions/";
         if (!std.mem.startsWith(u8, ref.string, prefix)) return error.UnsupportedSchemaRef;
-        const definitions = self.root.object.get("definitions") orelse return error.UnsupportedSchemaRef;
-        return definitions.object.get(ref.string[prefix.len..]) orelse error.UnsupportedSchemaRef;
+        var node = self.root.object.get("definitions") orelse return error.UnsupportedSchemaRef;
+        var segments = std.mem.splitScalar(u8, ref.string[prefix.len..], '/');
+        while (segments.next()) |segment| {
+            if (node != .object) return error.UnsupportedSchemaRef;
+            node = node.object.get(segment) orelse return error.UnsupportedSchemaRef;
+        }
+        return node;
     }
 };
 
@@ -216,6 +229,7 @@ test "config.schema: object properties match parser keys" {
         .{ .path = &.{ "properties", "docker" }, .keys = &config.object_keys.docker },
         .{ .path = &.{ "definitions", "group" }, .keys = &config.object_keys.group },
         .{ .path = &.{ "definitions", "service" }, .keys = &config.object_keys.service },
+        .{ .path = &.{ "definitions", "namedService" }, .keys = &config.object_keys.named_service },
         .{ .path = &.{ "definitions", "service", "properties", "healthcheck" }, .keys = &config.object_keys.healthcheck },
         .{ .path = &.{ "definitions", "watch" }, .keys = &config.object_keys.watch },
         .{ .path = &.{ "definitions", "dockerStep" }, .keys = &config.object_keys.docker_step },
@@ -303,6 +317,29 @@ test "config.schema: accepts every public key with $schema" {
     try std.testing.expect(try testSchemaAccepts(arena.allocator(), checker, json));
 }
 
+test "config.schema: accepts named service shorthand and detail" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [
+        \\    {"name":"backend","services":{
+        \\      "api": "cargo run",
+        \\      "web": {"dir":"web","runtime":"npm","command":"run dev","port":5173,
+        \\              "healthcheck":{"type":"http"},"env_file":".env","watch":{"paths":["src"]}}
+        \\    }},
+        \\    {"name":"tools","services":{}},
+        \\    {"name":"jobs","services":[{"name":"worker","command":"work"}]}
+        \\  ]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const checker = try testLoadSchema(arena.allocator());
+
+    try std.testing.expect(try testParserAccepts(arena.allocator(), json));
+    try std.testing.expect(try testSchemaAccepts(arena.allocator(), checker, json));
+}
+
 test "config.schema: rejects structural errors the parser rejects" {
     const cases = [_]struct {
         name: []const u8,
@@ -334,6 +371,24 @@ test "config.schema: rejects structural errors the parser rejects" {
         },
         .{ .name = "service key typo", .json =
         \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","comand":"serve"}]}]}
+        },
+        .{ .name = "services string", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":"serve"}]}
+        },
+        .{ .name = "named service number", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":{"api":1}}]}
+        },
+        .{ .name = "named service invalid name", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":{"bad name":"serve"}}]}
+        },
+        .{ .name = "named service with name", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":{"api":{"name":"api","command":"serve"}}}]}
+        },
+        .{ .name = "named service key typo", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":{"api":{"comand":"serve"}}}]}
+        },
+        .{ .name = "named service string port", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":{"api":{"command":"serve","port":"80"}}}]}
         },
         .{ .name = "string port", .json =
         \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve","port":"80"}]}]}
@@ -414,6 +469,9 @@ test "config.schema: leaves references and paths to the parser" {
         },
         .{ .name = "duplicate service", .json =
         \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"a","services":[{"name":"api","command":"x"}]},{"name":"b","services":[{"name":"api","command":"y"}]}]}
+        },
+        .{ .name = "duplicate named service", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"a","services":[{"name":"api","command":"x"}]},{"name":"b","services":{"api":"y"}}]}
         },
         .{ .name = "service dir escapes root", .json =
         \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","dir":"../escape","command":"serve"}]}]}

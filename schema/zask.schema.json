@@ -123,9 +123,26 @@
           "$ref": "#/definitions/envFile"
         },
         "services": {
-          "description": "Services in this group.",
-          "type": "array",
-          "items": { "$ref": "#/definitions/service" }
+          "description": "Services in this group, as an array of services or an object keyed by service name.",
+          "oneOf": [
+            {
+              "type": "array",
+              "items": { "$ref": "#/definitions/service" }
+            },
+            {
+              "type": "object",
+              "propertyNames": { "$ref": "#/definitions/identifier" },
+              "additionalProperties": {
+                "oneOf": [
+                  {
+                    "description": "Command run with `sh -lc` in the service pane. Other settings use their defaults.",
+                    "type": "string"
+                  },
+                  { "$ref": "#/definitions/namedService" }
+                ]
+              }
+            }
+          ]
         }
       }
     },
@@ -183,6 +200,22 @@
           "description": "KEY=value files loaded before this service command, relative to the service directory.",
           "$ref": "#/definitions/envFile"
         },
+        "watch": { "$ref": "#/definitions/watch" }
+      }
+    },
+    "namedService": {
+      "description": "Service whose name is its key in `services`.",
+      "type": "object",
+      "required": ["command"],
+      "additionalProperties": false,
+      "properties": {
+        "command": { "$ref": "#/definitions/service/properties/command" },
+        "dir": { "$ref": "#/definitions/service/properties/dir" },
+        "runtime": { "$ref": "#/definitions/service/properties/runtime" },
+        "external": { "$ref": "#/definitions/service/properties/external" },
+        "port": { "$ref": "#/definitions/service/properties/port" },
+        "healthcheck": { "$ref": "#/definitions/service/properties/healthcheck" },
+        "env_file": { "$ref": "#/definitions/service/properties/env_file" },
         "watch": { "$ref": "#/definitions/watch" }
       }
     },
