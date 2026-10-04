@@ -222,7 +222,7 @@ fn situationActions(situation: Situation) []const Action {
 
 const common_actions = [_]Action{
     .{ .keys = "Ctrl+q w", .description = "choose a window" },
-    .{ .keys = "Ctrl+q m", .description = "monitor: issues only" },
+    .{ .keys = "Ctrl+q m", .description = "monitor: all / issues" },
     .{ .keys = "zask help", .description = "all commands" },
 };
 
