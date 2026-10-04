@@ -510,11 +510,16 @@ test "monitor: keys move selection, toggle the filter, and quit restores the ter
     const project_root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     const config_path = try std.fs.path.join(gpa, &.{ project_root, "zask.json" });
     const stty_path = try std.fs.path.join(gpa, &.{ project_root, "stty.txt" });
-    const command = try std.fmt.allocPrint(gpa, "{s} --config {s} monitor; stty -a > {s}; sleep 60", .{
+    const stderr_path = try std.fs.path.join(gpa, &.{ project_root, "monitor-stderr.txt" });
+    const command = try std.fmt.allocPrint(gpa, "{s} --config {s} monitor 2> {s}; stty -a > {s}; sleep 60", .{
         try zask.shell.quote(gpa, build_options.zask_path),
         try zask.shell.quote(gpa, config_path),
+        try zask.shell.quote(gpa, stderr_path),
         try zask.shell.quote(gpa, stty_path),
     });
+    errdefer if (std.Io.Dir.cwd().readFileAlloc(io, stderr_path, gpa, .limited(64 * 1024))) |stderr| {
+        std.debug.print("monitor stderr:\n{s}\n", .{stderr});
+    } else |_| {};
 
     client.killSession() catch {};
     try client.newSession("dashboard", project_root, command);
