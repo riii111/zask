@@ -10,11 +10,12 @@ test "status --json: tmux unavailable writes JSON error and exits 1" {
     defer ws.deinit(gpa);
     try ws.writeProjectFile(io, "config.json", "{\"project\":{\"name\":\"demo\",\"root\":\".\"},\"groups\":[]}");
 
-    // The harness passes no PATH, so tmux cannot be spawned.
+    // An empty directory as PATH keeps tmux from being spawned on any host.
     var res = try harness.spawnZask(gpa, io, .{
         .cwd = ws.project,
         .xdg_config_home = ws.xdg,
         .home = ws.home,
+        .path = ws.elsewhere,
     }, &.{ "--config", "config.json", "status", "--json" });
     defer res.deinit(gpa);
 
