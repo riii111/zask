@@ -71,7 +71,9 @@ pub const object_keys = struct {
     pub const project = [_][]const u8{ keys.name, keys.root };
     pub const docker = [_][]const u8{ keys.compose, keys.wait_timeout_seconds };
     pub const group = [_][]const u8{ keys.name, keys.env_file, keys.services };
-    pub const service = [_][]const u8{ keys.name, keys.dir, keys.runtime, keys.command, keys.external, keys.port, keys.healthcheck, keys.env_file, keys.watch };
+    pub const service = [_][]const u8{keys.name} ++ named_service;
+    /// Detailed form inside a `services` object, where the key is the name.
+    pub const named_service = [_][]const u8{ keys.dir, keys.runtime, keys.command, keys.external, keys.port, keys.healthcheck, keys.env_file, keys.watch };
     pub const watch = [_][]const u8{ keys.paths, keys.include, keys.exclude, keys.debounce_ms };
     pub const healthcheck = [_][]const u8{ keys.type, keys.path };
     pub const docker_step = [_][]const u8{ keys.name, keys.docker };
@@ -522,20 +524,52 @@ fn normalizeServices(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: 
         const name = try config_value.requiredObjectString(group, keys.name);
         const group_env = group.object.get(keys.env_file);
         const group_services = group.object.get(keys.services) orelse return error.InvalidConfig;
-        if (group_services != .array) return error.InvalidConfig;
-        for (group_services.array.items) |service| {
-            if (service != .object) return error.InvalidConfig;
-            var normalized = try cloneObjectWithField(gpa, service, "group", .{ .string = name });
-            const env_files = try normalizeServiceEnvFiles(gpa, project_env, group_env, service.object.get(keys.env_file));
-            if (env_files.items.len > 0) {
-                try normalized.put(gpa, "env_files", .{ .array = env_files });
-            } else {
-                env_files.deinit();
-            }
-            try services.append(.{ .object = normalized });
+        switch (group_services) {
+            .array => |items| for (items.items) |service| {
+                if (service != .object) return error.InvalidConfig;
+                try services.append(try normalizeService(gpa, try service.object.clone(gpa), name, project_env, group_env));
+            },
+            .object => |entries| {
+                var it = entries.iterator();
+                while (it.next()) |entry| {
+                    const service = try namedServiceObject(gpa, entry.key_ptr.*, entry.value_ptr.*);
+                    try services.append(try normalizeService(gpa, service, name, project_env, group_env));
+                }
+            },
+            else => return error.InvalidConfig,
         }
     }
     try root.put(gpa, "services", .{ .array = services });
+}
+
+/// Expands a `services` object entry into the array form: a string is the
+/// command, and an object is a detailed service whose name is the key.
+fn namedServiceObject(gpa: std.mem.Allocator, name: []const u8, value: Value) !std.json.ObjectMap {
+    var object: std.json.ObjectMap = .empty;
+    errdefer object.deinit(gpa);
+    try object.put(gpa, keys.name, .{ .string = name });
+    switch (value) {
+        .string => try object.put(gpa, keys.command, value),
+        .object => |fields| {
+            var it = fields.iterator();
+            while (it.next()) |field| try object.put(gpa, field.key_ptr.*, field.value_ptr.*);
+        },
+        else => return error.InvalidConfig,
+    }
+    return object;
+}
+
+fn normalizeService(gpa: std.mem.Allocator, service: std.json.ObjectMap, group: []const u8, project_env: ?Value, group_env: ?Value) !Value {
+    var normalized = service;
+    errdefer normalized.deinit(gpa);
+    try normalized.put(gpa, "group", .{ .string = group });
+    const env_files = try normalizeServiceEnvFiles(gpa, project_env, group_env, normalized.get(keys.env_file));
+    if (env_files.items.len > 0) {
+        try normalized.put(gpa, "env_files", .{ .array = env_files });
+    } else {
+        env_files.deinit();
+    }
+    return .{ .object = normalized };
 }
 
 fn normalizeServiceEnvFiles(gpa: std.mem.Allocator, project_env: ?Value, group_env: ?Value, service_env: ?Value) !std.json.Array {
@@ -607,15 +641,6 @@ fn normalizeStartupOrder(gpa: std.mem.Allocator, root: *std.json.ObjectMap, sour
 
 fn copyObjectField(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: Value, key: []const u8) !void {
     if (source.object.get(key)) |value| try root.put(gpa, key, value);
-}
-
-fn cloneObjectWithField(gpa: std.mem.Allocator, source: Value, key: []const u8, value: Value) !std.json.ObjectMap {
-    var object: std.json.ObjectMap = .empty;
-    errdefer object.deinit(gpa);
-    var it = source.object.iterator();
-    while (it.next()) |entry| try object.put(gpa, entry.key_ptr.*, entry.value_ptr.*);
-    try object.put(gpa, key, value);
-    return object;
 }
 
 fn serviceHealthcheck(service: Value) ?Value {
@@ -768,14 +793,28 @@ fn validateGroups(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Dia
             continue;
         };
         const services_path = try joinPath(gpa, gpath, "services");
-        if (services != .array) {
-            try diags.add(services_path, "must be an array");
-            continue;
-        }
-        if (services.array.items.len > 0) if (group_name) |name| try refs.groups.put(name, {});
-        for (services.array.items, 0..) |service, si| {
-            const spath = try indexedPath(gpa, services_path, si);
-            try validateService(gpa, service, spath, diags, refs);
+        const service_count = switch (services) {
+            .array => |items| items.items.len,
+            .object => |entries| entries.count(),
+            else => {
+                try diags.add(services_path, "must be an array or an object");
+                continue;
+            },
+        };
+        if (service_count > 0) if (group_name) |name| try refs.groups.put(name, {});
+        switch (services) {
+            .array => |items| for (items.items, 0..) |service, si| {
+                const spath = try indexedPath(gpa, services_path, si);
+                try validateService(gpa, service, spath, diags, refs);
+            },
+            .object => |entries| {
+                var it = entries.iterator();
+                while (it.next()) |entry| {
+                    const spath = try joinPath(gpa, services_path, entry.key_ptr.*);
+                    try validateNamedService(gpa, entry.key_ptr.*, entry.value_ptr.*, spath, diags, refs);
+                }
+            },
+            else => unreachable,
         }
     }
 }
@@ -783,13 +822,37 @@ fn validateGroups(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Dia
 fn validateService(gpa: std.mem.Allocator, service: Value, path: []const u8, diags: *diagnostics.Diagnostics, refs: *ValidationIndex) !void {
     if (!try expectObject(service, path, diags)) return;
     try checkKeys(gpa, service, path, &object_keys.service, diags);
-    if (try checkRequiredString(gpa, service, keys.name, path, diags)) |name| {
-        const name_path = try joinPath(gpa, path, "name");
-        validate.identifier(name) catch try diags.add(name_path, "must be a valid identifier");
-        if (refs.services.contains(name)) {
-            try diags.addFmt(name_path, "duplicate service '{s}'", .{name});
-        } else try refs.services.put(name, {});
+    if (try checkRequiredString(gpa, service, keys.name, path, diags)) |name|
+        try checkServiceName(name, try joinPath(gpa, path, "name"), diags, refs);
+    try validateServiceFields(gpa, service, path, diags);
+}
+
+// A `services` object entry: the key is the name, and the value is either the
+// command string or a detailed service without `name`.
+fn validateNamedService(gpa: std.mem.Allocator, name: []const u8, service: Value, path: []const u8, diags: *diagnostics.Diagnostics, refs: *ValidationIndex) !void {
+    try checkServiceName(name, path, diags, refs);
+    switch (service) {
+        .string => {},
+        .object => {
+            // `name` gets its own message instead of "unknown key" so it reads
+            // as a conflict with the key rather than a typo.
+            try checkKeys(gpa, service, path, &object_keys.service, diags);
+            if (service.object.get(keys.name) != null)
+                try diags.addFmt(try joinPath(gpa, path, keys.name), "must not be set; the key '{s}' is the service name", .{name});
+            try validateServiceFields(gpa, service, path, diags);
+        },
+        else => try diags.add(path, "must be a command string or a service object"),
     }
+}
+
+fn checkServiceName(name: []const u8, path: []const u8, diags: *diagnostics.Diagnostics, refs: *ValidationIndex) !void {
+    validate.identifier(name) catch try diags.add(path, "must be a valid identifier");
+    if (refs.services.contains(name)) {
+        try diags.addFmt(path, "duplicate service '{s}'", .{name});
+    } else try refs.services.put(name, {});
+}
+
+fn validateServiceFields(gpa: std.mem.Allocator, service: Value, path: []const u8, diags: *diagnostics.Diagnostics) !void {
     _ = try checkRequiredString(gpa, service, keys.command, path, diags);
     try checkOptionalString(gpa, service, keys.dir, path, diags);
     try checkOptionalRuntime(gpa, service, path, diags);
@@ -1947,4 +2010,134 @@ test "config.validateAll: reports watch problems with field paths" {
         try std.testing.expectEqualStrings(want.path, got.path);
         try std.testing.expectEqualStrings(want.message, got.message);
     }
+}
+
+test "config.parse: named services normalize like the array form" {
+    const array_json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "env_file": ".env",
+        \\  "groups": [{"name":"backend","env_file":"backend/.env","services":[
+        \\    {"name":"api","command":"cargo run"},
+        \\    {"name":"web","dir":"web","runtime":"npm","command":"run dev","port":5173,"env_file":".env.local"}
+        \\  ]}]
+        \\}
+    ;
+    const named_json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "env_file": ".env",
+        \\  "groups": [{"name":"backend","env_file":"backend/.env","services":{
+        \\    "api": "cargo run",
+        \\    "web": {"dir":"web","runtime":"npm","command":"run dev","port":5173,"env_file":".env.local"}
+        \\  }}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const array_cfg = try parseTestConfig(&arena, array_json);
+    const named_cfg = try parseTestConfig(&arena, named_json);
+
+    const expected = try std.json.Stringify.valueAlloc(arena.allocator(), array_cfg.value, .{});
+    const actual = try std.json.Stringify.valueAlloc(arena.allocator(), named_cfg.value, .{});
+    try std.testing.expectEqualStrings(expected, actual);
+}
+
+test "config.parse: shorthand service uses defaults" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"~/work/demo"},
+        \\  "groups": [{"name":"backend","services":{"api":"cargo run"}}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try parseTestConfig(&arena, json);
+    const service = try cfg.findService("api");
+
+    try std.testing.expectEqualStrings(".", Config.serviceDirValue(service));
+    try std.testing.expectEqualStrings("/home/me/work/demo/.", try cfg.serviceDir(arena.allocator(), service));
+    try std.testing.expectEqualStrings("cargo run", try Config.serviceStartCommand(arena.allocator(), service));
+    try std.testing.expectEqual(@as(?i64, null), Config.servicePort(service));
+    try std.testing.expectEqualStrings("backend", Config.serviceGroup(service));
+    try std.testing.expect(try Config.serviceWatch(arena.allocator(), service) == null);
+}
+
+test "config.parse: mixed service forms keep declaration order" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [
+        \\    {"name":"backend","services":{"worker":"work","api":{"command":"serve","port":8080},"db":"db start"}},
+        \\    {"name":"frontend","services":[{"name":"web","command":"dev"}]}
+        \\  ]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try parseTestConfig(&arena, json);
+
+    const services = try cfg.services();
+    const expected = [_][]const u8{ "worker", "api", "db", "web" };
+    try std.testing.expectEqual(expected.len, services.len);
+    for (expected, services) |want, service| try std.testing.expectEqualStrings(want, try Config.serviceName(service));
+    const backend = try cfg.resolveGroup(arena.allocator(), "backend");
+    try std.testing.expectEqual(@as(usize, 3), backend.len);
+    try std.testing.expectEqual(@as(?i64, 8080), Config.servicePort(try cfg.findService("api")));
+}
+
+test "config.validateAll: reports named service problems at the key" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [
+        \\    {"name":"backend","services":[{"name":"api","command":"serve"}]},
+        \\    {"name":"worker","services":{
+        \\      "api": "work",
+        \\      "bad name": "x",
+        \\      "num": 1,
+        \\      "job": {"name":"job","command":"run"},
+        \\      "cron": {"comand":"tick"},
+        \\      "web": {"command":"dev","dir":"../escape"}
+        \\    }},
+        \\    {"name":"tools","services":"lint"}
+        \\  ]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const value = try parseJsonBytes(arena.allocator(), json);
+    var diags = diagnostics.Diagnostics.init(arena.allocator());
+    defer diags.deinit();
+
+    try validateAll(arena.allocator(), value, &diags);
+
+    const expected = [_]diagnostics.Diagnostic{
+        .{ .path = "groups[1].services.api", .message = "duplicate service 'api'" },
+        .{ .path = "groups[1].services.bad name", .message = "must be a valid identifier" },
+        .{ .path = "groups[1].services.num", .message = "must be a command string or a service object" },
+        .{ .path = "groups[1].services.job.name", .message = "must not be set; the key 'job' is the service name" },
+        .{ .path = "groups[1].services.cron.comand", .message = "unknown key" },
+        .{ .path = "groups[1].services.cron", .message = "missing required string 'command'" },
+        .{ .path = "groups[1].services.web.dir", .message = "must stay within the project root" },
+        .{ .path = "groups[2].services", .message = "must be an array or an object" },
+    };
+    try std.testing.expectEqual(expected.len, diags.slice().len);
+    for (expected, diags.slice()) |want, got| {
+        try std.testing.expectEqualStrings(want.path, got.path);
+        try std.testing.expectEqualStrings(want.message, got.message);
+    }
+}
+
+test "config.parse: rejects duplicate keys in named services" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":{"api":"serve","api":"work"}}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try std.testing.expectError(error.InvalidConfigSyntax, parseTestConfig(&arena, json));
 }

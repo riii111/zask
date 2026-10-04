@@ -124,6 +124,25 @@ file relative to that service directory:
 }
 ```
 
+`services` can also be an object keyed by service name. A string value is the
+command and uses the defaults for every other setting, such as `dir` at the
+project root. An object value takes the same settings as an array entry except
+`name`. Both forms can be used in one config:
+
+```json
+{
+  "groups": [
+    {
+      "name": "backend",
+      "services": {
+        "api": "cargo run",
+        "web": {"dir": "web", "runtime": "npm", "command": "run dev", "port": 5173}
+      }
+    }
+  ]
+}
+```
+
 [`schema/zask.schema.json`](schema/zask.schema.json) describes the config for
 editors that support JSON Schema. Point a top-level `"$schema"` key at it to get
 completion, descriptions, and diagnostics for keys, types, and allowed values;
