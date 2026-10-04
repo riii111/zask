@@ -17,6 +17,7 @@ const status = @import("cli/status.zig");
 const stop = @import("cli/stop.zig");
 const sync_size = @import("cli/sync_size.zig");
 const version = @import("cli/version.zig");
+const watch = @import("cli/watch.zig");
 const root = @import("../root.zig");
 const env = @import("../platform/env.zig");
 const diagnostics = @import("../model/diagnostics.zig");
@@ -42,6 +43,7 @@ const Command = enum {
     monitor,
     preview_list,
     sync_size,
+    watch,
 
     fn run(self: Command, context: *cli_context.Context) !void {
         return switch (self) {
@@ -62,6 +64,7 @@ const Command = enum {
             .monitor => runCommand(monitor, context),
             .preview_list => runCommand(preview_list, context),
             .sync_size => runCommand(sync_size, context),
+            .watch => runCommand(watch, context),
         };
     }
 };
@@ -94,6 +97,7 @@ const command_specs = [_]CommandSpec{
     .{ .command = .monitor, .names = &.{"monitor"}, .internal = true, .show_in_help = false },
     .{ .command = .preview_list, .names = &.{"preview-list"}, .internal = true, .show_in_help = false },
     .{ .command = .sync_size, .names = &.{"sync-size"}, .internal = true, .show_in_help = false },
+    .{ .command = .watch, .names = &.{"watch"}, .internal = true, .show_in_help = false },
 };
 
 pub fn run(init: std.process.Init) !void {
@@ -329,6 +333,7 @@ test "cli.command: parses public and internal names" {
         .{ .input = "dashboard", .expected = null },
         .{ .input = "preview-list", .expected = null },
         .{ .input = "sync-size", .expected = null },
+        .{ .input = "watch", .expected = null },
         .{ .input = "render-session", .expected = null },
     };
     for (command_cases) |case| {
@@ -337,6 +342,7 @@ test "cli.command: parses public and internal names" {
     try std.testing.expectEqual(Command.dashboard, parseCommand("dashboard", true));
     try std.testing.expectEqual(Command.preview_list, parseCommand("preview-list", true));
     try std.testing.expectEqual(Command.sync_size, parseCommand("sync-size", true));
+    try std.testing.expectEqual(Command.watch, parseCommand("watch", true));
 
     try std.testing.expect(isCommandForm("open"));
     try std.testing.expect(!isCommandForm("init"));

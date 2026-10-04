@@ -40,6 +40,8 @@ pub const Lifecycle = struct {
     validate_configured_dirs: bool = true,
     emit_env_file_tips: bool = false,
     command_hint: zask_command.InvocationHint,
+    /// Printed in the service pane before the start command runs.
+    launch_notice: ?[]const u8 = null,
 
     pub fn startAll(self: Lifecycle, profile: []const u8, writer: *std.Io.Writer, mode: StartMode) !void {
         var progress = progress_mod.Line.init(writer);
@@ -163,6 +165,14 @@ pub const Lifecycle = struct {
             try self.writeProjectEnvFileTipForServices(&.{target}, &progress);
             try self.restartService(target, writer);
         }
+    }
+
+    /// Same steps as `restart <service>`, with `notice` shown in the service
+    /// pane so its log records why it restarted.
+    pub fn restartServiceWithNotice(self: Lifecycle, service: []const u8, notice: []const u8, writer: *std.Io.Writer) !void {
+        var noticed = self;
+        noticed.launch_notice = notice;
+        try noticed.restartService(service, writer);
     }
 
     pub fn startService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer, mode: StartMode) !void {
@@ -342,7 +352,15 @@ pub const Lifecycle = struct {
         }
         try progress.step("Starting {s}...\n", .{service});
         try progress.command("{s}\n", .{start_command});
-        try self.tmux.respawnPane(service, service_dir, launch_command);
+        try self.tmux.respawnPane(service, service_dir, try self.withLaunchNotice(launch_command));
+    }
+
+    /// Returned command is borrowed without a notice and owned by this
+    /// lifecycle allocator otherwise; callers do not free it individually.
+    fn withLaunchNotice(self: Lifecycle, command: []const u8) ![]const u8 {
+        const notice = self.launch_notice orelse return command;
+        const quoted = try shell.quote(self.gpa, notice);
+        return std.fmt.allocPrint(self.gpa, "printf '%s\\n' {s}\n{s}", .{ quoted, command });
     }
 
     fn recreateServiceWindow(self: Lifecycle, service: []const u8, service_dir: []const u8) !void {
@@ -1046,6 +1064,34 @@ test "lifecycle.restartTarget: suggests project env_file for service target" {
     try lifecycle.restartTarget("api", &writer);
 
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Tip: .env exists but is not loaded; add project-level env_file to use it.") != null);
+}
+
+test "lifecycle.restartServiceWithNotice: prints notice before service command" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("1|1|123|serve\n", "", .{ .exited = 0 });
+    try recorder.enqueue("1|1|123|serve\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.restartServiceWithNotice("api", "zask: it's src/a.zig", &writer);
+
+    const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArgContains(respawn, 9, "printf '%s\\n' 'zask: it'\\''s src/a.zig'\nserve\n");
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting api...") != null);
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
 test "lifecycle.stopAll: signals every running service before polling once" {

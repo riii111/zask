@@ -5,3 +5,6 @@ pub const dashboard_layout = "main-vertical";
 
 pub const docker_window = "docker";
 pub const docker_placeholder_title = "Docker Services";
+
+/// Prefixed so a service named `watch` keeps its own window.
+pub const watch_window = "zask-watch";

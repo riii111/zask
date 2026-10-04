@@ -248,6 +248,13 @@ pub const Config = struct {
         return config_value.optionalObjectString(healthcheck, "path", "/health");
     }
 
+    pub fn anyServiceWatches(self: Config) !bool {
+        for (try self.services()) |service| {
+            if (service == .object and service.object.get(keys.watch) != null) return true;
+        }
+        return false;
+    }
+
     /// Returns null when the service has no `watch`. Release the result with
     /// `Spec.deinit`; its strings borrow from the config.
     pub fn serviceWatch(gpa: std.mem.Allocator, service: Value) !?watch.Spec {
@@ -1915,6 +1922,17 @@ test "config.serviceWatch: applies defaults and resolves paths from the service 
     try std.testing.expectEqualStrings("/opt/shared", try cfg.serviceWatchPath(gpa, worker, explicit.paths[1]));
     try std.testing.expectEqualStrings("/home/me/lib", try cfg.serviceWatchPath(gpa, worker, explicit.paths[2]));
     try std.testing.expect((try Config.serviceWatch(gpa, try cfg.findService("web"))) == null);
+    try std.testing.expect(try cfg.anyServiceWatches());
+}
+
+test "config.anyServiceWatches: false without watch settings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try parseTestConfig(&arena,
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve"}]}]}
+    );
+
+    try std.testing.expect(!try cfg.anyServiceWatches());
 }
 
 test "config.validateAll: reports watch problems with field paths" {

@@ -3,6 +3,7 @@ const config = @import("../model/config.zig");
 const configured_path = @import("configured_path.zig");
 const docker_client = @import("../platform/docker.zig");
 const env = @import("../platform/env.zig");
+const file_watch = @import("file_watch.zig");
 const lifecycle_mod = @import("lifecycle.zig");
 const lock = @import("../platform/lock.zig");
 const observations = @import("../model/observations.zig");
@@ -15,6 +16,7 @@ const session_layout = @import("session_layout.zig");
 const tmux_client = @import("../platform/tmux.zig");
 const tmux_setup = @import("tmux_setup.zig");
 const waits = @import("waits.zig");
+const watch_restart = @import("watch_restart.zig");
 const zask_command = @import("zask_command.zig");
 
 const close_kill_settle = std.Io.Duration.fromSeconds(1);
@@ -155,6 +157,7 @@ pub const Runtime = struct {
                 try progress.info("Workspace already open. Starting resources...\n", .{});
                 try self.installSessionOptions(scratch);
                 try tmux_setup.bindControlKeys(scratch, self.tmux());
+                try self.ensureWatchWindow(scratch);
                 try self.warnServicesWithoutPort(profile, progress);
                 try self.lifecycle().startAllWithProgress(profile, progress, .observe);
                 try progress.step("Attaching to workspace...\n", .{});
@@ -257,6 +260,25 @@ pub const Runtime = struct {
         try self.lifecycle().restartTarget(target, writer);
     }
 
+    /// Restarts services when their watched files change. Runs in the
+    /// `zask-watch` window until `close` or `re` kills the session with it.
+    /// `gpa` must free memory: the loop runs for the life of the session.
+    pub fn watch(self: Runtime, gpa: std.mem.Allocator, writer: *std.Io.Writer) !void {
+        var supervisor = try watch_restart.Supervisor.init(gpa, self.io, self.cfg);
+        defer supervisor.deinit();
+        if (supervisor.isEmpty()) {
+            try writer.writeAll("No services have watch settings\n");
+            try writer.flush();
+            return;
+        }
+        try supervisor.writeWatching(writer);
+        const restarter: WatchRestarter = .{ .runtime = self, .gpa = gpa };
+        while (true) {
+            try supervisor.tick(restarter, writer);
+            self.runner().sleep(.fromMilliseconds(file_watch.poll_interval_ms));
+        }
+    }
+
     fn runner(self: Runtime) proc_runner.Runner {
         return self.runner_impl;
     }
@@ -280,6 +302,20 @@ pub const Runtime = struct {
             .emit_env_file_tips = self.emit_env_file_tips,
             .command_hint = self.command_hint,
         };
+    }
+
+    /// Copy whose tmux, Docker, and lifecycle allocations go to `gpa`, so a
+    /// long-running loop can release them with a per-iteration arena instead
+    /// of growing the CLI arena.
+    fn withAllocator(self: Runtime, gpa: std.mem.Allocator) Runtime {
+        var copy = self;
+        copy.gpa = gpa;
+        copy.runner_impl.gpa = gpa;
+        copy.tmux_impl.gpa = gpa;
+        copy.tmux_impl.runner = copy.runner_impl;
+        copy.docker_impl.gpa = gpa;
+        copy.docker_impl.runner = copy.runner_impl;
+        return copy;
     }
 
     fn acquireLock(self: Runtime) !lock.Lock {
@@ -318,7 +354,27 @@ pub const Runtime = struct {
         }
         if (self.cfg.dockerEnabled()) {
             try tx.newWindowAfter(previous_window, session_layout.docker_window, try pathing.absolute(scratch, self.io, try self.cfg.dockerDir(scratch)), try zask_command.waitingPlaceholder(scratch, session_layout.docker_placeholder_title));
+            previous_window = session_layout.docker_window;
         }
+        if (try self.cfg.anyServiceWatches()) {
+            try tx.newWindowAfter(previous_window, session_layout.watch_window, try self.absoluteProjectRoot(scratch), try zask_command.invokeWatch(scratch, self.zask_path, self.config_path));
+        }
+    }
+
+    /// Workspaces opened before a `watch` setting was added get the window on
+    /// the next `open`.
+    fn ensureWatchWindow(self: Runtime, scratch: std.mem.Allocator) !void {
+        if (!try self.cfg.anyServiceWatches()) return;
+        const tx = self.tmux();
+        switch (tx.observeWindow(session_layout.watch_window)) {
+            .present => {},
+            .missing => try tx.newWindow(session_layout.watch_window, try self.absoluteProjectRoot(scratch), try zask_command.invokeWatch(scratch, self.zask_path, self.config_path)),
+            .unavailable => return error.TmuxUnavailable,
+        }
+    }
+
+    fn absoluteProjectRoot(self: Runtime, scratch: std.mem.Allocator) ![]const u8 {
+        return pathing.absolute(scratch, self.io, try self.cfg.projectRoot(scratch));
     }
 
     fn warnServicesWithoutPort(self: Runtime, profile: []const u8, progress: anytype) !void {
@@ -413,6 +469,28 @@ pub const Runtime = struct {
 
     fn inTmux(self: Runtime) !bool {
         return env.exists(self.environ, "TMUX");
+    }
+};
+
+/// Runs each watch-triggered lifecycle step on its own arena over `gpa`.
+const WatchRestarter = struct {
+    runtime: Runtime,
+    gpa: std.mem.Allocator,
+
+    pub fn now(self: WatchRestarter) i96 {
+        return std.Io.Clock.awake.now(self.runtime.io).nanoseconds;
+    }
+
+    pub fn paneState(self: WatchRestarter, service: []const u8) observations.PaneState {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        return self.runtime.withAllocator(arena.allocator()).tmux().observePane(service).state;
+    }
+
+    pub fn restart(self: WatchRestarter, service: []const u8, notice: []const u8, writer: *std.Io.Writer) !void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        try self.runtime.withAllocator(arena.allocator()).lifecycle().restartServiceWithNotice(service, notice, writer);
     }
 };
 

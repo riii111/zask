@@ -3,6 +3,7 @@ const shell = @import("../platform/shell.zig");
 
 const dashboard_command = "dashboard";
 const monitor_command = "monitor";
+const watch_command = "watch";
 
 pub const InvocationHint = union(enum) {
     local,
@@ -27,6 +28,11 @@ pub fn invokeDashboard(gpa: std.mem.Allocator, zask_path: []const u8, config_pat
 /// Returns a shell command string owned by the caller.
 pub fn invokeMonitor(gpa: std.mem.Allocator, zask_path: []const u8, config_path: []const u8) ![]const u8 {
     return invoke(gpa, zask_path, config_path, monitor_command);
+}
+
+/// Returns a shell command string owned by the caller.
+pub fn invokeWatch(gpa: std.mem.Allocator, zask_path: []const u8, config_path: []const u8) ![]const u8 {
+    return invoke(gpa, zask_path, config_path, watch_command);
 }
 
 /// Returns a user-facing command hint owned by the caller.
