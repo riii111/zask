@@ -61,10 +61,12 @@ pub fn run(ctx: *Context, opts: Options) !void {
     defer validation_arena.deinit();
     _ = try config.Config.parse(validation_arena.allocator(), json, try paths.home(ctx.base.environ));
 
+    // The config references the schema copy, so install it first: a failure
+    // then leaves no new config and keeps an existing one under --force.
+    try config_schema.install(ctx.base.gpa, io, ctx.base.environ);
     const config_dir = std.fs.path.dirname(config_path) orelse return error.InvalidPath;
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, config_dir, @enumFromInt(0o755));
     try paths.writeFile(io, config_path, json);
-    try config_schema.install(ctx.base.gpa, io, ctx.base.environ);
 
     try ctx.writer.print("Created {s}\n", .{config_path});
     try writeReport(ctx.writer, project, detected);
@@ -586,6 +588,32 @@ test "init.run: overwrites existing config with force" {
 
     try std.testing.expectEqualStrings(expected_root, project_root);
     try std.testing.expectEqual(@as(usize, 0), (try cfg.services()).len);
+}
+
+test "init.run: keeps configs untouched when the schema cannot be installed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    const config_home = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}", .{&tmp.sub_path});
+    try environ.put("HOME", "/home/me");
+    try environ.put("XDG_CONFIG_HOME", config_home);
+    try tmp.dir.createDirPath(threaded.io(), "zask/" ++ config_schema.file_name ++ "/blocker");
+    try tmp.dir.createDirPath(threaded.io(), "zask/kept");
+    try tmp.dir.writeFile(threaded.io(), .{ .sub_path = "zask/kept/config.json", .data = "original" });
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var ctx = testContext(arena.allocator(), threaded.io(), &environ, &writer);
+
+    try std.testing.expect(std.meta.isError(run(&ctx, try Options.parse(&.{"fresh"}))));
+    try std.testing.expect(std.meta.isError(run(&ctx, try Options.parse(&.{ "kept", "--force" }))));
+
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(threaded.io(), "zask/fresh/config.json", .{}));
+    const kept = try tmp.dir.readFileAlloc(threaded.io(), "zask/kept/config.json", arena.allocator(), .limited(64));
+    try std.testing.expectEqualStrings("original", kept);
 }
 
 test "init.run: releases temporary allocations on success" {
