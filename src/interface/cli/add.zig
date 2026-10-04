@@ -46,6 +46,8 @@ pub fn run(ctx: *Context, opts: Options) !void {
     const gpa = ctx.base.gpa;
     const io = ctx.base.io orelse return error.MissingIo;
     const writer = ctx.writer;
+    const edit_lock = try service_add.lockConfigEdits(gpa, io, try paths.runtimeBase(gpa, ctx.base.environ));
+    defer edit_lock.release(io);
     var selected = try ctx.selectConfig();
     defer selected.deinitExpectedProjectName(gpa);
     const path = selected.path;
@@ -56,8 +58,6 @@ pub fn run(ctx: *Context, opts: Options) !void {
         try writer.writeAll("Add the service to the file by hand.\n");
         return err;
     };
-    const edit_lock = try service_add.lockConfig(gpa, io, path, try paths.runtimeBase(gpa, ctx.base.environ));
-    defer edit_lock.release(io);
     const file = try ctx.loadSelectedConfig(selected);
 
     var diags = diagnostics.Diagnostics.init(gpa);
@@ -66,6 +66,12 @@ pub fn run(ctx: *Context, opts: Options) !void {
     const service: service_add.NewService = .{ .name = opts.name, .command = opts.command, .port = opts.port };
     const outcome = service_add.addService(gpa, io, target, opts.group, service, &diags) catch |err| switch (err) {
         error.OutOfMemory => return err,
+        error.ExchangeUnsupported => {
+            try writer.writeAll("Error: zask add cannot replace the config safely on this filesystem\n");
+            try writeUnchanged(writer, path);
+            try writer.writeAll("Add the service to the file by hand.\n");
+            return error.ConfigWriteFailed;
+        },
         else => {
             try writer.print("Error: could not update config: {t}\n", .{err});
             try writer.print("Config: {s}\n", .{path});
@@ -109,6 +115,13 @@ pub fn run(ctx: *Context, opts: Options) !void {
             try writer.print("Error: adding service '{s}' would make the config too large to load\n", .{opts.name});
             try writeUnchanged(writer, path);
             return error.ServiceNotAdded;
+        },
+        .conflict => |kept| {
+            try writer.writeAll("Error: the config changed while zask add was writing it\n");
+            try writer.print("Config: {s}\n", .{path});
+            try writer.print("The replaced version is kept at {s}\n", .{kept});
+            try writer.writeAll("Compare it with the config and merge by hand.\n");
+            return error.ConfigConflict;
         },
         .changed => {
             try writer.writeAll("Error: the config changed while zask add was editing it\n");
