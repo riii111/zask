@@ -307,8 +307,11 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ self.tmux_path, "choose-tree", "-Zw", "-t", pane_id }, .{ .check = true, .discard = true });
     }
 
+    // `=` makes tmux accept only an exact window name. Without it a missing
+    // `api` window resolves to `api-worker` by prefix, and the command lands
+    // on another service.
     fn target(self: Client, window: []const u8) ![]const u8 {
-        return std.fmt.allocPrint(self.gpa, "{s}:{s}", .{ self.session, window });
+        return std.fmt.allocPrint(self.gpa, "{s}:={s}", .{ self.session, window });
     }
 
     fn buildRespawnScript(self: Client, command: []const u8) ![]const u8 {
@@ -517,13 +520,13 @@ test "tmux.window: layout helpers record argv" {
     try client.selectLayout("dashboard", "main-vertical");
 
     const split = recorder.commands.items[0];
-    try runner.expectCommandArgv(split, &.{ "tmux", "split-window", "-t", "demo:dashboard", "-c", "/tmp/demo app", "zask monitor" });
+    try runner.expectCommandArgv(split, &.{ "tmux", "split-window", "-t", "demo:=dashboard", "-c", "/tmp/demo app", "zask monitor" });
 
     const option = recorder.commands.items[1];
-    try runner.expectCommandArgv(option, &.{ "tmux", "set-window-option", "-t", "demo:dashboard", "main-pane-width", "50%" });
+    try runner.expectCommandArgv(option, &.{ "tmux", "set-window-option", "-t", "demo:=dashboard", "main-pane-width", "50%" });
 
     const layout = recorder.commands.items[2];
-    try runner.expectCommandArgv(layout, &.{ "tmux", "select-layout", "-t", "demo:dashboard", "main-vertical" });
+    try runner.expectCommandArgv(layout, &.{ "tmux", "select-layout", "-t", "demo:=dashboard", "main-vertical" });
 }
 
 test "tmux.newWindow: records append target when requested" {
@@ -538,7 +541,7 @@ test "tmux.newWindow: records append target when requested" {
     try runner.expectCommandArgv(window, &.{ "tmux", "new-window", "-d", "-t", "demo", "-n", "api", "-c", "/tmp/demo app/backend", "echo waiting" });
 
     const after_window = recorder.commands.items[1];
-    try runner.expectCommandArgv(after_window, &.{ "tmux", "new-window", "-d", "-a", "-t", "demo:api", "-n", "worker", "-c", "/tmp/demo app/worker", "echo worker" });
+    try runner.expectCommandArgv(after_window, &.{ "tmux", "new-window", "-d", "-a", "-t", "demo:=api", "-n", "worker", "-c", "/tmp/demo app/worker", "echo worker" });
 }
 
 test "tmux.client: lifecycle commands record argv" {
@@ -597,7 +600,7 @@ test "tmux.sendKeys: records command through runner" {
     try client.sendKeys("api", &.{ "echo ok", "Enter" });
 
     const command = recorder.commands.items[0];
-    try runner.expectCommandArgv(command, &.{ "tmux", "send-keys", "-t", "demo:api", "echo ok", "Enter" });
+    try runner.expectCommandArgv(command, &.{ "tmux", "send-keys", "-t", "demo:=api", "echo ok", "Enter" });
 }
 
 test "tmux.respawnPane: records wrapped shell command" {
@@ -625,7 +628,7 @@ test "tmux.respawnPane: records start marker after respawn in the same invocatio
 
     try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
     const argv = recorder.commands.items[0].argv;
-    try runner.expectCommandArgv(.{ .argv = argv[10..], .cwd = null, .interactive = false }, &.{ ";", "set-option", "-p", "-t", "demo:api", "@zask_started_at", "1700000000" });
+    try runner.expectCommandArgv(.{ .argv = argv[10..], .cwd = null, .interactive = false }, &.{ ";", "set-option", "-p", "-t", "demo:=api", "@zask_started_at", "1700000000" });
 }
 
 test "tmux.buildRespawnScript: propagates command exit status" {
@@ -863,7 +866,7 @@ test "tmux.captureTail: returns last display-safe pane lines" {
     try std.testing.expectEqual(@as(usize, 2), tail.lines.len);
     try std.testing.expectEqualStrings("second", tail.lines[0]);
     try std.testing.expectEqualStrings("bad?[2J?secret?", tail.lines[1]);
-    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "capture-pane", "-t", "demo:api", "-p", "-S", "-2" });
+    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "capture-pane", "-t", "demo:=api", "-p", "-S", "-2" });
 }
 
 test "tmux.captureTail: keeps order after multiple ring wraps" {
@@ -995,7 +998,7 @@ test "tmux.paneInfo: queries the start marker option" {
     const info = try client.paneInfo("api");
     defer info.deinit(std.testing.allocator);
 
-    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "list-panes", "-t", "demo:api", "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}|#{@zask_started_at}" });
+    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "list-panes", "-t", "demo:=api", "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}|#{@zask_started_at}" });
 }
 
 test "tmux.observePane: carries start marker into the observation" {

@@ -875,8 +875,8 @@ test "runtime.openSession: creates dashboard service and docker windows" {
     try proc_runner.expectCommandContaining(&recorder, "main-pane-width");
     try proc_runner.expectCommandContaining(&recorder, "main-vertical");
     try proc_runner.expectCommandContaining(&recorder, "new-window");
-    try proc_runner.expectCommandContaining(&recorder, "demo:dashboard");
-    try proc_runner.expectCommandContaining(&recorder, "demo:api");
+    try proc_runner.expectCommandContaining(&recorder, "demo:=dashboard");
+    try proc_runner.expectCommandContaining(&recorder, "demo:=api");
     try proc_runner.expectCommandContaining(&recorder, "/tmp/demo/backend");
     try proc_runner.expectCommandContaining(&recorder, "/tmp/demo/infra");
     try proc_runner.expectCommandOrder(&recorder, "remain-on-exit", "api");
@@ -908,7 +908,7 @@ test "runtime.openSession: places docker after dashboard" {
     try runtime.appendServiceAndDockerWindows(arena.allocator());
     try runtime.focusDashboard();
 
-    try proc_runner.expectCommandContaining(&recorder, "demo:dashboard");
+    try proc_runner.expectCommandContaining(&recorder, "demo:=dashboard");
     try proc_runner.expectCommandContaining(&recorder, "/tmp/demo/infra");
     try proc_runner.expectCommandOrder(&recorder, "docker", "select-window");
     try proc_runner.expectNoRemainingResponses(&recorder);

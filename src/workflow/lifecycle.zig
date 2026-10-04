@@ -1077,7 +1077,7 @@ test "lifecycle.restartTarget: records a new start marker with the respawn" {
 
     const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
     const marker = respawn.argv[respawn.argv.len - 3 ..];
-    try proc_runner.expectCommandArgv(.{ .argv = marker, .cwd = null, .interactive = false }, &.{ "demo:api", "@zask_started_at", "1700000500" });
+    try proc_runner.expectCommandArgv(.{ .argv = marker, .cwd = null, .interactive = false }, &.{ "demo:=api", "@zask_started_at", "1700000500" });
     try proc_runner.expectCommandOrder(&recorder, "C-c", "respawn-pane");
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
@@ -1111,7 +1111,7 @@ test "lifecycle.startTarget: docker start records a start marker with the respaw
 
     const respawn = proc_runner.findCommandContaining(&recorder, "docker compose") orelse return error.CommandNotFound;
     const marker = respawn.argv[respawn.argv.len - 3 ..];
-    try proc_runner.expectCommandArgv(.{ .argv = marker, .cwd = null, .interactive = false }, &.{ "demo:docker", "@zask_started_at", "1700000500" });
+    try proc_runner.expectCommandArgv(.{ .argv = marker, .cwd = null, .interactive = false }, &.{ "demo:=docker", "@zask_started_at", "1700000500" });
 }
 
 test "lifecycle.stopAll: signals every running service before polling once" {
@@ -1505,7 +1505,7 @@ test "lifecycle.startAll: recreates missing service window before start" {
 
     const new_window = proc_runner.findCommandContaining(&recorder, "new-window") orelse return error.CommandNotFound;
     try proc_runner.expectCommandArg(new_window, 3, "-a");
-    try proc_runner.expectCommandArg(new_window, 5, "demo:dashboard");
+    try proc_runner.expectCommandArg(new_window, 5, "demo:=dashboard");
     try proc_runner.expectCommandArg(new_window, 7, "api");
     try proc_runner.expectCommandArg(new_window, 9, "/tmp/demo/backend");
     try proc_runner.expectCommandArgContains(new_window, 10, "Waiting for start command");
