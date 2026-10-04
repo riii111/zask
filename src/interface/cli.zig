@@ -18,6 +18,7 @@ const status_json = @import("cli/status_json.zig");
 const stop = @import("cli/stop.zig");
 const sync_size = @import("cli/sync_size.zig");
 const version = @import("cli/version.zig");
+const wait = @import("cli/wait.zig");
 const root = @import("../root.zig");
 const env = @import("../platform/env.zig");
 const diagnostics = @import("../model/diagnostics.zig");
@@ -31,6 +32,7 @@ const Command = enum {
     init,
     list,
     status,
+    wait,
     attach,
     logs,
     open,
@@ -51,6 +53,7 @@ const Command = enum {
             .init => runCommand(init_cmd, context),
             .list => runCommand(list, context),
             .status => runCommand(status, context),
+            .wait => runCommand(wait, context),
             .attach => runCommand(attach, context),
             .logs => runCommand(logs, context),
             .open => runCommand(open, context),
@@ -87,6 +90,7 @@ const command_specs = [_]CommandSpec{
     .{ .command = .restart, .names = &.{"restart"}, .usage = "restart <svc|group|docker>", .description = "Restart service, group, or docker" },
     .{ .command = .list, .names = &.{"list"}, .usage = "list", .description = "List configured services" },
     .{ .command = .status, .names = &.{"status"}, .usage = "status [--json]", .description = "Show service state" },
+    .{ .command = .wait, .names = &.{"wait"}, .usage = "wait <svc|group>... [--timeout <sec>]", .description = "Wait until services are ready" },
     .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window" },
     .{ .command = .init, .names = &.{"init"}, .usage = "init [project] [--root <path>] [--force]", .description = "Create project config", .global = true },
     .{ .command = .version, .names = &.{"version"}, .usage = "version", .description = "Print zask version", .global = true },
@@ -131,7 +135,7 @@ fn exitWithJsonError(gpa: std.mem.Allocator, stdout: *std.Io.Writer, err: anyerr
 
 fn exitWithTextError(stdout: *std.Io.Writer, err: anyerror, err_ctx: cli_context.ErrorContext, diags: diagnostics.Diagnostics) !void {
     switch (err) {
-        error.InvalidArguments, error.UnknownCommand, error.ProjectRequired, error.ConfigAlreadyExists => {
+        error.InvalidArguments, error.UnknownCommand, error.ProjectRequired, error.ConfigAlreadyExists, error.UnknownTarget => {
             try stdout.flush();
             std.process.exit(2);
         },
@@ -168,7 +172,7 @@ fn exitWithTextError(stdout: *std.Io.Writer, err: anyerror, err_ctx: cli_context
             try stdout.flush();
             std.process.exit(2);
         },
-        error.SessionNotRunning, error.TmuxUnavailable, error.ServiceStopIncomplete, error.StartupFailed, error.WindowNotReady => {
+        error.SessionNotRunning, error.TmuxUnavailable, error.ServiceStopIncomplete, error.StartupFailed, error.WindowNotReady, error.ServiceNotRunning, error.ReadinessUnavailable, error.WaitTimedOut => {
             try stdout.flush();
             std.process.exit(1);
         },
@@ -392,6 +396,7 @@ test "cli.help: prints public commands" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "stop <--all|svc|group|docker>") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "restart <svc|group|docker>") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "init [project] [--root <path>] [--force]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "wait <svc|group>... [--timeout <sec>]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "attach | detach") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "open [--docker|--<profile>]") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "hello") == null);

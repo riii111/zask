@@ -122,6 +122,9 @@ pub const Recorder = struct {
     stderr: []const u8 = "",
     term: std.process.Child.Term = .{ .exited = 0 },
     now_seconds: i64 = 0,
+    /// Lets deadline-based loops see time pass; off by default so existing tests
+    /// keep a fixed clock across recorded sleeps.
+    advance_clock_on_sleep: bool = false,
 
     pub fn init(gpa: std.mem.Allocator) Recorder {
         return .{ .gpa = gpa, .commands = .empty, .responses = .empty, .errors = .empty, .sleeps = .empty };
@@ -159,6 +162,7 @@ pub const Recorder = struct {
     pub fn recordSleep(self: *Recorder, duration: std.Io.Duration) void {
         self.sleeps.append(self.gpa, .{ .duration = duration, .commands_before = self.commands.items.len }) catch |err|
             std.debug.panic("failed to record sleep: {s}", .{@errorName(err)});
+        if (self.advance_clock_on_sleep) self.now_seconds += duration.toSeconds();
     }
 
     fn record(self: *Recorder, argv: []const []const u8, cwd: ?[]const u8, interactive: bool) !std.process.RunResult {

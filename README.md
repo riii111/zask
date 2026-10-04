@@ -88,6 +88,20 @@ with exit `1` (`tmux_unavailable`) or `2` (`config_not_found`, `ambiguous_config
 `invalid_config_syntax`, `invalid_config`, `config_too_large`). Invalid
 arguments still print usage text and exit `2`.
 
+### Waiting for services
+
+`zask wait api && npm run e2e` runs the next command only after `api` is ready.
+Pass several services or groups to wait for all of them; `--timeout <seconds>`
+(default `180`) bounds the whole wait.
+
+- A service with a `port` is ready once the port listens and, with an `http`
+  healthcheck, the HTTP check passes.
+- A service without a `port` counts as ready as soon as its process is running.
+- `wait` never starts or restarts anything. It exits `1` at once if a target is
+  not running or exits while waiting, if the session is not running, or if
+  readiness cannot be checked (`tmux`, `nc`, or `curl` unavailable); it exits `1`
+  on timeout and `2` for an unknown service or group.
+
 Named configs are stored under the same name as `project.name`. For example,
 `zask demo open` loads the `demo` config, and that config must set
 `"project": {"name": "demo", ...}`.
