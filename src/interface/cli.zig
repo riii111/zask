@@ -86,7 +86,7 @@ const command_specs = [_]CommandSpec{
     .{ .command = .restart, .names = &.{"restart"}, .usage = "restart <svc|group|docker>", .description = "Restart service, group, or docker" },
     .{ .command = .list, .names = &.{"list"}, .usage = "list", .description = "List configured services" },
     .{ .command = .status, .names = &.{"status"}, .usage = "status", .description = "Show service state" },
-    .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window" },
+    .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service> [--tail <n>]", .description = "Focus service window, or print its last n lines" },
     .{ .command = .init, .names = &.{"init"}, .usage = "init [project] [--root <path>] [--force]", .description = "Create project config", .global = true },
     .{ .command = .version, .names = &.{"version"}, .usage = "version", .description = "Print zask version", .global = true },
     .{ .command = .help, .names = &.{ "help", "--help", "-h" }, .usage = "help", .description = "Print this help", .global = true },
@@ -152,7 +152,7 @@ pub fn run(init: std.process.Init) !void {
             try stdout.flush();
             std.process.exit(2);
         },
-        error.SessionNotRunning, error.TmuxUnavailable, error.ServiceStopIncomplete, error.StartupFailed, error.WindowNotReady => {
+        error.SessionNotRunning, error.TmuxUnavailable, error.ServiceStopIncomplete, error.StartupFailed, error.WindowNotReady, error.ServiceNotFound, error.ServiceWindowMissing => {
             try stdout.flush();
             std.process.exit(1);
         },

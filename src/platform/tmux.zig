@@ -246,6 +246,33 @@ pub const Client = struct {
         return try tailNonEmptyLines(self.gpa, result.stdout, max_lines);
     }
 
+    /// Caller owns the returned text: the pane's last `max_lines` lines as tmux
+    /// renders them (wrapped rows joined, colors stripped), each ending in '\n'.
+    /// Unlike capturePane and captureTail, a failed capture is never reported
+    /// as an empty log: error.WindowMissing when tmux cannot find the pane,
+    /// error.TmuxUnavailable when tmux cannot run or its socket is unusable.
+    /// Trailing blank lines are dropped because tmux pads the capture with the
+    /// unused rows of the screen, so an empty pane yields an empty slice.
+    pub fn captureRecentLines(self: Client, window: []const u8, max_lines: u32) ![]const u8 {
+        if (max_lines == 0) return self.gpa.dupe(u8, "");
+        const pane_target = try self.target(window);
+        defer self.gpa.free(pane_target);
+        // -S counts screen rows into history; the visible screen is captured on
+        // top of it, so joined wrapped rows rarely leave fewer than max_lines.
+        const start = try std.fmt.allocPrint(self.gpa, "-{d}", .{max_lines});
+        defer self.gpa.free(start);
+        const run_result = self.runner.run(&.{ self.tmux_path, "capture-pane", "-p", "-J", "-t", pane_target, "-S", start }, .{}) catch |err| switch (err) {
+            error.OutOfMemory, error.OutputTooLarge => return err,
+            else => return error.TmuxUnavailable,
+        };
+        const result = runner.captured(run_result);
+        defer self.gpa.free(result.stdout);
+        defer self.gpa.free(result.stderr);
+        if (result.term != .exited) return error.TmuxUnavailable;
+        if (result.term.exited != 0) return if (serverUnavailable(result.stderr)) error.TmuxUnavailable else error.WindowMissing;
+        return try lastLines(self.gpa, result.stdout, max_lines);
+    }
+
     /// Caller owns the returned slice. Capture failures are reported as an empty
     /// line so startup diagnostics can still render the surrounding context.
     /// The returned line is display-safe, but it may still contain sensitive log
@@ -367,6 +394,19 @@ fn tailNonEmptyLines(gpa: std.mem.Allocator, pane: []const u8, max_lines: usize)
         line.* = slots[(start + index) % max_lines];
     }
     return .{ .lines = out };
+}
+
+fn lastLines(gpa: std.mem.Allocator, pane: []const u8, max_lines: u32) ![]const u8 {
+    const content = std.mem.trimEnd(u8, pane, " \t\r\n");
+    if (content.len == 0) return gpa.dupe(u8, "");
+    var start = content.len;
+    var kept: u32 = 0;
+    while (start > 0) : (start -= 1) {
+        if (content[start - 1] != '\n') continue;
+        kept += 1;
+        if (kept == max_lines) break;
+    }
+    return std.mem.concat(gpa, u8, &.{ content[start..], "\n" });
 }
 
 fn sanitizeLogLine(gpa: std.mem.Allocator, line: []const u8) ![]const u8 {
@@ -890,6 +930,72 @@ test "tmux.captureTail: returns empty tail when no lines are requested" {
     defer tail.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 0), tail.lines.len);
+}
+
+test "tmux.captureRecentLines: records joined capture from history" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const client = testClient(&recorder);
+
+    const output = try client.captureRecentLines("api", 100);
+    defer std.testing.allocator.free(output);
+
+    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "capture-pane", "-p", "-J", "-t", "demo:api", "-S", "-100" });
+}
+
+test "tmux.captureRecentLines: keeps the last lines of the pane" {
+    const cases = [_]struct {
+        name: []const u8,
+        stdout: []const u8,
+        max_lines: u32,
+        expected: []const u8,
+    }{
+        .{ .name = "more than requested", .stdout = "one\ntwo\nthree\nfour\n", .max_lines = 2, .expected = "three\nfour\n" },
+        .{ .name = "fewer than requested", .stdout = "one\ntwo\n", .max_lines = 100, .expected = "one\ntwo\n" },
+        .{ .name = "blank screen padding", .stdout = "one\n\ntwo\n\n\n\n", .max_lines = 100, .expected = "one\n\ntwo\n" },
+        .{ .name = "inner blank kept in tail", .stdout = "one\ntwo\n\nthree\n\n\n", .max_lines = 2, .expected = "\nthree\n" },
+        .{ .name = "empty pane", .stdout = "\n\n\n", .max_lines = 100, .expected = "" },
+        .{ .name = "raw text unchanged", .stdout = "a\tb \x1b[1m\n", .max_lines = 1, .expected = "a\tb \x1b[1m\n" },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("case: {s}\n", .{case.name});
+        var recorder = runner.Recorder.init(std.testing.allocator);
+        defer recorder.deinit();
+        try recorder.enqueue(case.stdout, "", .{ .exited = 0 });
+        const client = testClient(&recorder);
+
+        const output = try client.captureRecentLines("api", case.max_lines);
+        defer std.testing.allocator.free(output);
+
+        try std.testing.expectEqualStrings(case.expected, output);
+    }
+}
+
+test "tmux.captureRecentLines: reports capture failures as errors" {
+    const cases = [_]struct {
+        term: ?std.process.Child.Term,
+        stderr: []const u8 = "",
+        spawn_error: ?anyerror = null,
+        expected: anyerror,
+    }{
+        .{ .term = .{ .exited = 1 }, .stderr = "can't find window: api", .expected = error.WindowMissing },
+        .{ .term = .{ .exited = 1 }, .stderr = "can't find pane: api", .expected = error.WindowMissing },
+        .{ .term = .{ .exited = 1 }, .stderr = "error connecting to /tmp/tmux-501/default (Permission denied)", .expected = error.TmuxUnavailable },
+        .{ .term = .{ .signal = @enumFromInt(9) }, .expected = error.TmuxUnavailable },
+        .{ .term = null, .spawn_error = error.FileNotFound, .expected = error.TmuxUnavailable },
+        .{ .term = null, .spawn_error = error.OutputTooLarge, .expected = error.OutputTooLarge },
+    };
+
+    for (cases) |case| {
+        var recorder = runner.Recorder.init(std.testing.allocator);
+        defer recorder.deinit();
+        if (case.spawn_error) |err| try recorder.enqueueError(err) else try recorder.enqueue("", case.stderr, case.term.?);
+        const client = testClient(&recorder);
+
+        try std.testing.expectError(case.expected, client.captureRecentLines("api", 100));
+    }
 }
 
 test "tmux.captureLastLine: replaces control bytes in pane output" {
