@@ -15,6 +15,7 @@ pub const paths = @import("platform/paths.zig");
 pub const process_probe = @import("platform/process_probe.zig");
 pub const runner = @import("platform/runner.zig");
 pub const runtime = @import("workflow/runtime.zig");
+pub const service_observation = @import("workflow/service_observation.zig");
 pub const shell = @import("platform/shell.zig");
 pub const tmux = @import("platform/tmux.zig");
 pub const tmux_setup = @import("workflow/tmux_setup.zig");

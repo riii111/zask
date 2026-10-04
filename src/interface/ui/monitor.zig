@@ -1,9 +1,9 @@
 const std = @import("std");
 const ansi = @import("ansi.zig");
 const config = @import("../../model/config.zig");
-const docker_client = @import("../../platform/docker.zig");
 const observations = @import("../../model/observations.zig");
 const proc_runner = @import("../../platform/runner.zig");
+const service_observation = @import("../../workflow/service_observation.zig");
 const tmux_options = @import("../../model/tmux_options.zig");
 const RenderContext = @import("context.zig").RenderContext;
 
@@ -120,94 +120,58 @@ fn dashboardMode(ctx: RenderContext) ![]const u8 {
 }
 
 fn serviceMonitorRow(ctx: RenderContext, service: std.json.Value) !MonitorRow {
-    const name = try config.Config.serviceName(service);
-    const observation = try observeService(ctx, service);
-    const state = serviceMonitorStatus(observation);
+    const observation = try observer(ctx).observeService(service);
     return .{
-        .name = name,
-        .status = state,
+        .name = try config.Config.serviceName(service),
+        .status = serviceMonitorStatus(observation),
         .exit_code = observation.pane.exit_code,
         .command = observation.pane.command,
-        .port = if (config.Config.servicePort(service)) |p| try std.fmt.allocPrint(ctx.gpa, ":{d}", .{p}) else "no check",
+        .port = if (observation.port) |p| try std.fmt.allocPrint(ctx.gpa, ":{d}", .{p}) else "no check",
     };
 }
 
 fn dockerMonitorRow(ctx: RenderContext) !MonitorRow {
-    const pane = ctx.tmux.observePane("docker");
-    const skipped = observations.ComposeObservation.empty(.empty);
-    const compose = if (shouldObserveCompose(pane)) observeDocker(ctx) else skipped;
-    defer compose.deinit(ctx.gpa);
-    return .{ .name = "docker", .status = dockerMonitorStatus(pane, compose), .exit_code = pane.exit_code, .command = pane.command, .port = "compose" };
+    const observation = observer(ctx).observeDocker();
+    defer observation.compose.deinit(ctx.gpa);
+    return .{ .name = "docker", .status = dockerMonitorStatus(observation), .exit_code = observation.pane.exit_code, .command = observation.pane.command, .port = "compose" };
 }
 
-fn observeService(ctx: RenderContext, service: std.json.Value) !observations.ServiceObservation {
-    const name = try config.Config.serviceName(service);
-    const pane = ctx.tmux.observePane(name);
-    const health = if (shouldObserveHealth(pane)) try observeHealth(ctx, service) else observations.HealthObservation.no_check;
-    return .{ .pane = pane, .health = health };
-}
-
-fn shouldObserveHealth(pane: observations.PaneObservation) bool {
-    return pane.state == .busy;
-}
-
-fn shouldObserveCompose(pane: observations.PaneObservation) bool {
-    return pane.state == .busy;
-}
-
-fn observeHealth(ctx: RenderContext, service: std.json.Value) !observations.HealthObservation {
-    const port = config.Config.servicePort(service) orelse return .no_check;
-    const result = proc_runner.captured(ctx.runner.run(&.{ "nc", "-z", "localhost", try std.fmt.allocPrint(ctx.gpa, "{d}", .{port}) }, .{}) catch return .waiting);
-    defer ctx.gpa.free(result.stdout);
-    defer ctx.gpa.free(result.stderr);
-    if (result.term != .exited or result.term.exited != 0) return .waiting;
-    if (!std.mem.eql(u8, config.Config.serviceHealthcheckType(service), "http")) return .ready;
-
-    const url = try std.fmt.allocPrint(ctx.gpa, "http://localhost:{d}{s}", .{ port, config.Config.serviceHealthcheckPath(service) });
-    const http = proc_runner.captured(ctx.runner.run(&.{ "curl", "-sf", "--max-time", "1", url }, .{}) catch return .degraded);
-    defer ctx.gpa.free(http.stdout);
-    defer ctx.gpa.free(http.stderr);
-    return if (http.term == .exited and http.term.exited == 0) .ready else .degraded;
-}
-
-fn observeDocker(ctx: RenderContext) observations.ComposeObservation {
-    return (docker_client.Compose{
+fn observer(ctx: RenderContext) service_observation.Observer {
+    return .{
         .gpa = ctx.gpa,
         .runner = ctx.runner,
-        // The monitor runs from the project root, so the compose dir is the subdir
-        // under root; dockerDir would prepend root again and double the path.
-        .dir = ctx.cfg.dockerSubdir(),
-        .file = ctx.cfg.dockerComposeFile(),
-    }).observe();
-}
-
-fn serviceMonitorStatus(observation: observations.ServiceObservation) MonitorStatus {
-    return switch (observation.pane.state) {
-        .dead => .dead,
-        .idle, .window_missing => .stop,
-        .tmux_unavailable => .unknown,
-        .busy => healthMonitorStatus(observation.health),
-    };
-}
-
-fn dockerMonitorStatus(pane: observations.PaneObservation, compose: observations.ComposeObservation) MonitorStatus {
-    return switch (pane.state) {
-        .dead => .dead,
-        .idle, .window_missing => .stop,
-        .tmux_unavailable => .unknown,
-        .busy => switch (compose.state) {
-            .running => .live,
-            .empty => .waiting,
-            .unavailable => .unknown,
+        .tmux = ctx.tmux,
+        .docker = .{
+            .gpa = ctx.gpa,
+            .runner = ctx.runner,
+            // The monitor runs from the project root, so the compose dir is the subdir
+            // under root; dockerDir would prepend root again and double the path.
+            .dir = ctx.cfg.dockerSubdir(),
+            .file = ctx.cfg.dockerComposeFile(),
         },
     };
 }
 
-fn healthMonitorStatus(health: observations.HealthObservation) MonitorStatus {
-    return switch (health) {
+fn serviceMonitorStatus(observation: observations.ServiceObservation) MonitorStatus {
+    return switch (observation.health()) {
+        .not_running => if (observation.pane.state == .dead) .dead else .stop,
         .no_check, .ready => .live,
         .waiting => .waiting,
         .degraded => .degraded,
+        .unavailable => .unknown,
+    };
+}
+
+fn dockerMonitorStatus(observation: observations.DockerObservation) MonitorStatus {
+    return switch (observation.pane.state) {
+        .dead => .dead,
+        .idle, .window_missing => .stop,
+        .tmux_unavailable => .unknown,
+        .busy => switch (observation.compose.state) {
+            .running => .live,
+            .empty => .waiting,
+            .unavailable => .unknown,
+        },
     };
 }
 
@@ -461,4 +425,50 @@ test "monitor.docker: runs compose from the root-relative subdir, not a doubled 
     const compose = proc_runner.findCommandContaining(&recorder, "compose") orelse return error.MissingComposeCommand;
     try proc_runner.expectCommandCwd(compose, "infra");
     try std.testing.expectEqual(MonitorStatus.live, row.status);
+}
+
+test "monitor.service: shows unknown when the port probe cannot run" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve","port":3000}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("0||12345|node|\n", "", .{ .exited = 0 });
+    try recorder.enqueueError(error.FileNotFound);
+    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+
+    const row = try serviceMonitorRow(ctx, (try cfg.services())[0]);
+
+    try std.testing.expectEqual(MonitorStatus.unknown, row.status);
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "monitor.service: shows exit code of an exited service" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve","port":3000}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("1|2|12345|node|\n", "", .{ .exited = 0 });
+    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+
+    const row = try serviceMonitorRow(ctx, (try cfg.services())[0]);
+
+    try std.testing.expectEqual(MonitorStatus.dead, row.status);
+    try std.testing.expectEqualStrings("2", row.status.summary(row.exit_code));
+    try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "nc"));
 }
