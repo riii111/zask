@@ -125,6 +125,11 @@ pub const Runtime = struct {
                 return error.ServiceWindowMissing;
             },
             error.TmuxUnavailable => return waits.reportTmuxUnavailable(diag),
+            error.OutputTooLarge => {
+                try diag.writeAll("Log output too large; request fewer lines\n");
+                try diag.flush();
+                return error.LogOutputTooLarge;
+            },
             else => return err,
         };
         defer self.gpa.free(lines);
@@ -904,6 +909,7 @@ test "runtime.logsTail: writes recent lines without moving windows" {
         var recorder = proc_runner.Recorder.init(arena.allocator());
         defer recorder.deinit();
         try recorder.enqueue("", "", .{ .exited = 0 });
+        try recorder.enqueue("%1|0\n", "", .{ .exited = 0 });
         try recorder.enqueue(case.pane, "", .{ .exited = 0 });
         const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
         var runtime = testRuntime(arena.allocator(), run, try testLogsConfig(arena.allocator()));
@@ -923,19 +929,23 @@ test "runtime.logsTail: writes recent lines without moving windows" {
 }
 
 test "runtime.logsTail: reports failures instead of an empty log" {
+    const permission_denied = "error connecting to /tmp/tmux-501/default (Permission denied)";
     const cases = [_]struct {
         name: []const u8,
         service: []const u8 = "api",
         session_stderr: ?[]const u8 = null,
-        capture_stderr: []const u8 = "",
+        pane_stderr: ?[]const u8 = null,
+        capture_error: ?anyerror = null,
         expected_error: anyerror,
         expected_diag: []const u8,
     }{
         .{ .name = "unknown service", .service = "worker", .expected_error = error.ServiceNotFound, .expected_diag = "Unknown service: worker\n" },
         .{ .name = "missing session", .session_stderr = "can't find session: demo", .expected_error = error.SessionNotRunning, .expected_diag = "Session not running\n" },
-        .{ .name = "unavailable session", .session_stderr = "error connecting to /tmp/tmux-501/default (Permission denied)", .expected_error = error.TmuxUnavailable, .expected_diag = "tmux unavailable\n" },
-        .{ .name = "missing pane", .capture_stderr = "can't find window: api", .expected_error = error.ServiceWindowMissing, .expected_diag = "Service window not found: api\n" },
-        .{ .name = "unavailable capture", .capture_stderr = "error connecting to /tmp/tmux-501/default (Permission denied)", .expected_error = error.TmuxUnavailable, .expected_diag = "tmux unavailable\n" },
+        .{ .name = "unavailable session", .session_stderr = permission_denied, .expected_error = error.TmuxUnavailable, .expected_diag = "tmux unavailable\n" },
+        .{ .name = "missing pane", .pane_stderr = "can't find window: api", .expected_error = error.ServiceWindowMissing, .expected_diag = "Service window not found: api\n" },
+        .{ .name = "unavailable pane", .pane_stderr = permission_denied, .expected_error = error.TmuxUnavailable, .expected_diag = "tmux unavailable\n" },
+        .{ .name = "unavailable capture", .capture_error = error.FileNotFound, .expected_error = error.TmuxUnavailable, .expected_diag = "tmux unavailable\n" },
+        .{ .name = "oversized capture", .capture_error = error.OutputTooLarge, .expected_error = error.LogOutputTooLarge, .expected_diag = "Log output too large; request fewer lines\n" },
     };
 
     for (cases) |case| {
@@ -946,9 +956,13 @@ test "runtime.logsTail: reports failures instead of an empty log" {
         defer recorder.deinit();
         if (case.session_stderr) |stderr| {
             try recorder.enqueue("", stderr, .{ .exited = 1 });
+        } else if (case.pane_stderr) |stderr| {
+            try recorder.enqueue("", "", .{ .exited = 0 });
+            try recorder.enqueue("", stderr, .{ .exited = 1 });
         } else {
             try recorder.enqueue("", "", .{ .exited = 0 });
-            try recorder.enqueue("", case.capture_stderr, .{ .exited = 1 });
+            try recorder.enqueue("%1|0\n", "", .{ .exited = 0 });
+            if (case.capture_error) |err| try recorder.enqueueError(err);
         }
         const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
         const runtime = testRuntime(arena.allocator(), run, try testLogsConfig(arena.allocator()));

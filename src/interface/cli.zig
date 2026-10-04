@@ -152,7 +152,7 @@ pub fn run(init: std.process.Init) !void {
             try stdout.flush();
             std.process.exit(2);
         },
-        error.SessionNotRunning, error.TmuxUnavailable, error.ServiceStopIncomplete, error.StartupFailed, error.WindowNotReady, error.ServiceNotFound, error.ServiceWindowMissing => {
+        error.SessionNotRunning, error.TmuxUnavailable, error.ServiceStopIncomplete, error.StartupFailed, error.WindowNotReady, error.ServiceNotFound, error.ServiceWindowMissing, error.LogOutputTooLarge => {
             try stdout.flush();
             std.process.exit(1);
         },

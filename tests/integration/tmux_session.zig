@@ -210,6 +210,39 @@ test "cli.logs: tail prints recent pane lines without moving windows" {
     try expectActiveWindow(gpa, io, session, "dashboard");
 }
 
+test "cli.logs: tail returns whole lines that wrap in a narrow pane" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-logs-wrap", .{std.c.getpid()});
+    const client = tmuxClient(gpa, io, session);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try writeServiceProject(gpa, io, tmp.dir, session);
+    const ready_channel = try std.fmt.allocPrint(gpa, "{s}-resized", .{session});
+    // Each line is 80 columns, so a 20-column pane wraps it over four rows.
+    const command = try std.fmt.allocPrint(gpa, "{s} wait-for {s}; for i in $(seq -w 1 20); do printf '%s%078d\\n' \"$i\" 0; done; sleep 60", .{ build_options.tmux_path, ready_channel });
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", project.root, "sleep 60");
+    defer client.killSession() catch {};
+    try client.newWindowAfter("dashboard", "api", project.root, command);
+    try client.resizeWindow(try std.fmt.allocPrint(gpa, "{s}:api", .{session}), 20, 5);
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "wait-for", "-S", ready_channel });
+    try waitForPaneText(gpa, io, try std.fmt.allocPrint(gpa, "{s}:api", .{session}), "20000");
+
+    const result = try runZask(gpa, io, project, &.{ "logs", "api", "--tail", "10" });
+
+    var expected: std.ArrayList(u8) = .empty;
+    for (11..21) |index| try expected.print(gpa, "{d:0>2}{d:0>78}\n", .{ index, 0 });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqualStrings(expected.items, result.stdout);
+    try std.testing.expectEqualStrings("", result.stderr);
+}
+
 test "cli.logs: tail reports missing service window on stderr" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
