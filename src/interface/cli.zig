@@ -92,7 +92,7 @@ const command_specs = [_]CommandSpec{
     .{ .command = .list, .names = &.{"list"}, .usage = "list", .description = "List configured services" },
     .{ .command = .status, .names = &.{"status"}, .usage = "status [--json]", .description = "Show service state" },
     .{ .command = .check, .names = &.{"check"}, .usage = "check", .description = "Check config without opening a session" },
-    .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window" },
+    .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service> [--tail <n>]", .description = "Focus service window, or print its last n lines" },
     .{ .command = .init, .names = &.{"init"}, .usage = "init [project] [--root <path>] [--from <Procfile>] [--force]", .description = "Create project config", .global = true },
     .{ .command = .version, .names = &.{"version"}, .usage = "version", .description = "Print zask version", .global = true },
     .{ .command = .help, .names = &.{ "help", "--help", "-h" }, .usage = "help", .description = "Print this help", .global = true },
@@ -175,7 +175,7 @@ fn exitWithTextError(stdout: *std.Io.Writer, err: anyerror, err_ctx: cli_context
             try stdout.flush();
             std.process.exit(2);
         },
-        error.SessionNotRunning, error.TmuxUnavailable, error.ServiceStopIncomplete, error.StartupFailed, error.WindowNotReady => {
+        error.SessionNotRunning, error.TmuxUnavailable, error.ServiceStopIncomplete, error.StartupFailed, error.WindowNotReady, error.ServiceNotFound, error.ServiceWindowMissing, error.LogOutputTooLarge => {
             try stdout.flush();
             std.process.exit(1);
         },
