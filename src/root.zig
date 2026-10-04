@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const cli = @import("interface/cli.zig");
+pub const clock = @import("platform/clock.zig");
 pub const config = @import("model/config.zig");
 pub const config_value = @import("model/config_value.zig");
 pub const diagnostics = @import("model/diagnostics.zig");
@@ -17,6 +18,7 @@ pub const runner = @import("platform/runner.zig");
 pub const runtime = @import("workflow/runtime.zig");
 pub const service_observation = @import("workflow/service_observation.zig");
 pub const shell = @import("platform/shell.zig");
+pub const terminal = @import("platform/terminal.zig");
 pub const tmux = @import("platform/tmux.zig");
 pub const tmux_setup = @import("workflow/tmux_setup.zig");
 pub const validate = @import("model/validate.zig");

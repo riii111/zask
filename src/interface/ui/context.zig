@@ -1,6 +1,7 @@
 const std = @import("std");
 const config = @import("../../model/config.zig");
 const proc_runner = @import("../../platform/runner.zig");
+const service_observation = @import("../../workflow/service_observation.zig");
 const tmux_client = @import("../../platform/tmux.zig");
 
 pub const RenderContext = struct {
@@ -8,4 +9,20 @@ pub const RenderContext = struct {
     cfg: config.Config,
     runner: proc_runner.Runner,
     tmux: tmux_client.Client,
+
+    pub fn observer(self: RenderContext) service_observation.Observer {
+        return .{
+            .gpa = self.gpa,
+            .runner = self.runner,
+            .tmux = self.tmux,
+            .docker = .{
+                .gpa = self.gpa,
+                .runner = self.runner,
+                // UI panes run from the project root, so the compose dir is the
+                // subdir under root; dockerDir would prepend root again.
+                .dir = self.cfg.dockerSubdir(),
+                .file = self.cfg.dockerComposeFile(),
+            },
+        };
+    }
 };
