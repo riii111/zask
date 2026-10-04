@@ -511,7 +511,9 @@ test "monitor: keys move selection, toggle the filter, and quit restores the ter
     const config_path = try std.fs.path.join(gpa, &.{ project_root, "zask.json" });
     const stty_path = try std.fs.path.join(gpa, &.{ project_root, "stty.txt" });
     const stderr_path = try std.fs.path.join(gpa, &.{ project_root, "monitor-stderr.txt" });
-    const command = try std.fmt.allocPrint(gpa, "{s} --config {s} monitor 2> {s}; stty -a > {s}; sleep 60", .{
+    // The tmux server may run without HOME (as in CI), which config loading needs.
+    const command = try std.fmt.allocPrint(gpa, "HOME={s} {s} --config {s} monitor 2> {s}; stty -a > {s}; sleep 60", .{
+        try zask.shell.quote(gpa, project_root),
         try zask.shell.quote(gpa, build_options.zask_path),
         try zask.shell.quote(gpa, config_path),
         try zask.shell.quote(gpa, stderr_path),
