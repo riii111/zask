@@ -124,6 +124,13 @@ file relative to that service directory:
 }
 ```
 
+[`schema/zask.schema.json`](schema/zask.schema.json) describes the config for
+editors that support JSON Schema. Point a top-level `"$schema"` key at it to get
+completion, descriptions, and diagnostics for keys, types, and allowed values;
+zask ignores the value. References between groups, services, and aliases,
+duplicate names, and paths that leave the project root are checked only when
+zask loads the config.
+
 ## Requirements
 
 - tmux
