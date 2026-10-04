@@ -475,7 +475,9 @@ test "runtime.watch: restarts running service, skips stopping one, and ends with
     var writer: std.Io.Writer = .fixed(&buffer);
     // The stop command below runs with its own XDG_RUNTIME_DIR, unlike the
     // watcher started by the tmux server; both must still share stop marks.
-    const watch_command = try zask.zask_command.invokeWatch(gpa, build_options.zask_path, config_path);
+    // A tmux server started by the test runner may lack HOME, which zask needs
+    // to load a config.
+    const watch_command = try std.fmt.allocPrint(gpa, "HOME={s} {s}", .{ project_root, try zask.zask_command.invokeWatch(gpa, build_options.zask_path, config_path) });
 
     client.killSession() catch {};
     try client.newSession("dashboard", project_root, "sleep 60");
