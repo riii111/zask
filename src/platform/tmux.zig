@@ -1,6 +1,7 @@
 const std = @import("std");
 const observations = @import("../model/observations.zig");
 const runner = @import("runner.zig");
+const shell = @import("shell.zig");
 const tmux_options = @import("../model/tmux_options.zig");
 
 pub const Client = struct {
@@ -311,6 +312,28 @@ pub const Client = struct {
         _ = try self.runner.run(&argv, .{ .check = true, .discard = true });
     }
 
+    /// respawnPane that also replaces the pane's output pipe in the same tmux
+    /// invocation: with `log`, the header and then everything the new process
+    /// prints are appended to `log.path`; with null, a pipe left by an earlier
+    /// start is closed. tmux runs the whole sequence before it reads the pane
+    /// again, so output printed right after the spawn is never missed.
+    pub fn respawnPaneWithOutputLog(self: Client, window: []const u8, cwd: []const u8, command: []const u8, started_at: i64, log: ?OutputLog) !void {
+        const pane_target = try self.target(window);
+        defer self.gpa.free(pane_target);
+        const wrapped_command = try self.buildRespawnScript(command);
+        defer self.gpa.free(wrapped_command);
+        const started_at_text = try std.fmt.allocPrint(self.gpa, "{d}", .{started_at});
+        defer self.gpa.free(started_at_text);
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(self.gpa);
+        try argv.appendSlice(self.gpa, &.{ self.tmux_path, "respawn-pane", "-k", "-t", pane_target, "-c", cwd, "sh", "-lc", wrapped_command, ";", "pipe-pane", "-t", pane_target });
+        const pipe_command = if (log) |output| try buildOutputPipe(self.gpa, output) else null;
+        defer if (pipe_command) |value| self.gpa.free(value);
+        if (pipe_command) |value| try argv.append(self.gpa, value);
+        try argv.appendSlice(self.gpa, &.{ ";", "set-option", "-p", "-t", pane_target, tmux_options.started_at, started_at_text });
+        _ = try self.runner.run(argv.items, .{ .check = true, .discard = true });
+    }
+
     pub fn setOption(self: Client, name: []const u8, value: []const u8) !void {
         _ = try self.runner.run(&.{ self.tmux_path, "set-option", "-t", self.session, name, value }, .{ .check = true, .discard = true });
     }
@@ -394,6 +417,22 @@ pub const Client = struct {
 fn serverUnavailable(stderr: []const u8) bool {
     return std.ascii.indexOfIgnoreCase(stderr, "permission denied") != null or
         std.ascii.indexOfIgnoreCase(stderr, "operation not permitted") != null;
+}
+
+/// `cat` writes each read immediately, so the output a process prints just
+/// before it dies reaches the file even while the dead pane keeps the pipe
+/// open. tmux expands both formats and strftime sequences in the pipe
+/// command, so every '#' and '%' is doubled to reach the shell unchanged.
+fn buildOutputPipe(gpa: std.mem.Allocator, log: OutputLog) ![]const u8 {
+    const header = try shell.quote(gpa, log.header);
+    defer gpa.free(header);
+    const path = try shell.quote(gpa, log.path);
+    defer gpa.free(path);
+    const command = try std.fmt.allocPrint(gpa, "{{ printf '%s' {s}; exec cat; }} >> {s}", .{ header, path });
+    defer gpa.free(command);
+    const formats_escaped = try std.mem.replaceOwned(u8, gpa, command, "#", "##");
+    defer gpa.free(formats_escaped);
+    return std.mem.replaceOwned(u8, gpa, formats_escaped, "%", "%%");
 }
 
 fn tailNonEmptyLines(gpa: std.mem.Allocator, pane: []const u8, max_lines: usize) !PaneTail {
@@ -504,6 +543,13 @@ const RowsCapture = struct {
     output: []const u8,
     text: []const u8,
     history_size: u64,
+};
+
+/// Where respawnPaneWithOutputLog appends a pane's output; `header` is written
+/// first and should end with a newline.
+pub const OutputLog = struct {
+    path: []const u8,
+    header: []const u8,
 };
 
 pub const PaneTail = struct {
@@ -722,6 +768,38 @@ test "tmux.respawnPane: records start marker after respawn in the same invocatio
     try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
     const argv = recorder.commands.items[0].argv;
     try runner.expectCommandArgv(.{ .argv = argv[10..], .cwd = null, .interactive = false }, &.{ ";", "set-option", "-p", "-t", "demo:api", "@zask_started_at", "1700000000" });
+}
+
+test "tmux.respawnPaneWithOutputLog: appends output to the log in the respawn invocation" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    const client = testClient(&recorder);
+
+    try client.respawnPaneWithOutputLog("api", "/tmp/demo", "npm run dev", 1_700_000_000, .{
+        .path = "/state/it's #1 100%/api.log",
+        .header = "=== api ===\n",
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
+    const argv = recorder.commands.items[0].argv;
+    try runner.expectCommandArg(recorder.commands.items[0], 1, "respawn-pane");
+    try runner.expectCommandArgContains(recorder.commands.items[0], 9, "npm run dev");
+    try runner.expectCommandArgv(.{ .argv = argv[10..], .cwd = null, .interactive = false }, &.{
+        ";",                "pipe-pane",  "-t", "demo:api", "{ printf '%%s' '=== api ===\n'; exec cat; } >> '/state/it'\\''s ##1 100%%/api.log'",
+        ";",                "set-option", "-p", "-t",       "demo:api",
+        "@zask_started_at", "1700000000",
+    });
+}
+
+test "tmux.respawnPaneWithOutputLog: closes an earlier pipe without a log" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    const client = testClient(&recorder);
+
+    try client.respawnPaneWithOutputLog("api", "/tmp/demo", "npm run dev", 1_700_000_000, null);
+
+    const argv = recorder.commands.items[0].argv;
+    try runner.expectCommandArgv(.{ .argv = argv[10..], .cwd = null, .interactive = false }, &.{ ";", "pipe-pane", "-t", "demo:api", ";", "set-option", "-p", "-t", "demo:api", "@zask_started_at", "1700000000" });
 }
 
 test "tmux.buildRespawnScript: propagates command exit status" {

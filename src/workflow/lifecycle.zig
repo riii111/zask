@@ -8,6 +8,7 @@ const paths = @import("../platform/paths.zig");
 const pathing = @import("pathing.zig");
 const proc_runner = @import("../platform/runner.zig");
 const progress_mod = @import("progress.zig");
+const service_log = @import("service_log.zig");
 const session_layout = @import("session_layout.zig");
 const shell = @import("../platform/shell.zig");
 const tmux_client = @import("../platform/tmux.zig");
@@ -40,6 +41,9 @@ pub const Lifecycle = struct {
     validate_configured_dirs: bool = true,
     emit_env_file_tips: bool = false,
     command_hint: zask_command.InvocationHint,
+    /// Directory that receives each service's output; null leaves output only
+    /// in the tmux window (callers without a state directory, such as tests).
+    service_log_dir: ?[]const u8 = null,
 
     pub fn startAll(self: Lifecycle, profile: []const u8, writer: *std.Io.Writer, mode: StartMode) !void {
         var progress = progress_mod.Line.init(writer);
@@ -340,9 +344,30 @@ pub const Lifecycle = struct {
                 else => return err,
             };
         }
+        const started_at = self.runner.nowSeconds();
+        const log_dir = self.service_log_dir orelse {
+            try progress.step("Starting {s}...\n", .{service});
+            try progress.command("{s}\n", .{start_command});
+            return self.tmux.respawnPane(service, service_dir, launch_command, started_at);
+        };
+        const recording = try self.beginServiceLog(service, log_dir, started_at, progress);
+        defer if (recording) |log| log.deinit(self.gpa);
         try progress.step("Starting {s}...\n", .{service});
         try progress.command("{s}\n", .{start_command});
-        try self.tmux.respawnPane(service, service_dir, launch_command, self.runner.nowSeconds());
+        const output_log: ?tmux_client.OutputLog = if (recording) |log| .{ .path = log.path, .header = log.header } else null;
+        try self.tmux.respawnPaneWithOutputLog(service, service_dir, launch_command, started_at, output_log);
+    }
+
+    /// A log that cannot be written must not block the start: the output stays
+    /// in the tmux window, and the warning keeps the missing record visible.
+    fn beginServiceLog(self: Lifecycle, service: []const u8, log_dir: []const u8, started_at: i64, progress: anytype) !?service_log.Recording {
+        return service_log.begin(self.gpa, self.runner.io, log_dir, service, started_at) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {
+                try progress.warn("Warning: {s} output is not saved: cannot write a log in {s} ({s})\n", .{ service, log_dir, @errorName(err) });
+                return null;
+            },
+        };
     }
 
     fn recreateServiceWindow(self: Lifecycle, service: []const u8, service_dir: []const u8) !void {
@@ -2130,4 +2155,72 @@ test "lifecycle.startAll: resolves relative service cwd before sending command" 
     const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
     try proc_runner.expectCommandArg(respawn, 6, cwd);
     try proc_runner.expectCommandArgContains(respawn, 9, "serve");
+}
+
+test "lifecycle.startService: pipes output to the service log with the respawn" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":".","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const log_dir = try std.fs.path.join(gpa, &.{ try tmp.dir.realPathFileAlloc(threaded.io(), ".", gpa), "logs" });
+    var recorder = proc_runner.Recorder.init(gpa);
+    defer recorder.deinit();
+    recorder.now_seconds = 1_700_000_000;
+    const run = proc_runner.Runner{ .gpa = gpa, .io = threaded.io(), .recorder = &recorder };
+    var lifecycle = testLifecycle(gpa, run, try parseTestConfig(gpa, json));
+    lifecycle.service_log_dir = log_dir;
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startService("api", &writer, .prime);
+
+    const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArg(respawn, 11, "pipe-pane");
+    try proc_runner.expectCommandArgContains(respawn, 14, "=== zask: api started at 2023-11-14T22:13:20Z ===");
+    try proc_runner.expectCommandArgContains(respawn, 14, try std.fmt.allocPrint(gpa, ">> '{s}/api.log'", .{log_dir}));
+    try std.testing.expectEqualStrings("1700000000", respawn.argv[respawn.argv.len - 1]);
+    _ = try tmp.dir.statFile(threaded.io(), "logs/api.log", .{});
+    try std.testing.expectEqualStrings("Starting api...\n", writer.buffered());
+}
+
+test "lifecycle.startService: starts without a log and warns when the log cannot be written" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":".","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(threaded.io(), .{ .sub_path = "state", .data = "not a directory" });
+    const log_dir = try std.fs.path.join(gpa, &.{ try tmp.dir.realPathFileAlloc(threaded.io(), ".", gpa), "state", "logs" });
+    var recorder = proc_runner.Recorder.init(gpa);
+    defer recorder.deinit();
+    const run = proc_runner.Runner{ .gpa = gpa, .io = threaded.io(), .recorder = &recorder };
+    var lifecycle = testLifecycle(gpa, run, try parseTestConfig(gpa, json));
+    lifecycle.service_log_dir = log_dir;
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startService("api", &writer, .prime);
+
+    const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArgv(.{ .argv = respawn.argv[10..14], .cwd = null, .interactive = false }, &.{ ";", "pipe-pane", "-t", "demo:api" });
+    try proc_runner.expectCommandArg(respawn, 14, ";");
+    const expected = try std.fmt.allocPrint(gpa, "Warning: api output is not saved: cannot write a log in {s} (NotDir)\nStarting api...\n", .{log_dir});
+    try std.testing.expectEqualStrings(expected, writer.buffered());
 }

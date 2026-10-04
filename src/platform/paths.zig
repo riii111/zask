@@ -11,6 +11,11 @@ pub fn dataBase(gpa: std.mem.Allocator, environ: ?*const env.Map) ![]const u8 {
     return std.fs.path.join(gpa, &.{ try home(environ), ".local", "share", "zask" });
 }
 
+pub fn stateBase(gpa: std.mem.Allocator, environ: ?*const env.Map) ![]const u8 {
+    if (env.get(environ, "XDG_STATE_HOME")) |value| return std.fs.path.join(gpa, &.{ value, "zask" });
+    return std.fs.path.join(gpa, &.{ try home(environ), ".local", "state", "zask" });
+}
+
 pub fn runtimeBase(gpa: std.mem.Allocator, environ: ?*const env.Map) ![]const u8 {
     if (env.get(environ, "XDG_RUNTIME_DIR")) |value| return std.fs.path.join(gpa, &.{ value, "zask" });
     return std.fmt.allocPrint(gpa, "/tmp/zask-{d}", .{std.c.getuid()});

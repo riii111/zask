@@ -568,6 +568,77 @@ test "runtime.observer: start marker follows start and restart" {
     try std.testing.expectEqual(zask.observations.HealthObservation.not_running, stopped.health());
 }
 
+test "runtime.start: service log keeps output past the pane history across restart and close" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-service-log", .{std.c.getpid()});
+    const client = tmuxClient(gpa, io, session);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    const log_dir = try std.fs.path.join(gpa, &.{ root, "state", "logs" });
+    // The first run overflows a 100-line history and dies right after its
+    // last line; the second run marks where the restart begins.
+    try tmp.dir.writeFile(io, .{ .sub_path = "serve.sh", .data =
+        \\if [ -e started ]; then echo second run; exec sleep 60; fi
+        \\touch started
+        \\seq 1 500
+        \\echo 'fatal: boom' >&2
+        \\exit 3
+        \\
+    });
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", root, "sleep 60");
+    defer client.killSession() catch {};
+    try client.setOption("history-limit", "100");
+    try client.newWindowAfter("dashboard", "api", root, try zask.zask_command.waitingPlaceholder(gpa, "api"));
+    try client.setWindowOption("api", "remain-on-exit", "on");
+
+    const cfg = try zask.config.Config.parse(gpa, try std.fmt.allocPrint(gpa,
+        \\{{
+        \\  "project": {{"name":"demo","root":"{s}"}},
+        \\  "groups": [{{"name":"backend","services":[{{"name":"api","dir":".","command":"sh serve.sh"}}]}}]
+        \\}}
+    , .{root}), root);
+    const run_impl: zask.runner.Runner = .{ .gpa = gpa, .io = io };
+    const runtime = zask.runtime.Runtime{
+        .gpa = gpa,
+        .io = io,
+        .cfg = cfg,
+        .config_path = "/tmp/config.json",
+        .zask_path = "zask",
+        .command_hint = .{ .config = "/tmp/config.json" },
+        .runner_impl = run_impl,
+        .tmux_impl = client,
+        .docker_impl = .{ .gpa = gpa, .runner = run_impl, .dir = "/tmp", .file = "compose.yaml" },
+        .service_log_dir = log_dir,
+    };
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try waitForPaneState(client, gpa, io, "api", .idle);
+
+    try runtime.start("api", &writer);
+    try waitForPaneState(client, gpa, io, "api", .dead);
+    try runtime.restart("api", &writer);
+    try waitForPaneText(gpa, io, try std.fmt.allocPrint(gpa, "{s}:api", .{session}), "second run");
+    try client.killSession();
+
+    const log = try waitForFileText(gpa, io, tmp.dir, "state/logs/api.log", "second run");
+    const first_header = std.mem.indexOf(u8, log, "=== zask: api started at ") orelse return error.HeaderMissing;
+    const first_line = std.mem.indexOf(u8, log, "\n1\r\n") orelse return error.FirstLineMissing;
+    const crash = std.mem.indexOf(u8, log, "fatal: boom") orelse return error.CrashOutputMissing;
+    const second_header = std.mem.lastIndexOf(u8, log, "=== zask: api started at ") orelse return error.HeaderMissing;
+    const second_run = std.mem.indexOf(u8, log, "second run") orelse return error.SecondRunMissing;
+    try std.testing.expect(first_header < first_line);
+    try std.testing.expect(std.mem.indexOf(u8, log, "\n500\r\n") != null);
+    try std.testing.expect(first_line < crash and crash < second_header and second_header < second_run);
+}
+
 const ServiceProject = struct {
     root: []const u8,
     env_map: std.process.Environ.Map,
@@ -620,6 +691,20 @@ fn waitForPaneText(gpa: std.mem.Allocator, io: std.Io, target: []const u8, needl
         try std.Io.sleep(io, pane_ready_interval, .awake);
     }
     return error.PaneTextTimeout;
+}
+
+/// Returns the file once it contains `needle`; the pane pipe writes it
+/// asynchronously.
+fn waitForFileText(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sub_path: []const u8, needle: []const u8) ![]const u8 {
+    for (0..pane_ready_attempts) |_| {
+        const contents = dir.readFileAlloc(io, sub_path, gpa, .limited(1024 * 1024)) catch |err| switch (err) {
+            error.FileNotFound => "",
+            else => return err,
+        };
+        if (std.mem.indexOf(u8, contents, needle) != null) return contents;
+        try std.Io.sleep(io, pane_ready_interval, .awake);
+    }
+    return error.FileTextTimeout;
 }
 
 fn tmuxClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) zask.tmux.Client {
