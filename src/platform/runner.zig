@@ -55,6 +55,12 @@ pub const Runner = struct {
         std.Io.sleep(self.io, duration, .awake) catch {};
     }
 
+    /// Wall-clock Unix seconds; tests read the recorder's fixed `now_seconds`.
+    pub fn nowSeconds(self: Runner) i64 {
+        if (self.recorder) |recorder| return recorder.now_seconds;
+        return std.Io.Clock.real.now(self.io).toSeconds();
+    }
+
     fn recordedRun(self: Runner, recorder: *Recorder, argv: []const []const u8, options: RunOptions) !RunOutput {
         const result = recorder.record(argv, options.cwd, options.interactive) catch |err| switch (err) {
             error.StreamTooLong => return error.OutputTooLarge,
@@ -115,6 +121,7 @@ pub const Recorder = struct {
     stdout: []const u8 = "",
     stderr: []const u8 = "",
     term: std.process.Child.Term = .{ .exited = 0 },
+    now_seconds: i64 = 0,
 
     pub fn init(gpa: std.mem.Allocator) Recorder {
         return .{ .gpa = gpa, .commands = .empty, .responses = .empty, .errors = .empty, .sleeps = .empty };

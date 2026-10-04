@@ -11,6 +11,7 @@ const pathing = @import("pathing.zig");
 const phases = @import("phases.zig");
 const proc_runner = @import("../platform/runner.zig");
 const progress_mod = @import("progress.zig");
+const service_observation = @import("service_observation.zig");
 const session_layout = @import("session_layout.zig");
 const tmux_client = @import("../platform/tmux.zig");
 const tmux_setup = @import("tmux_setup.zig");
@@ -56,6 +57,12 @@ pub const Runtime = struct {
             defer pane.deinit(self.gpa);
             try writer.print("  {s} {s} [{s}]\n", .{ name, paneStatusText(pane.state), config.Config.serviceGroup(service) });
         }
+    }
+
+    /// Read-only service observation for callers outside the monitor; it shares
+    /// this runtime's tmux session and compose project.
+    pub fn observer(self: Runtime) service_observation.Observer {
+        return .{ .gpa = self.gpa, .runner = self.runner(), .tmux = self.tmux(), .docker = self.docker() };
     }
 
     pub fn attach(self: Runtime, writer: *std.Io.Writer) !void {

@@ -1,6 +1,7 @@
 const std = @import("std");
 const observations = @import("../model/observations.zig");
 const runner = @import("runner.zig");
+const tmux_options = @import("../model/tmux_options.zig");
 
 pub const Client = struct {
     gpa: std.mem.Allocator,
@@ -193,18 +194,20 @@ pub const Client = struct {
     pub fn paneInfo(self: Client, window: []const u8) !PaneInfo {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
-        const result = runner.captured(self.runner.run(&.{ self.tmux_path, "list-panes", "-t", pane_target, "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}" }, .{}) catch return error.TmuxUnavailable);
+        const result = runner.captured(self.runner.run(&.{ self.tmux_path, "list-panes", "-t", pane_target, "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}|#{" ++ tmux_options.started_at ++ "}" }, .{}) catch return error.TmuxUnavailable);
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
         if (result.term != .exited) return error.TmuxUnavailable;
         if (result.term.exited != 0) return if (serverUnavailable(result.stderr)) error.TmuxUnavailable else error.WindowMissing;
 
         // Lenient parse (intentional, unlike listWindowSizes): this query fixes
-        // its own four-field format, and pane_dead_status is legitimately empty
-        // for live panes ("0||pid|cmd"). observePane runs on a hot path, so a
+        // its own five-field format, and pane_dead_status is legitimately empty
+        // for live panes ("0||pid|cmd|"). observePane runs on a hot path, so a
         // truncated or unexpected line degrades to defaults rather than aborting
         // the surrounding lifecycle. Extra pane lines from split windows are
-        // ignored; only the first pane is observed.
+        // ignored; only the first pane is observed. The start marker is empty
+        // for panes zask has not spawned, and a non-numeric value is treated
+        // the same: an unknown start, never a guessed one.
         var lines = std.mem.splitScalar(u8, result.stdout, '\n');
         const line = lines.next() orelse "";
         var fields = std.mem.splitScalar(u8, line, '|');
@@ -212,7 +215,8 @@ pub const Client = struct {
         const exit_code = fields.next() orelse "0";
         const pid = fields.next() orelse "0";
         const command = fields.next() orelse "";
-        return PaneInfo.init(self.gpa, std.mem.eql(u8, dead, "1"), exit_code, pid, command);
+        const started_at = std.fmt.parseInt(i64, fields.next() orelse "", 10) catch null;
+        return PaneInfo.init(self.gpa, std.mem.eql(u8, dead, "1"), exit_code, pid, command, started_at);
     }
 
     /// Caller owns the returned slice. When the pane cannot be captured an empty
@@ -263,12 +267,18 @@ pub const Client = struct {
         _ = try self.runner.run(argv.items, .{ .check = true, .discard = true });
     }
 
-    pub fn respawnPane(self: Client, window: []const u8, cwd: []const u8, command: []const u8) !void {
+    /// Respawns the pane and records `started_at` (Unix seconds) as its start
+    /// marker in one tmux invocation. tmux stops the sequence when respawn
+    /// fails, so a failed respawn keeps the marker of the process still there.
+    pub fn respawnPane(self: Client, window: []const u8, cwd: []const u8, command: []const u8, started_at: i64) !void {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
         const wrapped_command = try self.buildRespawnScript(command);
         defer self.gpa.free(wrapped_command);
-        _ = try self.runner.run(&.{ self.tmux_path, "respawn-pane", "-k", "-t", pane_target, "-c", cwd, "sh", "-lc", wrapped_command }, .{ .check = true, .discard = true });
+        const started_at_text = try std.fmt.allocPrint(self.gpa, "{d}", .{started_at});
+        defer self.gpa.free(started_at_text);
+        const argv = [_][]const u8{ self.tmux_path, "respawn-pane", "-k", "-t", pane_target, "-c", cwd, "sh", "-lc", wrapped_command, ";", "set-option", "-p", "-t", pane_target, tmux_options.started_at, started_at_text };
+        _ = try self.runner.run(&argv, .{ .check = true, .discard = true });
     }
 
     pub fn setOption(self: Client, name: []const u8, value: []const u8) !void {
@@ -414,8 +424,9 @@ pub const PaneInfo = struct {
     exit_code: []const u8,
     pid: []const u8,
     command: []const u8,
+    started_at: ?i64,
 
-    fn init(gpa: std.mem.Allocator, dead: bool, exit_code: []const u8, pid: []const u8, command: []const u8) !PaneInfo {
+    fn init(gpa: std.mem.Allocator, dead: bool, exit_code: []const u8, pid: []const u8, command: []const u8, started_at: ?i64) !PaneInfo {
         const owned_exit_code = try gpa.dupe(u8, exit_code);
         errdefer gpa.free(owned_exit_code);
         const owned_pid = try gpa.dupe(u8, pid);
@@ -426,6 +437,7 @@ pub const PaneInfo = struct {
             .exit_code = owned_exit_code,
             .pid = owned_pid,
             .command = owned_command,
+            .started_at = started_at,
         };
     }
 
@@ -438,7 +450,7 @@ pub const PaneInfo = struct {
     /// Transfers ownership of pane field slices into the returned observation.
     /// The original PaneInfo must not be deinit'd afterwards.
     fn consumeIntoObservation(self: PaneInfo, state: observations.PaneState) observations.PaneObservation {
-        return observations.PaneObservation.fromOwned(state, self.exit_code, self.pid, self.command);
+        return observations.PaneObservation.fromOwned(state, self.exit_code, self.pid, self.command, self.started_at);
     }
 };
 
@@ -593,7 +605,7 @@ test "tmux.respawnPane: records wrapped shell command" {
     defer recorder.deinit();
     const client = testClient(&recorder);
 
-    try client.respawnPane("api", "/tmp/demo app", "npm run dev");
+    try client.respawnPane("api", "/tmp/demo app", "npm run dev", 1_700_000_000);
 
     const command = recorder.commands.items[0];
     try runner.expectCommandArg(command, 1, "respawn-pane");
@@ -602,6 +614,18 @@ test "tmux.respawnPane: records wrapped shell command" {
     try runner.expectCommandArgContains(command, 9, "trap '__zask_interrupted=1' INT");
     try runner.expectCommandArgContains(command, 9, "npm run dev");
     try runner.expectCommandArgContains(command, 9, "exec \"${SHELL:-sh}\"");
+}
+
+test "tmux.respawnPane: records start marker after respawn in the same invocation" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    const client = testClient(&recorder);
+
+    try client.respawnPane("api", "/tmp/demo", "npm run dev", 1_700_000_000);
+
+    try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
+    const argv = recorder.commands.items[0].argv;
+    try runner.expectCommandArgv(.{ .argv = argv[10..], .cwd = null, .interactive = false }, &.{ ";", "set-option", "-p", "-t", "demo:api", "@zask_started_at", "1700000000" });
 }
 
 test "tmux.buildRespawnScript: propagates command exit status" {
@@ -937,10 +961,60 @@ test "tmux.paneInfo: defaults missing fields" {
     try std.testing.expectEqualStrings("", info.command);
 }
 
+test "tmux.paneInfo: parses start marker" {
+    const cases = [_]struct {
+        line: []const u8,
+        expected: ?i64,
+    }{
+        .{ .line = "0||12345|node|1700000000\n", .expected = 1_700_000_000 },
+        .{ .line = "0||12345|node|\n", .expected = null },
+        .{ .line = "0||12345|node\n", .expected = null },
+        .{ .line = "0||12345|node|soon\n", .expected = null },
+    };
+
+    for (cases) |case| {
+        var recorder = runner.Recorder.init(std.testing.allocator);
+        defer recorder.deinit();
+        try recorder.enqueue(case.line, "", .{ .exited = 0 });
+        const client = testClient(&recorder);
+
+        const info = try client.paneInfo("api");
+        defer info.deinit(std.testing.allocator);
+
+        try std.testing.expectEqual(case.expected, info.started_at);
+        try std.testing.expectEqualStrings("node", info.command);
+    }
+}
+
+test "tmux.paneInfo: queries the start marker option" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("0||12345|node|\n", "", .{ .exited = 0 });
+    const client = testClient(&recorder);
+
+    const info = try client.paneInfo("api");
+    defer info.deinit(std.testing.allocator);
+
+    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "list-panes", "-t", "demo:api", "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}|#{@zask_started_at}" });
+}
+
+test "tmux.observePane: carries start marker into the observation" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("0||12345|node|1700000000\n", "", .{ .exited = 0 });
+    const client = testClient(&recorder);
+
+    const observation = client.observePane("api");
+    defer observation.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(observations.PaneState.busy, observation.state);
+    try std.testing.expectEqual(@as(?i64, 1_700_000_000), observation.started_at);
+}
+
 test "tmux.paneInfo: ignores extra trailing fields" {
     var recorder = runner.Recorder.init(std.testing.allocator);
     defer recorder.deinit();
-    try recorder.enqueue("0|0|12345|node|unexpected\n", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|node|42|unexpected\n", "", .{ .exited = 0 });
     const client = testClient(&recorder);
 
     const info = try client.paneInfo("api");

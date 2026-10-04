@@ -415,6 +415,74 @@ test "runtime.start: recreated service windows preserve configured order" {
     try expectWindowOrder(gpa, io, session, &.{ "dashboard", "api", "worker", "web" });
 }
 
+test "runtime.observer: start marker follows start and restart" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-observer", .{std.c.getpid()});
+    const client = tmuxClient(gpa, io, session);
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", "/tmp", "sleep 60");
+    defer client.killSession() catch {};
+    try client.newWindowAfter("dashboard", "api", "/tmp", try zask.zask_command.waitingPlaceholder(gpa, "api"));
+
+    const cfg = try zask.config.Config.parse(gpa,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":".","command":"sleep 60"}]}]
+        \\}
+    , "/tmp");
+    const service = (try cfg.services())[0];
+    const run_impl: zask.runner.Runner = .{ .gpa = gpa, .io = io };
+    const runtime = zask.runtime.Runtime{
+        .gpa = gpa,
+        .io = io,
+        .cfg = cfg,
+        .config_path = "/tmp/config.json",
+        .zask_path = "zask",
+        .command_hint = .{ .config = "/tmp/config.json" },
+        .runner_impl = run_impl,
+        .tmux_impl = client,
+        .docker_impl = .{ .gpa = gpa, .runner = run_impl, .dir = "/tmp", .file = "compose.yaml" },
+    };
+    const observer = runtime.observer();
+    const api_target = try std.fmt.allocPrint(gpa, "{s}:api", .{session});
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try waitForPaneState(client, gpa, io, "api", .idle);
+
+    const placeholder = try observer.observeService(service);
+    try std.testing.expectEqual(@as(?i64, null), placeholder.pane.started_at);
+    try std.testing.expectEqual(zask.observations.Uptime.not_running, placeholder.uptime());
+
+    try runtime.start("api", &writer);
+    try waitForPaneState(client, gpa, io, "api", .busy);
+    const started = try observer.observeService(service);
+    try std.testing.expect(started.pane.started_at != null);
+    try std.testing.expectEqual(zask.observations.HealthObservation.no_check, started.health());
+    try std.testing.expect(started.uptime().seconds < 60);
+
+    // Age the marker so the restart below must replace it, not keep it.
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "set-option", "-p", "-t", api_target, "@zask_started_at", "1000" });
+    const aged = try observer.observeService(service);
+    try std.testing.expect(aged.uptime().seconds > 1_000_000);
+
+    try runtime.restart("api", &writer);
+    try waitForPaneState(client, gpa, io, "api", .busy);
+    const restarted = try observer.observeService(service);
+    try std.testing.expect(restarted.uptime().seconds < 60);
+
+    try runtime.stop("api", &writer);
+    try waitForPaneState(client, gpa, io, "api", .idle);
+    const stopped = try observer.observeService(service);
+    try std.testing.expectEqual(zask.observations.Uptime.not_running, stopped.uptime());
+    try std.testing.expectEqual(zask.observations.HealthObservation.not_running, stopped.health());
+}
+
 fn tmuxClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) zask.tmux.Client {
     return .{
         .gpa = gpa,
