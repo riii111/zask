@@ -33,7 +33,9 @@ pub fn prepareAppend(io: std.Io, path: []const u8, rotated_path: []const u8, rot
 
 fn ensurePrivateDir(io: std.Io, path: []const u8) !void {
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
-    var dir = try std.Io.Dir.cwd().openDir(io, path, .{});
+    // An iterable handle, unlike the default path-only handle on Linux, can
+    // change permissions.
+    var dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
     defer dir.close(io);
     try dir.setPermissions(io, private_dir_permissions);
 }
