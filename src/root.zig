@@ -23,13 +23,16 @@ pub const readiness_wait = @import("workflow/readiness_wait.zig");
 pub const runner = @import("platform/runner.zig");
 pub const runtime = @import("workflow/runtime.zig");
 pub const service_observation = @import("workflow/service_observation.zig");
+pub const session_layout = @import("workflow/session_layout.zig");
 pub const shell = @import("platform/shell.zig");
+pub const stop_marks = @import("platform/stop_marks.zig");
 pub const terminal = @import("platform/terminal.zig");
 pub const tmux = @import("platform/tmux.zig");
 pub const tmux_setup = @import("workflow/tmux_setup.zig");
 pub const validate = @import("model/validate.zig");
 pub const watch = @import("model/watch.zig");
 pub const waits = @import("workflow/waits.zig");
+pub const watch_restart = @import("workflow/watch_restart.zig");
 pub const zask_command = @import("workflow/zask_command.zig");
 
 pub fn greeting() []const u8 {
