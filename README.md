@@ -59,6 +59,13 @@ zask logs web
 zask close
 ```
 
+If the project already has a Procfile, `zask init --from Procfile.dev` imports
+each `name: command` line as a service in a `procfile` group instead of guessing a
+package script. Blank lines and `#` comments are skipped, and commands are not
+run during import. Services run from the Procfile's directory, and Docker
+Compose detection still applies. An invalid line or duplicate name stops init
+with its `Procfile.dev:<line>` location, before any config is written.
+
 Run `zask help` for the full command list.
 Commands exit with `1` for runtime or environment failures, and `2` for usage or config errors.
 

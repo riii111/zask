@@ -138,3 +138,71 @@ test "init: rejects malformed project identifier" {
     try std.testing.expect(std.mem.indexOf(u8, res.stdout, "Usage:") != null);
     try std.testing.expect(std.mem.indexOf(u8, res.stderr, "panic") == null);
 }
+
+test "init: imports procfile services readable by list" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ws = try harness.Workspace.init(gpa, io);
+    defer ws.deinit(gpa);
+
+    try ws.writeProjectFile(io, "compose.yaml", "services: {}\n");
+    try ws.writeProjectFile(io, "package.json", "{\"scripts\":{\"dev\":\"vite\"}}\n");
+    try ws.writeProjectFile(io, "Procfile.dev", "# local stack\n\nweb: bin/rails server -b 0.0.0.0:3000\nworker: bundle exec sidekiq\n");
+
+    var init_res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.project,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{ "init", project_name, "--from", "Procfile.dev" });
+    defer init_res.deinit(gpa);
+
+    try std.testing.expect(init_res.exitedWith(0));
+    try std.testing.expectEqual(@as(usize, 0), init_res.stderr.len);
+    try std.testing.expect(std.mem.indexOf(u8, init_res.stdout, "Imported services from Procfile.dev: web worker") != null);
+    try std.testing.expect(std.mem.indexOf(u8, init_res.stdout, "Detected Docker Compose file: compose.yaml") != null);
+    try std.testing.expect(std.mem.indexOf(u8, init_res.stdout, "package script") == null);
+    try std.testing.expect(std.mem.indexOf(u8, init_res.stdout, "Next: zask demo open") != null);
+
+    var list_res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.elsewhere,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{ project_name, "list" });
+    defer list_res.deinit(gpa);
+
+    try std.testing.expect(list_res.exitedWith(0));
+    try std.testing.expect(std.mem.indexOf(u8, list_res.stdout, "- web [procfile]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list_res.stdout, "- worker [procfile]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list_res.stdout, "- docker") != null);
+}
+
+test "init: rejects invalid procfile with its line location" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ws = try harness.Workspace.init(gpa, io);
+    defer ws.deinit(gpa);
+
+    try ws.writeProjectFile(io, "Procfile.dev", "web: npm run dev\nnot a service\n");
+
+    var res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.project,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{ "init", project_name, "--from", "Procfile.dev" });
+    defer res.deinit(gpa);
+
+    try std.testing.expect(res.exitedWith(2));
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "Error: invalid Procfile: Procfile.dev") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "Procfile.dev:2: expected") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "Usage:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, res.stderr, "panic") == null);
+    const cfg_path = try ws.configPath(gpa, project_name);
+    defer gpa.free(cfg_path);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, cfg_path, .{}));
+}

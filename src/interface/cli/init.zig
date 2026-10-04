@@ -1,9 +1,11 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const config = @import("../../model/config.zig");
+const diagnostics = @import("../../model/diagnostics.zig");
 const env = @import("../../platform/env.zig");
 const init_inference = @import("../../workflow/init_inference.zig");
 const paths = @import("../../platform/paths.zig");
+const procfile = @import("../../workflow/procfile.zig");
 const validate = @import("../../model/validate.zig");
 const cli_context = @import("context.zig");
 
@@ -16,6 +18,7 @@ pub const schema_url = "https://raw.githubusercontent.com/riii111/zask/v" ++ bui
 pub const Options = struct {
     project: ?[]const u8 = null,
     root: []const u8 = ".",
+    from: ?[]const u8 = null,
     force: bool = false,
 
     pub fn parse(args: []const []const u8) !Options {
@@ -59,6 +62,11 @@ pub fn run(ctx: *Context, opts: Options) !void {
     const resolved_root_owned = resolved_root.ptr != detected.opts.root.ptr;
     defer if (resolved_root_owned) ctx.base.gpa.free(resolved_root);
     detected.opts.root = resolved_root;
+    var import_arena = std.heap.ArenaAllocator.init(ctx.base.gpa);
+    defer import_arena.deinit();
+    if (opts.from) |from| {
+        detected.procfile = try importProcfile(import_arena.allocator(), io, ctx.base.environ, ctx.writer, cwd, resolved_root, from);
+    }
     const json = try renderConfig(ctx.base.gpa, project, detected);
     defer ctx.base.gpa.free(json);
     var validation_arena = std.heap.ArenaAllocator.init(ctx.base.gpa);
@@ -83,6 +91,8 @@ pub fn run(ctx: *Context, opts: Options) !void {
 const DetectedOptions = struct {
     opts: Options,
     service: ?init_inference.DetectedService = null,
+    /// Borrowed; the caller keeps the import allocation alive until rendering ends.
+    procfile: ?ProcfileImport = null,
     compose_file: ?[]const u8 = null,
 
     /// Takes ownership of owned detection outputs from `init_inference.Result`.
@@ -100,9 +110,28 @@ const DetectedOptions = struct {
     }
 };
 
+const ProcfileImport = struct {
+    source: []const u8,
+    services: []const procfile.Service,
+    /// Null when the Procfile sits in the project root, so `service.dir` stays omitted.
+    dir: ?[]const u8 = null,
+};
+
+const ServiceGroup = struct {
+    name: []const u8,
+    services: []const GroupService,
+};
+
+const GroupService = struct {
+    name: []const u8,
+    command: []const u8,
+    dir: ?[]const u8 = null,
+};
+
 fn validateOptions(opts: Options) !void {
     if (opts.project) |project| validate.identifier(project) catch return error.InvalidArguments;
     validateRoot(opts.root) catch return error.InvalidArguments;
+    if (opts.from) |from| if (from.len == 0) return error.InvalidArguments;
 }
 
 fn validateRoot(root: []const u8) !void {
@@ -114,6 +143,8 @@ fn parseOption(args: []const []const u8, index: *usize, opts: *Options) !void {
     const arg = args[index.*];
     if (std.mem.eql(u8, arg, "--root")) {
         opts.root = try takeValue(args, index);
+    } else if (std.mem.eql(u8, arg, "--from")) {
+        opts.from = try takeValue(args, index);
     } else if (std.mem.eql(u8, arg, "--force")) {
         opts.force = true;
     } else {
@@ -134,13 +165,86 @@ fn resolveRootFromCwd(gpa: std.mem.Allocator, cwd: []const u8, root: []const u8)
 
 fn applyDetections(gpa: std.mem.Allocator, io: std.Io, cwd: []const u8, opts: Options) !DetectedOptions {
     const detected = try init_inference.detect(gpa, io, cwd, .{
-        .infer_service = true,
+        // Procfile services replace the package script guess instead of joining it.
+        .infer_service = opts.from == null,
         .infer_compose_file = true,
     });
     return DetectedOptions.fromOwnedDetectionResult(opts, detected);
 }
 
+/// Reads and parses the Procfile without running any command. Problems are
+/// printed with their `<path>:<line>` before `error.InvalidProcfile`, so no
+/// config is written. Results are allocated in `arena`.
+fn importProcfile(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    environ: ?*const env.Map,
+    writer: *std.Io.Writer,
+    cwd: []const u8,
+    root: []const u8,
+    from: []const u8,
+) !ProcfileImport {
+    const path = try std.fs.path.resolve(arena, &.{ cwd, from });
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => {
+            try writer.print("Error: Procfile not found: {s}\n", .{from});
+            return error.InvalidProcfile;
+        },
+        error.StreamTooLong => {
+            try writer.print("Error: Procfile too large: {s}\n", .{from});
+            return error.InvalidProcfile;
+        },
+        else => return err,
+    };
+    var diags = diagnostics.Diagnostics.init(arena);
+    const services = procfile.parse(arena, from, bytes, &diags) catch |err| switch (err) {
+        error.InvalidProcfile => {
+            try writer.print("Error: invalid Procfile: {s}\n", .{from});
+            for (diags.slice()) |diagnostic| try writer.print("  {s}: {s}\n", .{ diagnostic.path, diagnostic.message });
+            return err;
+        },
+        else => return err,
+    };
+    const root_path = if (std.mem.eql(u8, root, "~") or std.mem.startsWith(u8, root, "~/"))
+        try std.fs.path.join(arena, &.{ try paths.home(environ), root[1..] })
+    else
+        root;
+    return .{
+        .source = from,
+        .services = services,
+        .dir = try serviceDirFromRoot(arena, cwd, root_path, std.fs.path.dirname(path) orelse path),
+    };
+}
+
+/// Procfile commands run from the Procfile's directory. Inside the root it
+/// becomes a relative `dir`; outside it stays absolute, which config accepts.
+fn serviceDirFromRoot(gpa: std.mem.Allocator, cwd: []const u8, root: []const u8, procfile_dir: []const u8) !?[]const u8 {
+    const relative = try std.fs.path.relativePosix(gpa, cwd, root, procfile_dir);
+    if (relative.len == 0) return null;
+    validate.relativeSubPath(relative) catch return procfile_dir;
+    return relative;
+}
+
+fn serviceGroup(gpa: std.mem.Allocator, detected: DetectedOptions) !?ServiceGroup {
+    if (detected.procfile) |imported| {
+        const services = try gpa.alloc(GroupService, imported.services.len);
+        for (imported.services, services) |service, *grouped| {
+            grouped.* = .{ .name = service.name, .command = service.command, .dir = imported.dir };
+        }
+        return .{ .name = "procfile", .services = services };
+    }
+    if (detected.service) |service| {
+        const services = try gpa.alloc(GroupService, 1);
+        services[0] = .{ .name = service.name, .command = service.command };
+        return .{ .name = "frontend", .services = services };
+    }
+    return null;
+}
+
 fn renderConfig(gpa: std.mem.Allocator, project: []const u8, detected: DetectedOptions) ![]u8 {
+    var group_arena = std.heap.ArenaAllocator.init(gpa);
+    defer group_arena.deinit();
+    const group = try serviceGroup(group_arena.allocator(), detected);
     var out: std.Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
     var writer = &out.writer;
@@ -165,7 +269,7 @@ fn renderConfig(gpa: std.mem.Allocator, project: []const u8, detected: DetectedO
     }
     // Scaffold an explicit order when both Docker and a service exist: open no
     // longer waits for Docker implicitly, so the service would otherwise race it.
-    if (detected.compose_file != null and detected.service != null) {
+    if (detected.compose_file != null and group != null) {
         try json.objectField(config.keys.startup_order);
         try json.beginArray();
         try json.beginObject();
@@ -176,26 +280,32 @@ fn renderConfig(gpa: std.mem.Allocator, project: []const u8, detected: DetectedO
         try json.endObject();
         try json.beginObject();
         try json.objectField(config.keys.name);
-        try json.write("frontend");
+        try json.write(group.?.name);
         try json.objectField(config.keys.group);
-        try json.write("frontend");
+        try json.write(group.?.name);
         try json.endObject();
         try json.endArray();
     }
     try json.objectField(config.keys.groups);
     try json.beginArray();
-    if (detected.service) |service| {
+    if (group) |service_group| {
         try json.beginObject();
         try json.objectField(config.keys.name);
-        try json.write("frontend");
+        try json.write(service_group.name);
         try json.objectField(config.keys.services);
         try json.beginArray();
-        try json.beginObject();
-        try json.objectField(config.keys.name);
-        try json.write(service.name);
-        try json.objectField(config.keys.command);
-        try json.write(service.command);
-        try json.endObject();
+        for (service_group.services) |service| {
+            try json.beginObject();
+            try json.objectField(config.keys.name);
+            try json.write(service.name);
+            if (service.dir) |dir| {
+                try json.objectField(config.keys.dir);
+                try json.write(dir);
+            }
+            try json.objectField(config.keys.command);
+            try json.write(service.command);
+            try json.endObject();
+        }
         try json.endArray();
         try json.endObject();
     }
@@ -212,13 +322,19 @@ fn writeReport(writer: *std.Io.Writer, project: []const u8, detected: DetectedOp
         const script = service.script;
         try writer.print("Detected package script: {s}\n", .{script});
     }
+    if (detected.procfile) |imported| {
+        try writer.print("Imported services from {s}:", .{imported.source});
+        for (imported.services) |service| try writer.print(" {s}", .{service.name});
+        try writer.writeByte('\n');
+    }
     if (detected.compose_file) |compose_file| {
         try writer.print("Detected Docker Compose file: {s}\n", .{compose_file});
     }
-    if (detected.service != null or detected.compose_file != null) {
+    const omits_service_dir = detected.service != null or (detected.procfile != null and detected.procfile.?.dir == null);
+    if (omits_service_dir or detected.compose_file != null) {
         try writer.writeAll("Omitted defaults: ");
         var wrote = false;
-        if (detected.service != null) {
+        if (omits_service_dir) {
             try writer.writeAll("service.dir");
             wrote = true;
         }
@@ -268,6 +384,25 @@ fn testDetectedServiceAndDocker(gpa: std.mem.Allocator) !DetectedOptions {
     return detected;
 }
 
+const test_procfile_services = [_]procfile.Service{
+    .{ .name = "web", .command = "bin/rails server -b 0.0.0.0:3000", .line = 1 },
+    .{ .name = "worker", .command = "bundle exec  sidekiq", .line = 2 },
+};
+
+fn testDetectedProcfile(dir: ?[]const u8) !DetectedOptions {
+    return .{
+        .opts = try Options.parse(&.{ "demo", "--from", "Procfile.dev" }),
+        .procfile = .{ .source = "Procfile.dev", .services = &test_procfile_services, .dir = dir },
+    };
+}
+
+fn testConfigHome(gpa: std.mem.Allocator, tmp: std.testing.TmpDir, environ: *env.Map) ![]const u8 {
+    const config_home = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{&tmp.sub_path});
+    try environ.put("HOME", "/home/me");
+    try environ.put("XDG_CONFIG_HOME", config_home);
+    return config_home;
+}
+
 test "init.detectedOptions.deinit: empty result is a no-op" {
     const detected: DetectedOptions = .{ .opts = .{} };
 
@@ -280,6 +415,13 @@ test "init.options: parses scaffold flags" {
     try std.testing.expectEqualStrings("demo", opts.project.?);
     try std.testing.expectEqualStrings(".", opts.root);
     try std.testing.expect(opts.force);
+}
+
+test "init.options: parses procfile source" {
+    const opts = try Options.parse(&.{ "--from", "Procfile.dev" });
+
+    try std.testing.expect(opts.project == null);
+    try std.testing.expectEqualStrings("Procfile.dev", opts.from.?);
 }
 
 test "init.options: accepts omitted project" {
@@ -295,6 +437,8 @@ test "init.options: normalizes invalid input to invalid arguments" {
         &.{"bad/name"},
         &.{ "demo", "--root", "../x" },
         &.{ "demo", "--root" },
+        &.{ "demo", "--from" },
+        &.{ "demo", "--from", "" },
     };
     for (cases) |case| {
         try std.testing.expectError(error.InvalidArguments, Options.parse(case));
@@ -432,6 +576,122 @@ test "init.config: renders service and docker config" {
     try std.testing.expectEqual(@as(usize, 2), cfg.phases().len);
 }
 
+test "init.config: renders procfile and docker config verbatim" {
+    var detected = try testDetectedProcfile(null);
+    detected.compose_file = "compose.yaml";
+    const json = try renderConfig(std.testing.allocator, "demo", detected);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(test_config_head ++
+        \\  "project": {
+        \\    "name": "demo",
+        \\    "root": "."
+        \\  },
+        \\  "docker": {
+        \\    "compose": "compose.yaml"
+        \\  },
+        \\  "startup_order": [
+        \\    {
+        \\      "name": "Docker",
+        \\      "docker": true
+        \\    },
+        \\    {
+        \\      "name": "procfile",
+        \\      "group": "procfile"
+        \\    }
+        \\  ],
+        \\  "groups": [
+        \\    {
+        \\      "name": "procfile",
+        \\      "services": [
+        \\        {
+        \\          "name": "web",
+        \\          "command": "bin/rails server -b 0.0.0.0:3000"
+        \\        },
+        \\        {
+        \\          "name": "worker",
+        \\          "command": "bundle exec  sidekiq"
+        \\        }
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+        \\
+    , json);
+}
+
+test "init.config: renders procfile dir verbatim" {
+    const json = try renderConfig(std.testing.allocator, "demo", try testDetectedProcfile("backend"));
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(test_config_head ++
+        \\  "project": {
+        \\    "name": "demo",
+        \\    "root": "."
+        \\  },
+        \\  "groups": [
+        \\    {
+        \\      "name": "procfile",
+        \\      "services": [
+        \\        {
+        \\          "name": "web",
+        \\          "dir": "backend",
+        \\          "command": "bin/rails server -b 0.0.0.0:3000"
+        \\        },
+        \\        {
+        \\          "name": "worker",
+        \\          "dir": "backend",
+        \\          "command": "bundle exec  sidekiq"
+        \\        }
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+        \\
+    , json);
+}
+
+test "init.config: procfile config parses back to the same commands" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const json = try renderConfig(std.testing.allocator, "demo", try testDetectedProcfile("backend"));
+    defer std.testing.allocator.free(json);
+
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const services = try cfg.services();
+
+    try std.testing.expectEqual(test_procfile_services.len, services.len);
+    for (test_procfile_services, services) |want, got| {
+        try std.testing.expectEqualStrings(want.name, try config.Config.serviceName(got));
+        try std.testing.expectEqualStrings("procfile", config.Config.serviceGroup(got));
+        try std.testing.expectEqualStrings(want.command, try config.Config.serviceStartCommand(arena.allocator(), got));
+        try std.testing.expectEqualStrings("./backend", try cfg.serviceDir(arena.allocator(), got));
+    }
+}
+
+test "init.procfileDir: maps the procfile directory onto the project root" {
+    const cases = [_]struct {
+        root: []const u8,
+        procfile_dir: []const u8,
+        expected: ?[]const u8,
+    }{
+        .{ .root = "/work/demo", .procfile_dir = "/work/demo", .expected = null },
+        .{ .root = "/work/demo", .procfile_dir = "/work/demo/backend/api", .expected = "backend/api" },
+        .{ .root = "/work/demo/backend", .procfile_dir = "/work/demo", .expected = "/work/demo" },
+        .{ .root = "/work/demo", .procfile_dir = "/work/other", .expected = "/work/other" },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+
+        const dir = try serviceDirFromRoot(arena.allocator(), "/", case.root, case.procfile_dir);
+
+        if (case.expected) |expected| {
+            try std.testing.expectEqualStrings(expected, dir.?);
+        } else {
+            try std.testing.expect(dir == null);
+        }
+    }
+}
+
 test "init.schemaUrl: resolves to the tracked schema at this version's tag" {
     var threaded = std.Io.Threaded.init_single_threaded;
     const tag_prefix = "https://raw.githubusercontent.com/riii111/zask/v" ++ build_options.version ++ "/";
@@ -517,6 +777,29 @@ test "init.report: prints detected values and omitted defaults" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Detected package script: dev") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Detected Docker Compose file: docker-compose.yml") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "service.dir, docker.wait_timeout_seconds") != null);
+}
+
+test "init.report: lists imported procfile services" {
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var detected = try testDetectedProcfile(null);
+    detected.compose_file = "compose.yaml";
+
+    try writeReport(&writer, "demo", detected);
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Imported services from Procfile.dev: web worker\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Detected Docker Compose file: compose.yaml") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "service.dir, docker.wait_timeout_seconds") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "package script") == null);
+}
+
+test "init.report: omits service.dir default only when procfile is at root" {
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try writeReport(&writer, "demo", try testDetectedProcfile("backend"));
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Omitted defaults") == null);
 }
 
 test "init.root: validates project roots" {
@@ -622,4 +905,101 @@ test "init.run: releases temporary allocations on success" {
     var ctx = testContext(gpa, threaded.io(), &environ, &writer);
 
     try run(&ctx, try Options.parse(&.{"demo"}));
+}
+
+test "init.run: imports procfile services into the written config" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    const config_home = try testConfigHome(arena.allocator(), tmp, &environ);
+    const procfile_path = try testTmpPath(arena.allocator(), tmp, "Procfile.dev");
+    try paths.writeFile(threaded.io(), procfile_path, "# dev\nweb: bin/rails server -p 3000\nworker: bundle exec sidekiq\n");
+    var buffer: [2048]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var ctx = testContext(std.testing.allocator, threaded.io(), &environ, &writer);
+
+    try run(&ctx, try Options.parse(&.{ "demo", "--from", procfile_path }));
+
+    const config_path = try std.fs.path.join(arena.allocator(), &.{ config_home, "zask", "demo", "config.json" });
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(threaded.io(), config_path, arena.allocator(), .limited(4096));
+    const cfg = try config.Config.parse(arena.allocator(), bytes, "/home/me");
+    const services = try cfg.services();
+    try std.testing.expectEqual(@as(usize, 2), services.len);
+    try std.testing.expectEqualStrings("web", try config.Config.serviceName(services[0]));
+    try std.testing.expectEqualStrings("bin/rails server -p 3000", try config.Config.serviceStartCommand(arena.allocator(), services[0]));
+    try std.testing.expectEqualStrings("worker", try config.Config.serviceName(services[1]));
+    try std.testing.expectEqualStrings(std.fs.path.dirname(procfile_path).?, config.Config.serviceDirValue(services[1]));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), ": web worker\n") != null);
+}
+
+test "init.run: stops on invalid procfile without writing config" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    const config_home = try testConfigHome(arena.allocator(), tmp, &environ);
+    const procfile_path = try testTmpPath(arena.allocator(), tmp, "Procfile.dev");
+    try paths.writeFile(threaded.io(), procfile_path, "web: npm run dev\nweb: npm start\n");
+    var buffer: [2048]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var ctx = testContext(std.testing.allocator, threaded.io(), &environ, &writer);
+
+    try std.testing.expectError(error.InvalidProcfile, run(&ctx, try Options.parse(&.{ "demo", "--from", procfile_path })));
+
+    const config_path = try std.fs.path.join(arena.allocator(), &.{ config_home, "zask", "demo", "config.json" });
+    const location = try std.fmt.allocPrint(arena.allocator(), "  {s}:2: duplicate service 'web' (first defined at line 1)\n", .{procfile_path});
+    try std.testing.expect(!paths.exists(threaded.io(), config_path));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), location) != null);
+}
+
+test "init.run: reports missing procfile without writing config" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    const config_home = try testConfigHome(arena.allocator(), tmp, &environ);
+    const procfile_path = try testTmpPath(arena.allocator(), tmp, "Procfile.missing");
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var ctx = testContext(std.testing.allocator, threaded.io(), &environ, &writer);
+
+    try std.testing.expectError(error.InvalidProcfile, run(&ctx, try Options.parse(&.{ "demo", "--from", procfile_path })));
+
+    const config_path = try std.fs.path.join(arena.allocator(), &.{ config_home, "zask", "demo", "config.json" });
+    try std.testing.expect(!paths.exists(threaded.io(), config_path));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Error: Procfile not found") != null);
+}
+
+test "init.run: keeps existing config when importing procfile without force" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    const config_home = try testConfigHome(arena.allocator(), tmp, &environ);
+    const procfile_path = try testTmpPath(arena.allocator(), tmp, "Procfile.dev");
+    try paths.writeFile(threaded.io(), procfile_path, "web: npm run dev\n");
+    var buffer: [2048]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var ctx = testContext(arena.allocator(), threaded.io(), &environ, &writer);
+    try run(&ctx, try Options.parse(&.{"demo"}));
+    const config_path = try std.fs.path.join(arena.allocator(), &.{ config_home, "zask", "demo", "config.json" });
+    const before = try std.Io.Dir.cwd().readFileAlloc(threaded.io(), config_path, arena.allocator(), .limited(4096));
+
+    try std.testing.expectError(error.ConfigAlreadyExists, run(&ctx, try Options.parse(&.{ "demo", "--from", procfile_path })));
+
+    const after = try std.Io.Dir.cwd().readFileAlloc(threaded.io(), config_path, arena.allocator(), .limited(4096));
+    try std.testing.expectEqualStrings(before, after);
 }
