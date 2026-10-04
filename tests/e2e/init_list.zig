@@ -87,6 +87,48 @@ test "init: writes inferred project config readable by command form" {
     try std.testing.expect(std.mem.indexOf(u8, list_res.stdout, "- web [frontend]") != null);
 }
 
+test "init: $schema resolves to the installed schema and list refreshes it" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+
+    var ws = try harness.Workspace.init(gpa, io);
+    defer ws.deinit(gpa);
+    const tracked = try std.Io.Dir.cwd().readFileAlloc(io, "schema/zask.schema.json", arena.allocator(), .limited(1024 * 1024));
+
+    var init_res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.project,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{ "init", project_name, "--root", "." });
+    defer init_res.deinit(gpa);
+    try std.testing.expect(init_res.exitedWith(0));
+
+    const cfg_path = try ws.configPath(arena.allocator(), project_name);
+    const cfg_bytes = try std.Io.Dir.cwd().readFileAlloc(io, cfg_path, arena.allocator(), .limited(64 * 1024));
+    const cfg = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), cfg_bytes, .{});
+    const reference = cfg.object.get("$schema").?.string;
+    const schema_path = try std.fs.path.resolve(arena.allocator(), &.{ std.fs.path.dirname(cfg_path).?, reference });
+    const installed = try std.Io.Dir.cwd().readFileAlloc(io, schema_path, arena.allocator(), .limited(1024 * 1024));
+
+    try std.testing.expectEqualStrings(tracked, installed);
+
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = schema_path, .data = "{}" });
+    var list_res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.elsewhere,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{ project_name, "list" });
+    defer list_res.deinit(gpa);
+    const refreshed = try std.Io.Dir.cwd().readFileAlloc(io, schema_path, arena.allocator(), .limited(1024 * 1024));
+
+    try std.testing.expect(list_res.exitedWith(0));
+    try std.testing.expectEqualStrings(tracked, refreshed);
+}
+
 test "init: rejects re-init without --force" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});

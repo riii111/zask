@@ -1,6 +1,6 @@
 const std = @import("std");
-const build_options = @import("build_options");
 const config = @import("../../model/config.zig");
+const config_schema = @import("../../workflow/config_schema.zig");
 const env = @import("../../platform/env.zig");
 const init_inference = @import("../../workflow/init_inference.zig");
 const paths = @import("../../platform/paths.zig");
@@ -8,10 +8,6 @@ const validate = @import("../../model/validate.zig");
 const cli_context = @import("context.zig");
 
 const Context = cli_context.Context;
-
-/// Pinned to this binary's release tag so editors check the config against the
-/// spec this zask accepts. The release workflow verifies the URL resolves.
-pub const schema_url = "https://raw.githubusercontent.com/riii111/zask/v" ++ build_options.version ++ "/schema/zask.schema.json";
 
 pub const Options = struct {
     project: ?[]const u8 = null,
@@ -68,6 +64,7 @@ pub fn run(ctx: *Context, opts: Options) !void {
     const config_dir = std.fs.path.dirname(config_path) orelse return error.InvalidPath;
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, config_dir, @enumFromInt(0o755));
     try paths.writeFile(io, config_path, json);
+    try config_schema.install(ctx.base.gpa, io, ctx.base.environ);
 
     try ctx.writer.print("Created {s}\n", .{config_path});
     try writeReport(ctx.writer, project, detected);
@@ -148,7 +145,7 @@ fn renderConfig(gpa: std.mem.Allocator, project: []const u8, detected: DetectedO
 
     try json.beginObject();
     try json.objectField(config.keys.schema);
-    try json.write(schema_url);
+    try json.write(config_schema.named_config_reference);
     try json.objectField(config.keys.project);
     try json.beginObject();
     try json.objectField(config.keys.name);
@@ -234,7 +231,7 @@ fn writeReport(writer: *std.Io.Writer, project: []const u8, detected: DetectedOp
 // Tests
 // -----------------------------------------------------------------------------
 
-const test_config_head = "{\n  \"$schema\": \"" ++ schema_url ++ "\",\n";
+const test_config_head = "{\n  \"$schema\": \"" ++ config_schema.named_config_reference ++ "\",\n";
 
 fn testContext(gpa: std.mem.Allocator, io: std.Io, environ: *const env.Map, writer: *std.Io.Writer) Context {
     return .{
@@ -430,14 +427,6 @@ test "init.config: renders service and docker config" {
     try std.testing.expectEqualStrings("compose.yaml", cfg.dockerComposeFile());
     try std.testing.expectEqualStrings("./infra", try cfg.dockerDir(arena.allocator()));
     try std.testing.expectEqual(@as(usize, 2), cfg.phases().len);
-}
-
-test "init.schemaUrl: resolves to the tracked schema at this version's tag" {
-    var threaded = std.Io.Threaded.init_single_threaded;
-    const tag_prefix = "https://raw.githubusercontent.com/riii111/zask/v" ++ build_options.version ++ "/";
-
-    try std.testing.expect(std.mem.startsWith(u8, schema_url, tag_prefix));
-    try std.Io.Dir.cwd().access(threaded.io(), schema_url[tag_prefix.len..], .{});
 }
 
 test "init.detect: infers compose file" {
