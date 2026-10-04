@@ -70,6 +70,15 @@ pub fn parseSize(arg: []const u8) !u16 {
     return std.fmt.parseUnsigned(u16, arg, 10) catch return error.InvalidArguments;
 }
 
+/// Selects and loads the config exactly as commands do, without touching tmux
+/// or Docker. Allocations are left in `context.gpa`, which is expected to be an arena.
+pub fn loadConfig(context: CommandContext, parsed: ParsedArgs) !config.Config {
+    const io = context.io orelse return error.MissingIo;
+    var resolved = try resolveConfigPath(context.gpa, io, context, parsed);
+    defer resolved.deinitExpectedProjectName(context.gpa);
+    return loadResolvedConfig(context, io, resolved);
+}
+
 fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
     const io = context.io orelse return error.MissingIo;
     var resolved = try resolveConfigPath(context.gpa, io, context, parsed);
@@ -78,12 +87,7 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
         err_ctx.config_path = resolved.path;
         err_ctx.config_source = resolved.source;
     }
-    const home = try paths.home(context.environ);
-    const cfg = if (context.diagnostics) |diags|
-        try config.loadPathWithDiagnostics(context.gpa, io, resolved.path, home, diags)
-    else
-        try config.loadPath(context.gpa, io, resolved.path, home);
-    try validateSelectedProjectName(context, resolved, cfg);
+    const cfg = try loadResolvedConfig(context, io, resolved);
     const runner: proc_runner.Runner = .{ .gpa = context.gpa, .io = io };
     return .{
         .gpa = context.gpa,
@@ -97,6 +101,16 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
         .tmux_impl = tmux_client.Client{ .gpa = context.gpa, .runner = runner, .session = try cfg.projectName() },
         .docker_impl = docker_client.Compose{ .gpa = context.gpa, .runner = runner, .dir = try cfg.dockerDir(context.gpa), .file = cfg.dockerComposeFile() },
     };
+}
+
+fn loadResolvedConfig(context: CommandContext, io: std.Io, resolved: ResolvedConfigPath) !config.Config {
+    const home = try paths.home(context.environ);
+    const cfg = if (context.diagnostics) |diags|
+        try config.loadPathWithDiagnostics(context.gpa, io, resolved.path, home, diags)
+    else
+        try config.loadPath(context.gpa, io, resolved.path, home);
+    try validateSelectedProjectName(context, resolved, cfg);
+    return cfg;
 }
 
 fn commandHint(gpa: std.mem.Allocator, io: std.Io, resolved: ResolvedConfigPath, cfg: config.Config) !zask_command.InvocationHint {

@@ -255,6 +255,44 @@ pub const Config = struct {
         return list.toOwnedSlice(gpa);
     }
 
+    /// Names `resolveGroup` accepts: groups with services in config order, then
+    /// `group_aliases` keys. Caller owns the outer slice; names borrow config strings.
+    pub fn groupNames(self: Config, gpa: std.mem.Allocator) ![][]const u8 {
+        var list: std.ArrayList([]const u8) = .empty;
+        errdefer list.deinit(gpa);
+        for (try self.services()) |service| {
+            const group = serviceGroup(service);
+            if (group.len == 0 or containsString(list.items, group)) continue;
+            try list.append(gpa, group);
+        }
+        if (self.get(&.{"group_aliases"})) |aliases| {
+            if (aliases == .object) {
+                for (aliases.object.keys()) |alias| {
+                    if (!containsString(list.items, alias)) try list.append(gpa, alias);
+                }
+            }
+        }
+        return list.toOwnedSlice(gpa);
+    }
+
+    /// `start_profiles` keys that `resolveStartProfileOption` accepts as `--<key>`.
+    /// Caller owns the outer slice; keys borrow config strings.
+    pub fn startProfileKeys(self: Config, gpa: std.mem.Allocator) ![][]const u8 {
+        var list: std.ArrayList([]const u8) = .empty;
+        errdefer list.deinit(gpa);
+        const profiles = self.get(&.{"start_profiles"}) orelse return list.toOwnedSlice(gpa);
+        if (profiles != .object) return list.toOwnedSlice(gpa);
+        var it = profiles.object.iterator();
+        while (it.next()) |entry| {
+            if (entry.key_ptr.len == 0) continue;
+            const profile = entry.value_ptr.*;
+            if (profile != .object) continue;
+            const name = profile.object.get("profile") orelse continue;
+            if (name == .string) try list.append(gpa, entry.key_ptr.*);
+        }
+        return list.toOwnedSlice(gpa);
+    }
+
     pub fn resolveStartProfileOption(self: Config, option: []const u8) ?[]const u8 {
         if (!std.mem.startsWith(u8, option, "--")) return null;
         const key = option[2..];
@@ -1000,6 +1038,13 @@ fn stringArray(gpa: std.mem.Allocator, values: []const Value) ![][]const u8 {
     return list.toOwnedSlice(gpa);
 }
 
+fn containsString(values: []const []const u8, needle: []const u8) bool {
+    for (values) |value| {
+        if (std.mem.eql(u8, value, needle)) return true;
+    }
+    return false;
+}
+
 fn isAllowedRuntime(runtime: []const u8) bool {
     const allowed = [_][]const u8{ "npm", "yarn", "pnpm", "bun", "cargo", "bacon" };
     for (allowed) |item| {
@@ -1054,6 +1099,78 @@ test "config.dockerDir: joins expanded home root without leaking intermediate al
     defer std.testing.allocator.free(docker_dir);
 
     try std.testing.expectEqualStrings("/home/me/work/demo/infra", docker_dir);
+}
+
+test "config.groupNames: lists groups with services then aliases" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [
+        \\    {"name":"backend","services":[
+        \\      {"name":"api","command":"serve"},
+        \\      {"name":"worker","command":"work"}
+        \\    ]},
+        \\    {"name":"empty","services":[]},
+        \\    {"name":"frontend","services":[{"name":"web","command":"dev"}]}
+        \\  ],
+        \\  "group_aliases": {"core":["api","web"],"backend":["api"]}
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try parseTestConfig(&arena, json);
+
+    const names = try cfg.groupNames(std.testing.allocator);
+    defer std.testing.allocator.free(names);
+
+    try std.testing.expectEqual(@as(usize, 3), names.len);
+    try std.testing.expectEqualStrings("backend", names[0]);
+    try std.testing.expectEqualStrings("frontend", names[1]);
+    try std.testing.expectEqualStrings("core", names[2]);
+}
+
+test "config.startProfileKeys: lists keys accepted as open options" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [],
+        \\  "start_profiles": {
+        \\    "core": {"profile": "core"},
+        \\    "api-only": {"profile": "backend", "label": "API"}
+        \\  }
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try parseTestConfig(&arena, json);
+
+    const keys_found = try cfg.startProfileKeys(std.testing.allocator);
+    defer std.testing.allocator.free(keys_found);
+
+    try std.testing.expectEqual(@as(usize, 2), keys_found.len);
+    for (keys_found) |key| {
+        const option = try std.fmt.allocPrint(arena.allocator(), "--{s}", .{key});
+        try std.testing.expect(cfg.resolveStartProfileOption(option) != null);
+    }
+    try std.testing.expectEqualStrings("core", keys_found[0]);
+    try std.testing.expectEqualStrings("api-only", keys_found[1]);
+}
+
+test "config.startProfileKeys: returns empty without start_profiles" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try parseTestConfig(&arena, json);
+
+    const keys_found = try cfg.startProfileKeys(std.testing.allocator);
+    defer std.testing.allocator.free(keys_found);
+
+    try std.testing.expectEqual(@as(usize, 0), keys_found.len);
 }
 
 test "config.resolvePhaseGroup: resolves profiles and phase group overrides" {
