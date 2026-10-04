@@ -483,6 +483,76 @@ test "runtime.observer: start marker follows start and restart" {
     try std.testing.expectEqual(zask.observations.HealthObservation.not_running, stopped.health());
 }
 
+test "monitor: keys move selection, toggle the filter, and quit restores the terminal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-monitor", .{std.c.getpid()});
+    const client = tmuxClient(gpa, io, session);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "zask.json",
+        .data = try std.fmt.allocPrint(gpa,
+            \\{{
+            \\  "project": {{"name":"{s}","root":"."}},
+            \\  "groups": [{{"name":"backend","services":[
+            \\    {{"name":"api","dir":".","command":"/bin/sleep 60"}},
+            \\    {{"name":"web","dir":".","command":"/bin/sleep 60"}}
+            \\  ]}}]
+            \\}}
+        , .{session}),
+    });
+    const project_root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    const config_path = try std.fs.path.join(gpa, &.{ project_root, "zask.json" });
+    const stty_path = try std.fs.path.join(gpa, &.{ project_root, "stty.txt" });
+    const command = try std.fmt.allocPrint(gpa, "{s} --config {s} monitor; stty -a > {s}; sleep 60", .{
+        try zask.shell.quote(gpa, build_options.zask_path),
+        try zask.shell.quote(gpa, config_path),
+        try zask.shell.quote(gpa, stty_path),
+    });
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", project_root, command);
+    defer client.killSession() catch {};
+    try zask.tmux_setup.applySessionOptions(gpa, client, .{
+        .project = session,
+        .zask_path = build_options.zask_path,
+        .config_path = config_path,
+    });
+    const target = try std.fmt.allocPrint(gpa, "{s}:dashboard", .{session});
+
+    try waitForSelectedRow(gpa, io, target, "api");
+    try expectPaneFlags(gpa, io, target, "1|0");
+
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "j" });
+    try waitForSelectedRow(gpa, io, target, "web");
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "Up" });
+    try waitForSelectedRow(gpa, io, target, "api");
+
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "f" });
+    try waitForPaneText(gpa, io, target, "[bad]");
+    const mode = (try client.showOption("@zask_dash_mode")) orelse return error.SessionOptionMissing;
+    try std.testing.expectEqualStrings("bad", mode);
+    try waitForSelectedRow(gpa, io, target, "api");
+
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "q" });
+    const stty = try waitForFile(gpa, io, stty_path);
+    var flags = std.mem.tokenizeAny(u8, stty, " \t\r\n;");
+    var restored: usize = 0;
+    while (flags.next()) |flag| {
+        if (std.mem.eql(u8, flag, "-icanon") or std.mem.eql(u8, flag, "-echo") or std.mem.eql(u8, flag, "-isig")) return error.TerminalLeftRaw;
+        if (std.mem.eql(u8, flag, "icanon") or std.mem.eql(u8, flag, "echo") or std.mem.eql(u8, flag, "isig")) restored += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), restored);
+    try expectPaneFlags(gpa, io, target, "0|1");
+    try expectPaneAlive(gpa, io, target);
+}
+
 fn tmuxClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) zask.tmux.Client {
     return .{
         .gpa = gpa,
@@ -588,4 +658,60 @@ fn expectActiveWindow(gpa: std.mem.Allocator, io: std.Io, session: []const u8, n
     const expected = try std.fmt.allocPrint(gpa, "{s}:1", .{name});
     defer gpa.free(expected);
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, expected) != null);
+}
+
+fn waitForPaneText(gpa: std.mem.Allocator, io: std.Io, target: []const u8, needle: []const u8) !void {
+    for (0..service_state_attempts) |_| {
+        const result = try run(gpa, io, &.{ build_options.tmux_path, "capture-pane", "-p", "-t", target });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+
+        if (std.mem.indexOf(u8, result.stdout, needle) != null) return;
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    return error.PaneTextTimeout;
+}
+
+fn waitForSelectedRow(gpa: std.mem.Allocator, io: std.Io, target: []const u8, name: []const u8) !void {
+    for (0..service_state_attempts) |_| {
+        const result = try run(gpa, io, &.{ build_options.tmux_path, "capture-pane", "-p", "-t", target });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+
+        var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "> ") and std.mem.indexOf(u8, line, name) != null) return;
+        }
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    return error.SelectionTimeout;
+}
+
+fn waitForFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
+    for (0..service_state_attempts) |_| {
+        const data = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 * 1024)) catch |err| switch (err) {
+            error.FileNotFound => {
+                try std.Io.sleep(io, service_state_interval, .awake);
+                continue;
+            },
+            else => return err,
+        };
+        if (data.len > 0) return data;
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    return error.FileTimeout;
+}
+
+// `alternate_on|cursor_flag`: the monitor draws on the alternate screen with a
+// hidden cursor and must give both back when it exits.
+fn expectPaneFlags(gpa: std.mem.Allocator, io: std.Io, target: []const u8, expected: []const u8) !void {
+    for (0..service_state_attempts) |_| {
+        const result = try run(gpa, io, &.{ build_options.tmux_path, "display-message", "-p", "-t", target, "#{alternate_on}|#{cursor_flag}" });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+
+        if (std.mem.eql(u8, std.mem.trim(u8, result.stdout, " \t\r\n"), expected)) return;
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    return error.PaneFlagsTimeout;
 }
