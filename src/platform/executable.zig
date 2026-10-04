@@ -1,12 +1,22 @@
 const std = @import("std");
 
-/// Resolves `name` the way a shell would before running it: names containing a
-/// slash are taken as paths, others are searched in the colon-separated
-/// `search_path`. Relative paths and PATH entries resolve under `cwd`.
-/// Returns a caller-owned path, or null when no executable regular file
-/// matches. Aliases, functions, and builtins are invisible here; callers
+/// How `search_path` is applied, which differs between the two launchers.
+pub const Rule = enum {
+    /// A POSIX shell (service panes): an empty entry means the working
+    /// directory, and an unset PATH finds nothing.
+    shell,
+    /// `std.process.spawn` (the Runner): empty entries are skipped, and an
+    /// unset PATH falls back to the standard library default.
+    spawn,
+};
+
+/// Resolves `name` like `rule`'s launcher would before running it from `cwd`:
+/// names containing a slash are taken as paths, others are searched in the
+/// colon-separated `search_path`. Relative paths and PATH entries resolve
+/// under `cwd`. Returns a caller-owned path, or null when no executable regular
+/// file matches. Aliases, functions, and builtins are invisible here; callers
 /// decide which names to skip.
-pub fn find(gpa: std.mem.Allocator, io: std.Io, search_path: ?[]const u8, cwd: []const u8, name: []const u8) !?[]const u8 {
+pub fn find(gpa: std.mem.Allocator, io: std.Io, rule: Rule, search_path: ?[]const u8, cwd: []const u8, name: []const u8) !?[]const u8 {
     if (std.mem.indexOfScalar(u8, name, '/') != null) {
         const path = if (std.fs.path.isAbsolute(name)) try gpa.dupe(u8, name) else try std.fs.path.join(gpa, &.{ cwd, name });
         errdefer gpa.free(path);
@@ -14,10 +24,13 @@ pub fn find(gpa: std.mem.Allocator, io: std.Io, search_path: ?[]const u8, cwd: [
         gpa.free(path);
         return null;
     }
-    var dirs = std.mem.splitScalar(u8, search_path orelse return null, ':');
+    const entries = search_path orelse switch (rule) {
+        .shell => return null,
+        .spawn => std.Io.Threaded.default_PATH,
+    };
+    var dirs = std.mem.splitScalar(u8, entries, ':');
     while (dirs.next()) |dir| {
-        // Empty and relative entries are looked up from the directory the
-        // command runs in; POSIX treats an empty entry as ".".
+        if (dir.len == 0 and rule == .spawn) continue;
         const path = if (std.fs.path.isAbsolute(dir))
             try std.fs.path.join(gpa, &.{ dir, name })
         else
@@ -67,11 +80,11 @@ test "executable.find: searches PATH entries in order" {
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     const search_path = try std.fmt.allocPrint(gpa, "{s}/missing:{s}/a:{s}/b", .{ root, root, root });
 
-    const found = try find(gpa, io, search_path, root, "tool");
+    const found = try find(gpa, io, .shell, search_path, root, "tool");
 
     try std.testing.expectEqualStrings(try std.fmt.allocPrint(gpa, "{s}/b/tool", .{root}), found.?);
-    try std.testing.expect(try find(gpa, io, search_path, root, "dir-tool") == null);
-    try std.testing.expect(try find(gpa, io, null, root, "tool") == null);
+    try std.testing.expect(try find(gpa, io, .shell, search_path, root, "dir-tool") == null);
+    try std.testing.expect(try find(gpa, io, .shell, null, root, "tool") == null);
 }
 
 test "executable.find: resolves relative PATH entries against cwd" {
@@ -90,9 +103,10 @@ test "executable.find: resolves relative PATH entries against cwd" {
     const web = try std.fs.path.join(gpa, &.{ root, "web" });
     const api = try std.fs.path.join(gpa, &.{ root, "api" });
 
-    try std.testing.expectEqualStrings(try std.fmt.allocPrint(gpa, "{s}/bin/serve", .{web}), (try find(gpa, io, "bin", web, "serve")).?);
-    try std.testing.expect(try find(gpa, io, "bin", api, "serve") == null);
-    try std.testing.expect(try find(gpa, io, ":/nonexistent", api, "run") != null);
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(gpa, "{s}/bin/serve", .{web}), (try find(gpa, io, .shell, "bin", web, "serve")).?);
+    try std.testing.expect(try find(gpa, io, .shell, "bin", api, "serve") == null);
+    try std.testing.expect(try find(gpa, io, .shell, ":/nonexistent", api, "run") != null);
+    try std.testing.expect(try find(gpa, io, .spawn, ":/nonexistent", api, "run") == null);
 }
 
 test "executable.find: resolves slash names against cwd" {
@@ -107,6 +121,6 @@ test "executable.find: resolves slash names against cwd" {
     try testWriteFile(io, tmp.dir, "bin/server", true);
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
 
-    try std.testing.expect(try find(gpa, io, null, root, "./bin/server") != null);
-    try std.testing.expect(try find(gpa, io, null, root, "./bin/missing") == null);
+    try std.testing.expect(try find(gpa, io, .shell, null, root, "./bin/server") != null);
+    try std.testing.expect(try find(gpa, io, .shell, null, root, "./bin/missing") == null);
 }

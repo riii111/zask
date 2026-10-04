@@ -123,7 +123,7 @@ pub fn collect(ctx: Context, options: Options, report: *Report) !void {
 }
 
 fn checkTmux(ctx: Context, report: *Report) !void {
-    if (try findTool(ctx, "tmux")) return;
+    if (try findTool(ctx, ".", "tmux")) return;
     try report.add(.{
         .severity = .problem,
         .subject = "tmux",
@@ -134,7 +134,7 @@ fn checkTmux(ctx: Context, report: *Report) !void {
 
 fn checkDocker(ctx: Context, report: *Report) !void {
     if (!ctx.cfg.dockerEnabled()) return;
-    if (!try findTool(ctx, "docker")) {
+    if (!try findTool(ctx, ".", "docker")) {
         try report.add(.{
             .severity = .problem,
             .subject = "docker",
@@ -171,22 +171,55 @@ fn checkDocker(ctx: Context, report: *Report) !void {
     }
 }
 
+/// The Runner starts bash inside each precheck and command step directory,
+/// where relative PATH entries resolve, so the lookup runs from each of them.
 fn checkBash(ctx: Context, report: *Report) !void {
-    if (ctx.cfg.prechecks().len == 0 and !hasCommandPhase(ctx.cfg)) return;
-    if (try findTool(ctx, "bash")) return;
+    var missing_from: ?[]const u8 = null;
+    var found_somewhere = false;
+    for (try bashRunDirs(ctx)) |dir| {
+        if (try configured_path.inspect(ctx.io, dir, .directory) != null) continue;
+        if (try findTool(ctx, dir, "bash")) {
+            found_somewhere = true;
+        } else if (missing_from == null) {
+            missing_from = dir;
+        }
+    }
+    const dir = missing_from orelse return;
     try report.add(.{
         .severity = .problem,
         .subject = "bash",
-        .message = "not found in PATH; prechecks and command steps run with bash",
+        .message = if (found_somewhere)
+            try std.fmt.allocPrint(ctx.gpa, "not found in PATH when run from {s}; prechecks and command steps run with bash", .{dir})
+        else
+            "not found in PATH; prechecks and command steps run with bash",
         .fix = "install bash or add it to PATH",
     });
+}
+
+fn bashRunDirs(ctx: Context) ![]const []const u8 {
+    const project_root = try ctx.cfg.projectRoot(ctx.gpa);
+    var dirs: std.ArrayList([]const u8) = .empty;
+    for (ctx.cfg.prechecks()) |check| try appendRunDir(ctx.gpa, &dirs, project_root, config_value.optionalObjectString(check, "dir", ""));
+    for (ctx.cfg.phases()) |phase| {
+        if (phase != .object or phases.phaseKind(phase) != .command) continue;
+        try appendRunDir(ctx.gpa, &dirs, project_root, config_value.optionalObjectString(phase, "dir", ""));
+    }
+    return dirs.items;
+}
+
+fn appendRunDir(gpa: std.mem.Allocator, dirs: *std.ArrayList([]const u8), project_root: []const u8, dir: []const u8) !void {
+    const path = if (dir.len == 0) project_root else try std.fs.path.join(gpa, &.{ project_root, dir });
+    for (dirs.items) |existing| {
+        if (std.mem.eql(u8, existing, path)) return;
+    }
+    try dirs.append(gpa, path);
 }
 
 /// Returns whether nc exists; port checks are skipped without it.
 fn checkNc(ctx: Context, report: *Report) !bool {
     const needed_by_wait_ports = hasWaitPorts(ctx.cfg);
     if (!needed_by_wait_ports and !try hasServicePort(ctx.cfg)) return true;
-    if (try findTool(ctx, "nc")) return true;
+    if (try findTool(ctx, ".", "nc")) return true;
     if (needed_by_wait_ports) {
         try report.add(.{
             .severity = .problem,
@@ -217,7 +250,7 @@ fn checkServiceCommands(ctx: Context, report: *Report) !void {
                     try report.add(.{ .severity = .unverified, .subject = subject, .message = "env_file sets PATH; command not checked" });
                     continue;
                 }
-                if (try executable.find(ctx.gpa, ctx.io, ctx.search_path, dir, name) != null) continue;
+                if (try executable.find(ctx.gpa, ctx.io, .shell, ctx.search_path, dir, name) != null) continue;
                 try report.add(try missingProgramFinding(ctx, subject, name, has_slash));
             },
             .compound => try report.add(.{ .severity = .unverified, .subject = subject, .message = "compound shell command; not checked" }),
@@ -462,17 +495,10 @@ fn classifyCommand(command: []const u8) CommandShape {
     return .{ .program = name };
 }
 
-/// zask spawns tools from its own working directory, so relative PATH entries
-/// resolve from there, not from the project root.
-fn findTool(ctx: Context, name: []const u8) !bool {
-    return try executable.find(ctx.gpa, ctx.io, ctx.search_path, ".", name) != null;
-}
-
-fn hasCommandPhase(cfg: config.Config) bool {
-    for (cfg.phases()) |phase| {
-        if (phase == .object and phases.phaseKind(phase) == .command) return true;
-    }
-    return false;
+/// Matches how the Runner spawns `name` from `cwd`; tools started without a
+/// cwd run from zask's own working directory (".").
+fn findTool(ctx: Context, cwd: []const u8, name: []const u8) !bool {
+    return try executable.find(ctx.gpa, ctx.io, .spawn, ctx.search_path, cwd, name) != null;
 }
 
 fn hasWaitPorts(cfg: config.Config) bool {
@@ -916,4 +942,54 @@ test "environment_check.collect: resolves relative PATH tools from the working d
     try collect(ctx, .{}, &report);
 
     try std.testing.expectEqual(@as(usize, 0), report.findings.items.len);
+}
+
+test "environment_check.collect: looks up bash from each run directory" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var project = try TestProject.init(gpa, io, &.{"bash"});
+    defer project.deinit();
+    try project.tmp.dir.createDirPath(io, "tools");
+    try project.tmp.dir.createDirPath(io, "sys");
+    try project.tmp.dir.writeFile(io, .{ .sub_path = "sys/tmux", .data = "", .flags = .{ .permissions = .executable_file } });
+    var recorder = proc_runner.Recorder.init(gpa);
+    var ctx = try project.context(gpa, io, &recorder,
+        \\"prechecks":[{"command":"true"},{"command":"lint","dir":"tools"}],
+        \\"groups":[]
+    );
+    ctx.search_path = try std.fmt.allocPrint(gpa, ":bin:{s}/sys", .{project.root});
+    var report = Report.init(gpa);
+
+    try collect(ctx, .{}, &report);
+
+    try testExpectFindings(&.{
+        .{ .severity = .problem, .subject = "bash", .message = try std.fmt.allocPrint(gpa, "not found in PATH when run from {s}/tools; prechecks and command steps run with bash", .{project.root}) },
+    }, report.findings.items);
+}
+
+test "environment_check.collect: skips empty PATH entries for spawned tools" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var project = try TestProject.init(gpa, io, &.{"tmux"});
+    defer project.deinit();
+    try project.tmp.dir.writeFile(io, .{ .sub_path = "bash", .data = "", .flags = .{ .permissions = .executable_file } });
+    var recorder = proc_runner.Recorder.init(gpa);
+    var ctx = try project.context(gpa, io, &recorder,
+        \\"prechecks":[{"command":"true"}],
+        \\"groups":[]
+    );
+    ctx.search_path = try std.fmt.allocPrint(gpa, ":{s}", .{project.bin});
+    var report = Report.init(gpa);
+
+    try collect(ctx, .{}, &report);
+
+    try testExpectFindings(&.{
+        .{ .severity = .problem, .subject = "bash", .message = "not found in PATH; prechecks and command steps run with bash" },
+    }, report.findings.items);
 }
