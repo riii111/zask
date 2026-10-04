@@ -124,6 +124,22 @@ file relative to that service directory:
 }
 ```
 
+`watch` restarts a service when files under its directory change. Patterns
+follow `.gitignore` style, and changes are batched until they pause for
+`debounce_ms`:
+
+```json
+{"name": "api", "dir": "backend", "command": "serve",
+ "watch": {"paths": ["src"], "include": ["*.go"], "exclude": ["*_test.go"]}}
+```
+
+The `zask-watch` window runs the watcher for the whole session, so it keeps
+going after you close the monitor or detach, and stops with `zask close`. It
+shows each change and restart, and the service window prints the reason before
+the command starts again. A service stopped with `zask stop` or Ctrl-C stays
+stopped. If a service keeps changing its own watched files right after each
+restart, restarts pause until the changes stop; add those files to `exclude`.
+
 [`schema/zask.schema.json`](schema/zask.schema.json) describes the config for
 editors that support JSON Schema. Point a top-level `"$schema"` key at it to get
 completion, descriptions, and diagnostics for keys, types, and allowed values;

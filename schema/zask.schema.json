@@ -187,7 +187,7 @@
       }
     },
     "watch": {
-      "description": "Files watched for changes. zask scans them about every 0.5 seconds on macOS and Linux and reports changes once they pause for `debounce_ms`.",
+      "description": "Restart the service when these files change. zask scans them about every 0.5 seconds on macOS and Linux and restarts a running or exited service once changes pause for `debounce_ms`; a stopped service stays stopped.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
