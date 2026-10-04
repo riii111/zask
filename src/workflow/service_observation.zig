@@ -14,6 +14,17 @@ pub const Observer = struct {
     tmux: tmux_client.Client,
     docker: docker_client.Compose,
 
+    /// Copy whose tmux, Docker, and probe commands are killed at `deadline_ms`
+    /// (Unix milliseconds). A command cut off this way is observed as
+    /// unavailable, so callers must check the deadline before reporting that.
+    pub fn withDeadline(self: Observer, deadline_ms: i64) Observer {
+        var bounded = self;
+        bounded.runner.deadline_ms = deadline_ms;
+        bounded.tmux.runner.deadline_ms = deadline_ms;
+        bounded.docker.runner.deadline_ms = deadline_ms;
+        return bounded;
+    }
+
     /// Caller owns the result and must deinit it with this observer's allocator.
     pub fn observeService(self: Observer, service: std.json.Value) !observations.ServiceObservation {
         const pane = self.tmux.observePane(try config.Config.serviceName(service));
@@ -53,7 +64,9 @@ pub const Observer = struct {
     fn probeListen(self: Observer, port: i64) !observations.ProbeObservation {
         const port_text = try std.fmt.allocPrint(self.gpa, "{d}", .{port});
         defer self.gpa.free(port_text);
-        return self.probe(&.{ "nc", "-z", "localhost", port_text });
+        // `-w 1` bounds the probe like curl's `--max-time 1`, so callers with a
+        // deadline (e.g. `wait`) cannot be held by a connect that never returns.
+        return self.probe(&.{ "nc", "-z", "-w", "1", "localhost", port_text });
     }
 
     fn probeHttp(self: Observer, port: i64, path: []const u8) !observations.ProbeObservation {
@@ -170,7 +183,7 @@ test "observer.service: probes the configured http path" {
 
     _ = try observer.observeService(try testService(arena.allocator(), "{\"name\":\"api\",\"dir\":\"api\",\"command\":\"serve\",\"port\":3000,\"healthcheck\":{\"type\":\"http\",\"path\":\"/ready\"}}"));
 
-    try proc_runner.expectCommandArgv(recorder.commands.items[1], &.{ "nc", "-z", "localhost", "3000" });
+    try proc_runner.expectCommandArgv(recorder.commands.items[1], &.{ "nc", "-z", "-w", "1", "localhost", "3000" });
     try proc_runner.expectCommandArgv(recorder.commands.items[2], &.{ "curl", "-sf", "--max-time", "1", "http://localhost:3000/ready" });
 }
 
