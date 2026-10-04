@@ -80,6 +80,9 @@ __zask_reply() {
         case $1 in
             \')
                 line=${line//$squote/$squote$bslash$squote$squote}
+                # readline drops a leading quote equal to the one the user
+                # opened, which would leave the escape unbalanced.
+                [[ $line == "$squote"* ]] && line=$squote$line
                 ;;
             \")
                 line=${line//$bslash/$bslash$bslash}

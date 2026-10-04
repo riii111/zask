@@ -5,10 +5,11 @@
 _zask() {
   local -a args candidates
   local out i
-  # (Q) removes the user's quoting without expanding anything.
+  # (Q) removes the user's quoting without expanding anything. Only a ~ typed
+  # unquoted is expanded, matching what the command receives.
   args=("${(@Q)words[2,CURRENT-1]}")
   for (( i = 1; i <= $#args; i++ )); do
-    [[ $args[i] == '~/'* ]] && args[i]=$HOME/${args[i]#'~/'}
+    [[ ${words[i+1]} == '~/'* ]] && args[i]=$HOME/${args[i]#'~/'}
   done
   case ${args[-1]} in
     --config) _files; return ;;

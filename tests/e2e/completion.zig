@@ -56,6 +56,7 @@ const bash_driver =
     \\complete_word '"dq\"'
     \\complete_word 'dq\"'
     \\complete_word bf --config '~/home.json'
+    \\complete_word bf --config "'~/home.json'"
     \\complete_word bf --config '~/"ho"me.json'
     \\complete_word bf --config '"a\"b.json"'
     \\complete_word bf --config "'a\"b.json'"
@@ -157,6 +158,7 @@ test "completion bash: inserts special config names as literal words" {
         \\<dq"x>
         \\<dq"x>
         \\<bff-dashboard>
+        \\
         \\<bff-dashboard>
         \\<bff-dashboard>
         \\<bff-dashboard>
