@@ -1,6 +1,9 @@
 const std = @import("std");
 const env = @import("env.zig");
 
+pub const private_dir_permissions: std.Io.Dir.Permissions = @enumFromInt(0o700);
+pub const private_file_permissions: std.Io.File.Permissions = @enumFromInt(0o600);
+
 pub fn configBase(gpa: std.mem.Allocator, environ: ?*const env.Map) ![]const u8 {
     if (env.get(environ, "XDG_CONFIG_HOME")) |value| return std.fs.path.join(gpa, &.{ value, "zask" });
     return std.fs.path.join(gpa, &.{ try home(environ), ".config", "zask" });
@@ -32,6 +35,14 @@ pub fn home(environ: ?*const env.Map) ![]const u8 {
 pub fn exists(io: std.Io, path: []const u8) bool {
     std.Io.Dir.cwd().access(io, path, .{}) catch return false;
     return true;
+}
+
+/// Creates `path` and its parents, then restricts `path` itself to the owner.
+pub fn ensurePrivateDir(io: std.Io, path: []const u8) !void {
+    _ = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
+    var dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true, .follow_symlinks = false });
+    defer dir.close(io);
+    try dir.setPermissions(io, private_dir_permissions);
 }
 
 pub fn writeFile(io: std.Io, path: []const u8, contents: []const u8) !void {

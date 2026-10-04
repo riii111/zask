@@ -56,7 +56,7 @@ pub const Lock = struct {
     /// recovered acquire may leave `<lock>.stale.<pid>` behind if deletion
     /// fails after the new lock is created.
     pub fn acquire(gpa: std.mem.Allocator, io: std.Io, name: []const u8, base: []const u8, probe: Probe) !Lock {
-        try ensurePrivateDir(io, base);
+        try paths.ensurePrivateDir(io, base);
         const lock_name = try std.fmt.allocPrint(gpa, "{s}.lock", .{name});
         defer gpa.free(lock_name);
         const dir = try std.fs.path.join(gpa, &.{ base, lock_name });
@@ -83,13 +83,6 @@ pub const Lock = struct {
         std.Io.Dir.cwd().deleteTree(self.io, self.dir) catch {};
     }
 };
-
-fn ensurePrivateDir(io: std.Io, path: []const u8) !void {
-    _ = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
-    var dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true, .follow_symlinks = false });
-    defer dir.close(io);
-    try dir.setPermissions(io, private_dir_permissions);
-}
 
 fn acquireDir(io: std.Io, path: []const u8) !bool {
     std.Io.Dir.createDirAbsolute(io, path, private_dir_permissions) catch |err| switch (err) {
@@ -121,8 +114,8 @@ fn lockAlive(gpa: std.mem.Allocator, io: std.Io, probe: Probe, dir: []const u8) 
     return probe.alive(pid);
 }
 
-const private_dir_permissions: std.Io.Dir.Permissions = @enumFromInt(0o700);
-const private_file_permissions: std.Io.File.Permissions = @enumFromInt(0o600);
+const private_dir_permissions = paths.private_dir_permissions;
+const private_file_permissions = paths.private_file_permissions;
 
 // -----------------------------------------------------------------------------
 // Tests

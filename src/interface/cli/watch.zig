@@ -1,0 +1,28 @@
+const std = @import("std");
+const Context = @import("context.zig").Context;
+
+pub const Options = struct {
+    pub fn parse(args: []const []const u8) !Options {
+        if (args.len != 0) return error.InvalidArguments;
+        return .{};
+    }
+
+    pub fn deinit(self: Options) void {
+        _ = self;
+    }
+};
+
+pub fn run(ctx: *Context, opts: Options) !void {
+    _ = opts;
+    const rt = try ctx.runtime();
+    // The CLI arena never frees, and this loop runs for the whole session.
+    try rt.watch(std.heap.smp_allocator, ctx.writer);
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+test "watch.Options: rejects arguments" {
+    try std.testing.expectError(error.InvalidArguments, Options.parse(&.{"extra"}));
+}
