@@ -10,6 +10,7 @@ pub const docker = @import("platform/docker.zig");
 pub const lifecycle = @import("workflow/lifecycle.zig");
 pub const init_inference = @import("workflow/init_inference.zig");
 pub const file_scan = @import("platform/file_scan.zig");
+pub const file_swap = @import("platform/file_swap.zig");
 pub const file_watch = @import("workflow/file_watch.zig");
 pub const lock = @import("platform/lock.zig");
 pub const observations = @import("model/observations.zig");

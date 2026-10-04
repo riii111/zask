@@ -150,9 +150,18 @@ sets the port. The entry follows the group's form: an object entry in an array,
 the command string in an object, or a detailed object entry when a port is set.
 The rest of the file is kept as written. zask leaves the file unchanged and
 reports why when a service with the same name exists, the result would fail
-validation or the size zask loads, or the file changed during the edit.
-Concurrent `zask add` runs on the same config wait for each other. `.jsonc` configs are not
-edited yet; add the service by hand.
+validation or the size zask loads, or the file changed after zask read it.
+`.jsonc` configs are not edited yet; add the service by hand.
+
+Concurrent `zask add` runs on the same config wait for each other. An editor
+can still save while zask writes, so zask swaps the new file in atomically and
+checks the one it replaced. If that was not the file zask read, the editor's
+save is put back and the service is not added; if even that cannot be
+confirmed, zask keeps the replaced file next to the config as
+`.<name>.zask-add-<pid>` and prints its path, so no saved version is lost.
+Editors that rewrite the file in place instead of replacing it are not covered.
+This needs a filesystem that can swap files atomically (APFS on macOS; ext4,
+btrfs, XFS, or tmpfs on Linux); elsewhere zask add refuses to write.
 
 ```bash
 zask add api "cargo run" --group backend --port 8080

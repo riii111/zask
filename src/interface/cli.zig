@@ -160,7 +160,7 @@ pub fn run(init: std.process.Init) !void {
             try stdout.flush();
             std.process.exit(1);
         },
-        error.ConfigChanged, error.ConfigWriteFailed => {
+        error.ConfigChanged, error.ConfigConflict, error.ConfigWriteFailed => {
             try stdout.flush();
             std.process.exit(1);
         },
