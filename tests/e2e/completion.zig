@@ -24,7 +24,8 @@ const special_names_config =
     \\    "semi;touch PWNED": ["api"],
     \\    "dollar$(touch PWNED)": ["api"],
     \\    "tick`touch PWNED`": ["api"],
-    \\    "it's": ["api"]
+    \\    "it's": ["api"],
+    \\    "dq\"x": ["api"]
     \\  }
     \\}
 ;
@@ -51,7 +52,13 @@ const bash_driver =
     \\complete_word '"ti'
     \\complete_word "'it"
     \\complete_word '"it'
+    \\complete_word '"dollar\$('
+    \\complete_word '"dq\"'
+    \\complete_word 'dq\"'
     \\complete_word bf --config '~/home.json'
+    \\complete_word bf --config '~/"ho"me.json'
+    \\complete_word bf --config '"a\"b.json"'
+    \\complete_word bf --config "'a\"b.json'"
     \\if [ -e PWNED ]; then echo executed; fi
 ;
 
@@ -132,6 +139,7 @@ test "completion bash: inserts special config names as literal words" {
     var ws = try harness.Workspace.init(gpa, io);
     defer ws.deinit(gpa);
     try ws.writeProjectFile(io, "zask.json", special_names_config);
+    try ws.writeProjectFile(io, "a\"b.json", demo_config);
     const home_config = try std.fs.path.join(gpa, &.{ ws.home, "home.json" });
     defer gpa.free(home_config);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = home_config, .data = demo_config });
@@ -145,6 +153,12 @@ test "completion bash: inserts special config names as literal words" {
         \\<tick`touch PWNED`>
         \\<it's>
         \\<it's>
+        \\<dollar$(touch PWNED)>
+        \\<dq"x>
+        \\<dq"x>
+        \\<bff-dashboard>
+        \\<bff-dashboard>
+        \\<bff-dashboard>
         \\<bff-dashboard>
         \\
     ;
