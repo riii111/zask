@@ -7,11 +7,25 @@ pub fn absolute(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u
     return gpa.dupe(u8, buffer[0..len]);
 }
 
+/// Display only: relative paths are resolved lexically, so never stat the result.
 pub fn absoluteForDisplay(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
-    if (std.fs.path.isAbsolute(path)) return gpa.dupe(u8, path);
+    if (std.fs.path.isAbsolute(path)) return withoutCurrentDirParts(gpa, path);
     const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", gpa);
     defer gpa.free(cwd);
     return std.fs.path.resolve(gpa, &.{ cwd, path });
+}
+
+// Dropping `.` keeps the target unchanged; `..` stays because it can cross a symlink.
+fn withoutCurrentDirParts(gpa: std.mem.Allocator, path: []const u8) ![]const u8 {
+    var parts: std.ArrayList([]const u8) = .empty;
+    defer parts.deinit(gpa);
+    var it = std.mem.tokenizeScalar(u8, path, '/');
+    while (it.next()) |part| {
+        if (!std.mem.eql(u8, part, ".")) try parts.append(gpa, part);
+    }
+    const joined = try std.mem.join(gpa, "/", parts.items);
+    defer gpa.free(joined);
+    return std.fmt.allocPrint(gpa, "/{s}", .{joined});
 }
 
 // -----------------------------------------------------------------------------
@@ -42,4 +56,12 @@ test "pathing.absoluteForDisplay: resolves paths without requiring the target" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(expected, actual);
+}
+
+test "pathing.absoluteForDisplay: drops current-dir parts but keeps parent references" {
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const actual = try absoluteForDisplay(std.testing.allocator, threaded.io(), "/srv/./app/../.env");
+    defer std.testing.allocator.free(actual);
+
+    try std.testing.expectEqualStrings("/srv/app/../.env", actual);
 }

@@ -11,6 +11,7 @@ const pathing = @import("pathing.zig");
 const phases = @import("phases.zig");
 const proc_runner = @import("../platform/runner.zig");
 const progress_mod = @import("progress.zig");
+const service_observation = @import("service_observation.zig");
 const session_layout = @import("session_layout.zig");
 const tmux_client = @import("../platform/tmux.zig");
 const tmux_setup = @import("tmux_setup.zig");
@@ -58,6 +59,12 @@ pub const Runtime = struct {
         }
     }
 
+    /// Read-only service observation for callers outside the monitor; it shares
+    /// this runtime's tmux session and compose project.
+    pub fn observer(self: Runtime) service_observation.Observer {
+        return .{ .gpa = self.gpa, .runner = self.runner(), .tmux = self.tmux(), .docker = self.docker() };
+    }
+
     pub fn attach(self: Runtime, writer: *std.Io.Writer) !void {
         switch (self.tmux().observeSession()) {
             .active => {},
@@ -88,6 +95,46 @@ pub const Runtime = struct {
         }
         try tx.selectWindow(service);
         if (!try self.inTmux()) try self.attach(writer);
+    }
+
+    /// Writes only the service's recent pane lines to `out`; it never selects a
+    /// window or attaches. Every failure is explained on `diag` and returned as
+    /// an error, so an empty `out` on success always means an empty log.
+    pub fn logsTail(self: Runtime, service: []const u8, max_lines: u32, out: *std.Io.Writer, diag: *std.Io.Writer) !void {
+        _ = self.cfg.findService(service) catch |err| switch (err) {
+            error.UnknownService => {
+                try diag.print("Unknown service: {s}\n", .{service});
+                try diag.flush();
+                return error.ServiceNotFound;
+            },
+            else => return err,
+        };
+        switch (self.tmux().observeSession()) {
+            .active => {},
+            .missing => {
+                try diag.writeAll("Session not running\n");
+                try diag.flush();
+                return error.SessionNotRunning;
+            },
+            .unavailable => return waits.reportTmuxUnavailable(diag),
+        }
+        const lines = self.tmux().captureRecentLines(service, max_lines) catch |err| switch (err) {
+            error.WindowMissing => {
+                try diag.print("Service window not found: {s}\n", .{service});
+                try diag.flush();
+                return error.ServiceWindowMissing;
+            },
+            error.TmuxUnavailable => return waits.reportTmuxUnavailable(diag),
+            error.OutputTooLarge => {
+                try diag.writeAll("Log output too large; request fewer lines\n");
+                try diag.flush();
+                return error.LogOutputTooLarge;
+            },
+            else => return err,
+        };
+        defer self.gpa.free(lines);
+        try out.writeAll(lines);
+        try out.flush();
     }
 
     pub fn previewList(self: Runtime, pane_id: []const u8, client_width: u16, client_height: u16) !void {
@@ -838,6 +885,96 @@ test "runtime.logs: selects window then attaches outside tmux" {
 
     try proc_runner.expectCommandOrder(&recorder, "select-window", "attach-session");
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "switch-client") == null);
+}
+
+test "runtime.logsTail: writes recent lines without moving windows" {
+    const cases = [_]struct {
+        name: []const u8,
+        inside_tmux: bool,
+        pane: []const u8,
+        expected: []const u8,
+    }{
+        .{ .name = "outside tmux", .inside_tmux = false, .pane = "booting\nlistening\n\n\n", .expected = "booting\nlistening\n" },
+        .{ .name = "inside tmux", .inside_tmux = true, .pane = "booting\nlistening\n\n\n", .expected = "booting\nlistening\n" },
+        .{ .name = "empty log", .inside_tmux = false, .pane = "\n\n\n", .expected = "" },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("case: {s}\n", .{case.name});
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var environ = env.Map.init(arena.allocator());
+        defer environ.deinit();
+        if (case.inside_tmux) try environ.put("TMUX", "/tmp/tmux");
+        var recorder = proc_runner.Recorder.init(arena.allocator());
+        defer recorder.deinit();
+        try recorder.enqueue("", "", .{ .exited = 0 });
+        try recorder.enqueue(try std.mem.concat(arena.allocator(), u8, &.{ "0\n", case.pane }), "", .{ .exited = 0 });
+        const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+        var runtime = testRuntime(arena.allocator(), run, try testLogsConfig(arena.allocator()));
+        runtime.environ = &environ;
+        var out_buffer: [128]u8 = undefined;
+        var out: std.Io.Writer = .fixed(&out_buffer);
+        var diag_buffer: [128]u8 = undefined;
+        var diag: std.Io.Writer = .fixed(&diag_buffer);
+
+        try runtime.logsTail("api", 100, &out, &diag);
+
+        try std.testing.expectEqualStrings(case.expected, out.buffered());
+        try std.testing.expectEqualStrings("", diag.buffered());
+        try proc_runner.expectCommandContaining(&recorder, "capture-pane");
+        try expectNoWindowMovement(&recorder);
+    }
+}
+
+test "runtime.logsTail: reports failures instead of an empty log" {
+    const permission_denied = "error connecting to /tmp/tmux-501/default (Permission denied)";
+    const cases = [_]struct {
+        name: []const u8,
+        service: []const u8 = "api",
+        session_stderr: ?[]const u8 = null,
+        pane_stderr: ?[]const u8 = null,
+        capture_error: ?anyerror = null,
+        expected_error: anyerror,
+        expected_diag: []const u8,
+    }{
+        .{ .name = "unknown service", .service = "worker", .expected_error = error.ServiceNotFound, .expected_diag = "Unknown service: worker\n" },
+        .{ .name = "missing session", .session_stderr = "can't find session: demo", .expected_error = error.SessionNotRunning, .expected_diag = "Session not running\n" },
+        .{ .name = "unavailable session", .session_stderr = permission_denied, .expected_error = error.TmuxUnavailable, .expected_diag = "tmux unavailable\n" },
+        .{ .name = "missing pane", .pane_stderr = "can't find window: api", .expected_error = error.ServiceWindowMissing, .expected_diag = "Service window not found: api\n" },
+        .{ .name = "unavailable pane", .pane_stderr = permission_denied, .expected_error = error.TmuxUnavailable, .expected_diag = "tmux unavailable\n" },
+        .{ .name = "unavailable capture", .capture_error = error.FileNotFound, .expected_error = error.TmuxUnavailable, .expected_diag = "tmux unavailable\n" },
+        .{ .name = "oversized capture", .capture_error = error.OutputTooLarge, .expected_error = error.LogOutputTooLarge, .expected_diag = "Log output too large; request fewer lines\n" },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("case: {s}\n", .{case.name});
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var recorder = proc_runner.Recorder.init(arena.allocator());
+        defer recorder.deinit();
+        if (case.session_stderr) |stderr| {
+            try recorder.enqueue("", stderr, .{ .exited = 1 });
+        } else if (case.pane_stderr) |stderr| {
+            try recorder.enqueue("", "", .{ .exited = 0 });
+            try recorder.enqueue("", stderr, .{ .exited = 1 });
+        } else {
+            try recorder.enqueue("", "", .{ .exited = 0 });
+            if (case.capture_error) |err| try recorder.enqueueError(err);
+        }
+        const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+        const runtime = testRuntime(arena.allocator(), run, try testLogsConfig(arena.allocator()));
+        var out_buffer: [128]u8 = undefined;
+        var out: std.Io.Writer = .fixed(&out_buffer);
+        var diag_buffer: [128]u8 = undefined;
+        var diag: std.Io.Writer = .fixed(&diag_buffer);
+
+        try std.testing.expectError(case.expected_error, runtime.logsTail(case.service, 100, &out, &diag));
+
+        try std.testing.expectEqualStrings("", out.buffered());
+        try std.testing.expectEqualStrings(case.expected_diag, diag.buffered());
+        try expectNoWindowMovement(&recorder);
+    }
 }
 
 test "runtime.openSession: creates dashboard service and docker windows" {
@@ -1615,6 +1752,22 @@ test "runtime.re: detaches client exec inside tmux" {
     try proc_runner.expectCommandArg(cmd, 2, "-E");
     try proc_runner.expectCommandArgContains(cmd, 3, " re");
     try proc_runner.expectCommandArgContains(cmd, 3, "--config");
+}
+
+fn testLogsConfig(gpa: std.mem.Allocator) !config.Config {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+        \\}
+    ;
+    return config.Config.parse(gpa, json, "/home/me");
+}
+
+fn expectNoWindowMovement(recorder: *const proc_runner.Recorder) !void {
+    for ([_][]const u8{ "select-window", "switch-client", "attach-session" }) |command| {
+        try std.testing.expect(proc_runner.findCommandContaining(recorder, command) == null);
+    }
 }
 
 fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.Config) Runtime {

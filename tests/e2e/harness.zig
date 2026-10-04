@@ -22,6 +22,8 @@ pub const SpawnOptions = struct {
     cwd: []const u8,
     xdg_config_home: []const u8,
     home: []const u8,
+    /// Child PATH; unset means the child gets no PATH and the platform default applies.
+    path: ?[]const u8 = null,
 };
 
 pub fn spawnZask(
@@ -39,6 +41,7 @@ pub fn spawnZask(
     defer env_map.deinit();
     try env_map.put("HOME", opts.home);
     try env_map.put("XDG_CONFIG_HOME", opts.xdg_config_home);
+    if (opts.path) |path| try env_map.put("PATH", path);
 
     const output_limit = 1024 * 1024;
     const result = try std.process.run(gpa, io, .{
@@ -101,7 +104,11 @@ pub const Workspace = struct {
     }
 
     pub fn writeNamedConfig(self: Workspace, gpa: std.mem.Allocator, io: std.Io, project_name: []const u8, contents: []const u8) !void {
-        const config_path = try self.configPath(gpa, project_name);
+        return self.writeNamedConfigFile(gpa, io, project_name, "config.json", contents);
+    }
+
+    pub fn writeNamedConfigFile(self: Workspace, gpa: std.mem.Allocator, io: std.Io, project_name: []const u8, file_name: []const u8, contents: []const u8) !void {
+        const config_path = try std.fs.path.join(gpa, &.{ self.xdg, "zask", project_name, file_name });
         defer gpa.free(config_path);
         const config_dir = std.fs.path.dirname(config_path) orelse return error.InvalidPath;
         _ = try std.Io.Dir.cwd().createDirPathStatus(io, config_dir, @enumFromInt(0o755));

@@ -111,13 +111,24 @@ test "tmux_setup.bindControlKeys: refreshes stale list binding in existing sessi
 
     try zask.tmux_setup.bindControlKeys(arena.allocator(), client);
 
-    const binding = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "list-keys", "-T", "prefix", "w" });
-    defer std.testing.allocator.free(binding.stdout);
-    defer std.testing.allocator.free(binding.stderr);
-    try std.testing.expect(std.mem.indexOf(u8, binding.stdout, "preview-list") != null);
-    try std.testing.expect(std.mem.indexOf(u8, binding.stdout, "#{pane_id}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, binding.stdout, "#{client_width}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, binding.stdout, "#{client_height}") != null);
+    const bindings = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "list-keys", "-T", "prefix" });
+    defer std.testing.allocator.free(bindings.stdout);
+    defer std.testing.allocator.free(bindings.stderr);
+    const binding = found: {
+        var lines = std.mem.splitScalar(u8, bindings.stdout, '\n');
+        while (lines.next()) |line| {
+            var fields = std.mem.tokenizeAny(u8, line, " \t");
+            const expected = [_][]const u8{ "bind-key", "-T", "prefix", "w" };
+            for (expected) |field| {
+                if (!std.mem.eql(u8, fields.next() orelse "", field)) break;
+            } else break :found line;
+        }
+        return error.MissingListBinding;
+    };
+    try std.testing.expect(std.mem.indexOf(u8, binding, "preview-list") != null);
+    try std.testing.expect(std.mem.indexOf(u8, binding, "#{pane_id}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, binding, "#{client_width}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, binding, "#{client_height}") != null);
 }
 
 test "cli.start: recreates missing service window" {
@@ -180,6 +191,91 @@ test "cli.start: recreates missing service window" {
     try std.testing.expectEqual(@as(usize, 0), result.stderr.len);
     const api_target = try std.fmt.allocPrint(gpa, "{s}:api", .{session});
     try expectPaneAlive(gpa, io, api_target);
+}
+
+test "cli.logs: tail prints recent pane lines without moving windows" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-logs-tail", .{std.c.getpid()});
+    const client = tmuxClient(gpa, io, session);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try writeServiceProject(gpa, io, tmp.dir, session);
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", project.root, "sleep 60");
+    defer client.killSession() catch {};
+    try client.newWindowAfter("dashboard", "api", project.root, "printf 'one\\ntwo\\nthree\\n'; sleep 60");
+    try client.selectWindow("dashboard");
+    try waitForPaneText(gpa, io, try std.fmt.allocPrint(gpa, "{s}:api", .{session}), "three");
+
+    const result = try runZask(gpa, io, project, &.{ "logs", "api", "--tail", "2" });
+
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqualStrings("two\nthree\n", result.stdout);
+    try std.testing.expectEqualStrings("", result.stderr);
+    try expectActiveWindow(gpa, io, session, "dashboard");
+}
+
+test "cli.logs: tail returns whole lines that wrap in a narrow pane" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-logs-wrap", .{std.c.getpid()});
+    const client = tmuxClient(gpa, io, session);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try writeServiceProject(gpa, io, tmp.dir, session);
+    const ready_channel = try std.fmt.allocPrint(gpa, "{s}-resized", .{session});
+    // Each line is 80 columns, so a 20-column pane wraps it over four rows.
+    const command = try std.fmt.allocPrint(gpa, "{s} wait-for {s}; for i in $(seq -w 1 20); do printf '%s%078d\\n' \"$i\" 0; done; sleep 60", .{ build_options.tmux_path, ready_channel });
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", project.root, "sleep 60");
+    defer client.killSession() catch {};
+    try client.newWindowAfter("dashboard", "api", project.root, command);
+    try client.resizeWindow(try std.fmt.allocPrint(gpa, "{s}:api", .{session}), 20, 5);
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "wait-for", "-S", ready_channel });
+    try waitForPaneText(gpa, io, try std.fmt.allocPrint(gpa, "{s}:api", .{session}), "20000");
+
+    const result = try runZask(gpa, io, project, &.{ "logs", "api", "--tail", "10" });
+
+    var expected: std.ArrayList(u8) = .empty;
+    for (11..21) |index| try expected.print(gpa, "{d:0>2}{d:0>78}\n", .{ index, 0 });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqualStrings(expected.items, result.stdout);
+    try std.testing.expectEqualStrings("", result.stderr);
+}
+
+test "cli.logs: tail reports missing service window on stderr" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-logs-missing", .{std.c.getpid()});
+    const client = tmuxClient(gpa, io, session);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try writeServiceProject(gpa, io, tmp.dir, session);
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", project.root, "sleep 60");
+    defer client.killSession() catch {};
+
+    const result = try runZask(gpa, io, project, &.{ "logs", "api", "--tail", "2" });
+
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+    try std.testing.expectEqualStrings("", result.stdout);
+    try std.testing.expectEqualStrings("Service window not found: api\n", result.stderr);
 }
 
 test "tmux_setup.applySessionOptions: keeps global attach hook while refreshing size hook" {
@@ -415,6 +511,223 @@ test "runtime.start: recreated service windows preserve configured order" {
     try expectWindowOrder(gpa, io, session, &.{ "dashboard", "api", "worker", "web" });
 }
 
+test "runtime.observer: start marker follows start and restart" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-observer", .{std.c.getpid()});
+    const client = tmuxClient(gpa, io, session);
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", "/tmp", "sleep 60");
+    defer client.killSession() catch {};
+    try client.newWindowAfter("dashboard", "api", "/tmp", try zask.zask_command.waitingPlaceholder(gpa, "api"));
+
+    const cfg = try zask.config.Config.parse(gpa,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":".","command":"sleep 60"}]}]
+        \\}
+    , "/tmp");
+    const service = (try cfg.services())[0];
+    const run_impl: zask.runner.Runner = .{ .gpa = gpa, .io = io };
+    const runtime = zask.runtime.Runtime{
+        .gpa = gpa,
+        .io = io,
+        .cfg = cfg,
+        .config_path = "/tmp/config.json",
+        .zask_path = "zask",
+        .command_hint = .{ .config = "/tmp/config.json" },
+        .runner_impl = run_impl,
+        .tmux_impl = client,
+        .docker_impl = .{ .gpa = gpa, .runner = run_impl, .dir = "/tmp", .file = "compose.yaml" },
+    };
+    const observer = runtime.observer();
+    const api_target = try std.fmt.allocPrint(gpa, "{s}:api", .{session});
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try waitForPaneState(client, gpa, io, "api", .idle);
+
+    const placeholder = try observer.observeService(service);
+    try std.testing.expectEqual(@as(?i64, null), placeholder.pane.started_at);
+    try std.testing.expectEqual(zask.observations.Uptime.not_running, placeholder.uptime());
+
+    try runtime.start("api", &writer);
+    try waitForPaneState(client, gpa, io, "api", .busy);
+    const started = try observer.observeService(service);
+    try std.testing.expect(started.pane.started_at != null);
+    try std.testing.expectEqual(zask.observations.HealthObservation.no_check, started.health());
+    try std.testing.expect(started.uptime().seconds < 60);
+
+    // Age the marker so the restart below must replace it, not keep it.
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "set-option", "-p", "-t", api_target, "@zask_started_at", "1000" });
+    const aged = try observer.observeService(service);
+    try std.testing.expect(aged.uptime().seconds > 1_000_000);
+
+    try runtime.restart("api", &writer);
+    try waitForPaneState(client, gpa, io, "api", .busy);
+    const restarted = try observer.observeService(service);
+    try std.testing.expect(restarted.uptime().seconds < 60);
+
+    try runtime.stop("api", &writer);
+    try waitForPaneState(client, gpa, io, "api", .idle);
+    const stopped = try observer.observeService(service);
+    try std.testing.expectEqual(zask.observations.Uptime.not_running, stopped.uptime());
+    try std.testing.expectEqual(zask.observations.HealthObservation.not_running, stopped.health());
+}
+
+const ServiceProject = struct {
+    root: []const u8,
+    env_map: std.process.Environ.Map,
+};
+
+/// Writes a one-service `api` config whose project name is `session`, and an
+/// environment that discovers it from `root` with the built tmux first on PATH.
+fn writeServiceProject(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, session: []const u8) !ServiceProject {
+    const config_json = try std.fmt.allocPrint(gpa,
+        \\{{
+        \\  "project": {{"name":"{s}","root":"."}},
+        \\  "groups": [{{"name":"backend","services":[
+        \\    {{"name":"api","dir":".","command":"/bin/sleep 60"}}
+        \\  ]}}]
+        \\}}
+    , .{session});
+    try dir.writeFile(io, .{ .sub_path = "zask.json", .data = config_json });
+    const root = try dir.realPathFileAlloc(io, ".", gpa);
+    var env_map = std.process.Environ.Map.init(gpa);
+    try env_map.put("HOME", root);
+    try env_map.put("XDG_CONFIG_HOME", root);
+    const parent_path = if (std.c.getenv("PATH")) |path| std.mem.span(path) else "";
+    if (std.fs.path.dirname(build_options.tmux_path)) |tmux_dir|
+        try env_map.put("PATH", try std.fmt.allocPrint(gpa, "{s}:{s}", .{ tmux_dir, parent_path }))
+    else
+        try env_map.put("PATH", parent_path);
+    return .{ .root = root, .env_map = env_map };
+}
+
+/// Runs the built zask binary from the project root; any exit status is
+/// returned so callers can assert failures.
+fn runZask(gpa: std.mem.Allocator, io: std.Io, project: ServiceProject, args: []const []const u8) !std.process.RunResult {
+    const argv = try std.mem.concat(gpa, []const u8, &.{ &.{build_options.zask_path}, args });
+    return std.process.run(gpa, io, .{
+        .argv = argv,
+        .cwd = .{ .path = project.root },
+        .environ_map = &project.env_map,
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
+    });
+}
+
+test "monitor: keys move selection, toggle the filter, and quit restores the terminal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-monitor", .{std.c.getpid()});
+    const client = tmuxClient(gpa, io, session);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "zask.json",
+        .data = try std.fmt.allocPrint(gpa,
+            \\{{
+            \\  "project": {{"name":"{s}","root":"."}},
+            \\  "groups": [{{"name":"backend","services":[
+            \\    {{"name":"api","dir":".","command":"/bin/sleep 60","port":1}},
+            \\    {{"name":"web","dir":".","command":"/bin/sleep 60"}}
+            \\  ]}}]
+            \\}}
+        , .{session}),
+    });
+    const project_root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    const config_path = try std.fs.path.join(gpa, &.{ project_root, "zask.json" });
+    const stty_path = try std.fs.path.join(gpa, &.{ project_root, "stty.txt" });
+    const stderr_path = try std.fs.path.join(gpa, &.{ project_root, "monitor-stderr.txt" });
+    // The tmux server may run without HOME (as in CI), which config loading needs.
+    const command = try std.fmt.allocPrint(gpa, "HOME={s} {s} --config {s} monitor 2> {s}; stty -a > {s}; sleep 60", .{
+        try zask.shell.quote(gpa, project_root),
+        try zask.shell.quote(gpa, build_options.zask_path),
+        try zask.shell.quote(gpa, config_path),
+        try zask.shell.quote(gpa, stderr_path),
+        try zask.shell.quote(gpa, stty_path),
+    });
+    errdefer if (std.Io.Dir.cwd().readFileAlloc(io, stderr_path, gpa, .limited(64 * 1024))) |stderr| {
+        std.debug.print("monitor stderr:\n{s}\n", .{stderr});
+    } else |_| {};
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", project_root, command);
+    defer client.killSession() catch {};
+    try zask.tmux_setup.applySessionOptions(gpa, client, .{
+        .project = session,
+        .zask_path = build_options.zask_path,
+        .config_path = config_path,
+    });
+    // Busy with a closed port, api stays `waiting` and shows its last log line.
+    try client.newWindowAfter("dashboard", "api", project_root, "printf '🚀🚀🚀🚀🚀🚀🚀🚀ログ日本語日本語日本語日本語\\n'; exec sleep 60");
+    const target = try std.fmt.allocPrint(gpa, "{s}:dashboard", .{session});
+
+    try waitForSelectedRow(gpa, io, target, "api");
+    try expectPaneFlags(gpa, io, target, "1|0");
+
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "j" });
+    try waitForSelectedRow(gpa, io, target, "web");
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "Up" });
+    try waitForSelectedRow(gpa, io, target, "api");
+
+    // Arrow keys whose bytes reach the monitor in two reads still move once,
+    // including when the gap spans a refresh (repeated past the 1s interval).
+    for (0..4) |_| {
+        try sendSplitArrow(gpa, io, target, "[B");
+        try waitForSelectedRow(gpa, io, target, "web");
+        try sendSplitArrow(gpa, io, target, "[A");
+        try waitForSelectedRow(gpa, io, target, "api");
+    }
+    // The ESC of the next arrow can share a read with the end of the previous one.
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "-H", "1b" });
+    try std.Io.sleep(io, .fromMilliseconds(150), .awake);
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "-H", "5b", "42", "1b" });
+    try std.Io.sleep(io, .fromMilliseconds(150), .awake);
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "-l", "[A" });
+    try waitForSelectedRow(gpa, io, target, "api");
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "j" });
+    try waitForSelectedRow(gpa, io, target, "web");
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "k" });
+    try waitForSelectedRow(gpa, io, target, "api");
+
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "resize-window", "-t", target, "-x", "45", "-y", "10" });
+    try waitForPaneText(gpa, io, target, "│ 🚀");
+    try expectWideLogClipped(gpa, io, target);
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "resize-window", "-t", target, "-x", "45", "-y", "4" });
+    try waitForPaneText(gpa, io, target, "j/k");
+    try waitForSelectedRow(gpa, io, target, "api");
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "resize-window", "-t", target, "-x", "80", "-y", "24" });
+
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "f" });
+    try waitForPaneText(gpa, io, target, "[bad]");
+    const mode = (try client.showOption("@zask_dash_mode")) orelse return error.SessionOptionMissing;
+    try std.testing.expectEqualStrings("bad", mode);
+    try waitForSelectedRow(gpa, io, target, "api");
+
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "q" });
+    const stty = try waitForFile(gpa, io, stty_path);
+    var flags = std.mem.tokenizeAny(u8, stty, " \t\r\n;");
+    var restored: usize = 0;
+    while (flags.next()) |flag| {
+        if (std.mem.eql(u8, flag, "-icanon") or std.mem.eql(u8, flag, "-echo") or std.mem.eql(u8, flag, "-isig")) return error.TerminalLeftRaw;
+        if (std.mem.eql(u8, flag, "icanon") or std.mem.eql(u8, flag, "echo") or std.mem.eql(u8, flag, "isig")) restored += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), restored);
+    try expectPaneFlags(gpa, io, target, "0|1");
+    try expectPaneAlive(gpa, io, target);
+}
+
 fn tmuxClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) zask.tmux.Client {
     return .{
         .gpa = gpa,
@@ -520,4 +833,90 @@ fn expectActiveWindow(gpa: std.mem.Allocator, io: std.Io, session: []const u8, n
     const expected = try std.fmt.allocPrint(gpa, "{s}:1", .{name});
     defer gpa.free(expected);
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, expected) != null);
+}
+
+fn waitForPaneText(gpa: std.mem.Allocator, io: std.Io, target: []const u8, needle: []const u8) !void {
+    for (0..service_state_attempts) |_| {
+        const result = try run(gpa, io, &.{ build_options.tmux_path, "capture-pane", "-p", "-t", target });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+
+        if (std.mem.indexOf(u8, result.stdout, needle) != null) return;
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    try dumpPane(gpa, io, target);
+    return error.PaneTextTimeout;
+}
+
+fn waitForSelectedRow(gpa: std.mem.Allocator, io: std.Io, target: []const u8, name: []const u8) !void {
+    for (0..service_state_attempts) |_| {
+        const result = try run(gpa, io, &.{ build_options.tmux_path, "capture-pane", "-p", "-t", target });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+
+        var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "> ") and std.mem.indexOf(u8, line, name) != null) return;
+        }
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    try dumpPane(gpa, io, target);
+    return error.SelectionTimeout;
+}
+
+fn waitForFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
+    for (0..service_state_attempts) |_| {
+        const data = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 * 1024)) catch |err| switch (err) {
+            error.FileNotFound => {
+                try std.Io.sleep(io, service_state_interval, .awake);
+                continue;
+            },
+            else => return err,
+        };
+        if (data.len > 0) return data;
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    return error.FileTimeout;
+}
+
+// `alternate_on|cursor_flag`: the monitor draws on the alternate screen with a
+// hidden cursor and must give both back when it exits.
+fn expectPaneFlags(gpa: std.mem.Allocator, io: std.Io, target: []const u8, expected: []const u8) !void {
+    for (0..service_state_attempts) |_| {
+        const result = try run(gpa, io, &.{ build_options.tmux_path, "display-message", "-p", "-t", target, "#{alternate_on}|#{cursor_flag}" });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+
+        if (std.mem.eql(u8, std.mem.trim(u8, result.stdout, " \t\r\n"), expected)) return;
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    return error.PaneFlagsTimeout;
+}
+
+// A wrapped log would put its tail on a line of its own, without the row's
+// `│` separator.
+fn expectWideLogClipped(gpa: std.mem.Allocator, io: std.Io, target: []const u8) !void {
+    const result = try run(gpa, io, &.{ build_options.tmux_path, "capture-pane", "-p", "-t", target });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "🚀") == null and std.mem.indexOf(u8, line, "ログ") == null) continue;
+        try std.testing.expect(std.mem.indexOf(u8, line, "│") != null);
+    }
+}
+
+fn sendSplitArrow(gpa: std.mem.Allocator, io: std.Io, target: []const u8, tail: []const u8) !void {
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "-H", "1b" });
+    try std.Io.sleep(io, .fromMilliseconds(150), .awake);
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "-l", tail });
+}
+
+// Printed on timeouts so CI logs show what the monitor actually drew.
+fn dumpPane(gpa: std.mem.Allocator, io: std.Io, target: []const u8) !void {
+    const result = try run(gpa, io, &.{ build_options.tmux_path, "capture-pane", "-p", "-t", target });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    std.debug.print("pane {s}:\n{s}\n", .{ target, result.stdout });
 }

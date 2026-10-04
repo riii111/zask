@@ -342,7 +342,7 @@ pub const Lifecycle = struct {
         }
         try progress.step("Starting {s}...\n", .{service});
         try progress.command("{s}\n", .{start_command});
-        try self.tmux.respawnPane(service, service_dir, launch_command);
+        try self.tmux.respawnPane(service, service_dir, launch_command, self.runner.nowSeconds());
     }
 
     fn recreateServiceWindow(self: Lifecycle, service: []const u8, service_dir: []const u8) !void {
@@ -481,7 +481,7 @@ pub const Lifecycle = struct {
         const compose_file = try shell.quote(self.gpa, self.cfg.dockerComposeFile());
         const cmd = try std.fmt.allocPrint(self.gpa, "COMPOSE_MENU=false docker compose -f {s} up", .{compose_file});
         try progress.command("{s}\n", .{cmd});
-        try self.tmux.respawnPane("docker", docker_dir, cmd);
+        try self.tmux.respawnPane("docker", docker_dir, cmd, self.runner.nowSeconds());
     }
 
     fn dockerStartAlreadyHandled(self: Lifecycle, progress: anytype) !bool {
@@ -1046,6 +1046,72 @@ test "lifecycle.restartTarget: suggests project env_file for service target" {
     try lifecycle.restartTarget("api", &writer);
 
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Tip: .env exists but is not loaded; add project-level env_file to use it.") != null);
+}
+
+test "lifecycle.restartTarget: records a new start marker with the respawn" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    recorder.now_seconds = 1_700_000_500;
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|sleep|1700000000\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|zsh|1700000000\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    try recorder.enqueue("0||123|zsh|1700000000\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.restartTarget("api", &writer);
+
+    const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
+    const marker = respawn.argv[respawn.argv.len - 3 ..];
+    try proc_runner.expectCommandArgv(.{ .argv = marker, .cwd = null, .interactive = false }, &.{ "demo:api", "@zask_started_at", "1700000500" });
+    try proc_runner.expectCommandOrder(&recorder, "C-c", "respawn-pane");
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "lifecycle.startTarget: docker start records a start marker with the respawn" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "docker": {"compose": "compose.yaml"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    recorder.now_seconds = 1_700_000_500;
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("api\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startTarget("docker", &writer);
+
+    const respawn = proc_runner.findCommandContaining(&recorder, "docker compose") orelse return error.CommandNotFound;
+    const marker = respawn.argv[respawn.argv.len - 3 ..];
+    try proc_runner.expectCommandArgv(.{ .argv = marker, .cwd = null, .interactive = false }, &.{ "demo:docker", "@zask_started_at", "1700000500" });
 }
 
 test "lifecycle.stopAll: signals every running service before polling once" {

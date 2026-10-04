@@ -123,9 +123,26 @@
           "$ref": "#/definitions/envFile"
         },
         "services": {
-          "description": "Services in this group.",
-          "type": "array",
-          "items": { "$ref": "#/definitions/service" }
+          "description": "Services in this group, as an array of services or an object keyed by service name.",
+          "oneOf": [
+            {
+              "type": "array",
+              "items": { "$ref": "#/definitions/service" }
+            },
+            {
+              "type": "object",
+              "propertyNames": { "$ref": "#/definitions/identifier" },
+              "additionalProperties": {
+                "oneOf": [
+                  {
+                    "description": "Command run with `sh -lc` in the service pane. Other settings use their defaults.",
+                    "type": "string"
+                  },
+                  { "$ref": "#/definitions/namedService" }
+                ]
+              }
+            }
+          ]
         }
       }
     },
@@ -182,8 +199,60 @@
         "env_file": {
           "description": "KEY=value files loaded before this service command, relative to the service directory.",
           "$ref": "#/definitions/envFile"
+        },
+        "watch": { "$ref": "#/definitions/watch" }
+      }
+    },
+    "namedService": {
+      "description": "Service whose name is its key in `services`.",
+      "type": "object",
+      "required": ["command"],
+      "additionalProperties": false,
+      "properties": {
+        "command": { "$ref": "#/definitions/service/properties/command" },
+        "dir": { "$ref": "#/definitions/service/properties/dir" },
+        "runtime": { "$ref": "#/definitions/service/properties/runtime" },
+        "external": { "$ref": "#/definitions/service/properties/external" },
+        "port": { "$ref": "#/definitions/service/properties/port" },
+        "healthcheck": { "$ref": "#/definitions/service/properties/healthcheck" },
+        "env_file": { "$ref": "#/definitions/service/properties/env_file" },
+        "watch": { "$ref": "#/definitions/watch" }
+      }
+    },
+    "watch": {
+      "description": "Files watched for changes. zask scans them about every 0.5 seconds on macOS and Linux and reports changes once they pause for `debounce_ms`.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "paths": {
+          "description": "Files or directories to watch, relative to the service directory. Absolute and `~/` paths are used as is; relative paths must stay within the service directory.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 },
+          "default": ["."]
+        },
+        "include": {
+          "description": "Only files matching one of these patterns are watched. Watch every file when omitted. Files listed directly in `paths` are watched regardless.",
+          "type": "array",
+          "items": { "$ref": "#/definitions/watchPattern" }
+        },
+        "exclude": {
+          "description": "Files and directories matching these patterns are not watched. `.git`, `.hg`, and `.svn` are always excluded.",
+          "type": "array",
+          "items": { "$ref": "#/definitions/watchPattern" }
+        },
+        "debounce_ms": {
+          "description": "Milliseconds without further changes before changes are reported together.",
+          "type": "integer",
+          "minimum": 0,
+          "default": 300
         }
       }
+    },
+    "watchPattern": {
+      "description": "Glob relative to each watched path. Without `/` it matches a file or directory name at any depth; with `/` it matches the whole relative path. `*` and `?` stay within a name, `**` matches any number of directories, and a trailing `/` is ignored.",
+      "type": "string",
+      "minLength": 1
     },
     "stepName": {
       "description": "Label shown in startup progress.",

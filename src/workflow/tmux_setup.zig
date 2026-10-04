@@ -47,6 +47,17 @@ pub fn bindControlKeys(gpa: std.mem.Allocator, tx: tmux_client.Client) !void {
     , .{ .opt = tmux_options.dash_mode, .all = tmux_options.dash_mode_all, .bad = tmux_options.dash_mode_bad }));
 }
 
+/// Flips the same session option as the Ctrl+q m binding, so both toggles agree.
+/// The current value is re-read because the binding may have changed it since
+/// the caller last looked.
+pub fn toggleDashMode(tx: tmux_client.Client) !tmux_options.DashMode {
+    const current = try tx.showOption(tmux_options.dash_mode);
+    defer if (current) |value| tx.gpa.free(value);
+    const next = tmux_options.DashMode.parse(current).toggled();
+    try tx.setOption(tmux_options.dash_mode, next.optionValue());
+    return next;
+}
+
 fn syncSizeCommand(gpa: std.mem.Allocator) ![]const u8 {
     const command = try std.fmt.allocPrint(gpa,
         \\session="#{{session_name}}";
@@ -113,4 +124,42 @@ test "tmux_setup.applySessionOptions: seeds prefix and dash mode" {
     const dash = proc_runner.findCommandContaining(&recorder, tmux_options.dash_mode) orelse return error.MissingDashModeOption;
     try proc_runner.expectCommandArg(dash, 4, tmux_options.dash_mode);
     try proc_runner.expectCommandArg(dash, 5, tmux_options.dash_mode_all);
+}
+
+test "tmux_setup.toggleDashMode: flips the current session option" {
+    const cases = [_]struct { current: []const u8, expected: tmux_options.DashMode }{
+        .{ .current = "all\n", .expected = .bad },
+        .{ .current = "bad\n", .expected = .all },
+        .{ .current = "", .expected = .bad },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var recorder = proc_runner.Recorder.init(arena.allocator());
+        defer recorder.deinit();
+        try recorder.enqueue(case.current, "", .{ .exited = 0 });
+        try recorder.enqueue("", "", .{ .exited = 0 });
+        const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+        const tx = tmux_client.Client{ .gpa = arena.allocator(), .runner = run, .session = "demo" };
+
+        const next = try toggleDashMode(tx);
+
+        try std.testing.expectEqual(case.expected, next);
+        const set = proc_runner.findCommandContaining(&recorder, "set-option") orelse return error.MissingSetOption;
+        try proc_runner.expectCommandArg(set, 4, tmux_options.dash_mode);
+        try proc_runner.expectCommandArg(set, 5, case.expected.optionValue());
+    }
+}
+
+test "tmux_setup.toggleDashMode: reports a failed option write" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("all\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "no server running", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const tx = tmux_client.Client{ .gpa = arena.allocator(), .runner = run, .session = "demo" };
+
+    try std.testing.expectError(error.CommandFailed, toggleDashMode(tx));
 }
