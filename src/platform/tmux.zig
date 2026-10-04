@@ -448,7 +448,8 @@ fn serverUnavailable(stderr: []const u8) bool {
 
 /// `cat` writes each read immediately, so the output a process prints just
 /// before it dies reaches the file even while the dead pane keeps the pipe
-/// open. When the log stops accepting writes mid-run (disk full, size limit),
+/// open. The umask keeps a log recreated by `>>` (deleted after it was
+/// prepared) owner-only. When the log stops accepting writes mid-run (disk full, size limit),
 /// a notice is written to the pane's own terminal, where the output continues.
 /// tmux expands both formats and strftime sequences in the pipe command, so
 /// every '#' and '%' is doubled to reach the shell unchanged.
@@ -461,7 +462,7 @@ fn buildOutputPipe(gpa: std.mem.Allocator, log: OutputLog) ![]const u8 {
     defer gpa.free(notice_text);
     const notice = try shell.quote(gpa, notice_text);
     defer gpa.free(notice);
-    const command = try std.fmt.allocPrint(gpa, "{{ printf '%s' {s}; cat; }} >> {s} || printf '\\r\\n%s\\r\\n' {s} > {s}", .{ header, path, notice, pane_tty_placeholder });
+    const command = try std.fmt.allocPrint(gpa, "umask 077; {{ printf '%s' {s}; cat; }} >> {s} || printf '\\r\\n%s\\r\\n' {s} > {s}", .{ header, path, notice, pane_tty_placeholder });
     defer gpa.free(command);
     const formats_escaped = try std.mem.replaceOwned(u8, gpa, command, "#", "##");
     defer gpa.free(formats_escaped);
@@ -823,7 +824,7 @@ test "tmux.respawnPaneWithOutputLog: appends output to the log in the respawn in
     try runner.expectCommandArg(recorder.commands.items[0], 1, "respawn-pane");
     try runner.expectCommandArgContains(recorder.commands.items[0], 9, "npm run dev");
     try runner.expectCommandArgv(.{ .argv = argv[10..], .cwd = null, .interactive = false }, &.{
-        ";",                "pipe-pane",  "-t", "=demo:=api", "{ printf '%%s' '=== api ===\n'; cat; } >> '/state/it'\\''s ##1 100%%/api.log' || printf '\\r\\n%%s\\r\\n' 'zask: output is no longer saved to /state/it'\\''s ##1 100%%/api.log' > '#{pane_tty}'",
+        ";",                "pipe-pane",  "-t", "=demo:=api", "umask 077; { printf '%%s' '=== api ===\n'; cat; } >> '/state/it'\\''s ##1 100%%/api.log' || printf '\\r\\n%%s\\r\\n' 'zask: output is no longer saved to /state/it'\\''s ##1 100%%/api.log' > '#{pane_tty}'",
         ";",                "set-option", "-p", "-t",         "=demo:=api",
         "@zask_started_at", "1700000000",
     });
