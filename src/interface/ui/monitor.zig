@@ -235,7 +235,7 @@ const Monitor = struct {
         var output: std.Io.Writer.Allocating = .init(scratch);
         const printed = &output.writer;
         if (runOperation(self.runtime.withAllocator(scratch), operation, target, printed)) |outcome| switch (outcome) {
-            .done => self.setNotice("{s} {s}", .{ operation.done(), target.name }),
+            .done => self.setCompletedNotice(operation, target.name, printed.buffered()),
             .incomplete => self.setNotice("{s} {s} incomplete: {s}", .{ operation.verb(), target.name, incompleteReason(operation, printed.buffered()) }),
         } else |err| {
             self.setNotice("{s} {s} failed: {s}", .{ operation.verb(), target.name, lastOutputLine(printed.buffered(), @errorName(err)) });
@@ -245,6 +245,17 @@ const Monitor = struct {
         self.input = .{};
         self.pending_since = null;
         try self.refresh();
+    }
+
+    fn setCompletedNotice(self: *Monitor, operation: Operation, name: []const u8, output: []const u8) void {
+        var notice: std.Io.Writer = .fixed(&self.notice_buffer);
+        notice.print("{s} {s}", .{ operation.done(), name }) catch {};
+        var lines = std.mem.splitScalar(u8, output, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (std.mem.startsWith(u8, trimmed, "Warning:")) notice.print("; {s}", .{trimmed}) catch {};
+        }
+        self.notice = notice.buffered();
     }
 
     /// Text that does not fit in `notice_buffer` is cut off.
@@ -1377,4 +1388,67 @@ test "monitor.runOperation: reports an unfinished stop as incomplete" {
 
     try std.testing.expectEqual(runtime_mod.Outcome.incomplete, outcome);
     try std.testing.expectEqualStrings("api ... warning: may not have stopped completely", lastOutputLine(output.writer.buffered(), ""));
+}
+
+test "monitor: completed start keeps log failure and readiness warnings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "blocked", .data = "not a directory" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+    var recorder = proc_runner.Recorder.init(gpa);
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("1|0|123|serve\n", "", .{ .exited = 0 });
+    var runtime = try testRuntime(gpa, &recorder,
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve"}]}]}
+    );
+    runtime.runner_impl.io = std.testing.io;
+    runtime.service_log_dir = try std.fs.path.join(gpa, &.{ root, "blocked", "logs" });
+    var output: std.Io.Writer.Allocating = .init(gpa);
+
+    const outcome = try runOperation(runtime, .start, .{ .name = "api", .kind = .service }, &output.writer);
+    var monitor: Monitor = undefined;
+    monitor.setCompletedNotice(.start, "api", output.writer.buffered());
+
+    try std.testing.expectEqual(runtime_mod.Outcome.done, outcome);
+    try std.testing.expect(std.mem.indexOf(u8, monitor.notice.?, "started api") != null);
+    try std.testing.expect(std.mem.indexOf(u8, monitor.notice.?, "has no port") != null);
+    try std.testing.expect(std.mem.indexOf(u8, monitor.notice.?, "output is not saved") != null);
+}
+
+test "monitor: completed stop keeps the warning that file watch may restart it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "blocked", .data = "not a directory" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+    var recorder = proc_runner.Recorder.init(gpa);
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|serve\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|sh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    var runtime = try testRuntime(gpa, &recorder,
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve"}]}]}
+    );
+    runtime.stop_marks = .{
+        .io = std.testing.io,
+        .dir = try std.fs.path.join(gpa, &.{ root, "blocked", "marks" }),
+    };
+    var output: std.Io.Writer.Allocating = .init(gpa);
+
+    const outcome = try runOperation(runtime, .stop, .{ .name = "api", .kind = .service }, &output.writer);
+    var monitor: Monitor = undefined;
+    monitor.setCompletedNotice(.stop, "api", output.writer.buffered());
+
+    try std.testing.expectEqual(runtime_mod.Outcome.done, outcome);
+    try std.testing.expect(std.mem.indexOf(u8, monitor.notice.?, "stopped api") != null);
+    try std.testing.expect(std.mem.indexOf(u8, monitor.notice.?, "file watch may restart it") != null);
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }
