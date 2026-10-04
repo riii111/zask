@@ -92,16 +92,21 @@ fn collectConfigTargets(kind: ArgKind, cfg: config.Config, candidates: *Candidat
         .start_target, .restart_target => {
             if (cfg.dockerEnabled()) try candidates.add("docker");
             const groups = try cfg.groupNames(candidates.arena.allocator());
-            for (groups) |group| try candidates.add(group);
-            try collectServices(cfg, candidates);
+            for (groups) |group| try addTarget(group, candidates);
+            for (try cfg.services()) |service| try addTarget(try config.Config.serviceName(service), candidates);
         },
-        .service => try collectServices(cfg, candidates),
+        .service => {
+            for (try cfg.services()) |service| try candidates.add(try config.Config.serviceName(service));
+        },
         .none, .init_options => {},
     }
 }
 
-fn collectServices(cfg: config.Config, candidates: *Candidates) !void {
-    for (try cfg.services()) |service| try candidates.add(try config.Config.serviceName(service));
+/// start / stop / restart `Options.parse` reject `--` targets other than
+/// `--all`, so an alias spelled like an option is never a usable target.
+fn addTarget(name: []const u8, candidates: *Candidates) !void {
+    if (std.mem.startsWith(u8, name, "--")) return;
+    try candidates.add(name);
 }
 
 fn containsArg(args: []const []const u8, needle: []const u8) bool {
@@ -162,6 +167,23 @@ test "complete.collectArguments: offers config targets per command" {
     for (cases) |case| {
         try std.testing.expectEqualStrings(case.expected, try testCollect(gpa, case.kind, &.{}, cfg, ""));
     }
+}
+
+test "complete.collectArguments: skips option-like aliases as targets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","command":"serve"}]}],
+        \\  "group_aliases": {"--bad":["api"]}
+        \\}
+    ;
+    const cfg = try config.Config.parse(gpa, json, "/home/me");
+
+    try std.testing.expectEqualStrings("--all\n", try testCollect(gpa, .start_target, &.{}, cfg, "--"));
+    try std.testing.expectEqualStrings("", try testCollect(gpa, .restart_target, &.{}, cfg, "--"));
 }
 
 test "complete.collectArguments: filters by typed prefix" {

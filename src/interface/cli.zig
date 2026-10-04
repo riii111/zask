@@ -209,13 +209,11 @@ fn runCompletion(context: CommandContext, words: []const []const u8, writer: *st
     switch (completionPosition(quiet, typed)) {
         .none => {},
         .command => |scope| {
-            for (command_specs) |spec| {
-                if (!spec.show_in_help or (spec.global and scope == .after_selection)) continue;
-                for (spec.names) |name| try candidates.add(name);
-            }
+            try addCommandCandidates(&candidates);
             if (scope == .top_level) try candidates.add("--config");
         },
         .argument => |argument| {
+            if (argument.or_project_command) try addCommandCandidates(&candidates);
             const cfg = if (argument.kind.needsConfig())
                 cli_context.loadConfig(quiet, argument.parsed) catch |err| switch (err) {
                     error.OutOfMemory => return err,
@@ -232,7 +230,13 @@ fn runCompletion(context: CommandContext, words: []const []const u8, writer: *st
 const CompletionPosition = union(enum) {
     none,
     command: enum { top_level, after_selection },
-    argument: struct { parsed: ParsedArgs, kind: complete.ArgKind },
+    argument: struct {
+        parsed: ParsedArgs,
+        kind: complete.ArgKind,
+        /// The single typed word is also an existing named config, so the next
+        /// word may instead be a command (`zask <project> <command>`).
+        or_project_command: bool = false,
+    },
 };
 
 /// Mirrors `parseArgs` on the words before the cursor so completion uses the
@@ -248,7 +252,19 @@ fn completionPosition(context: CommandContext, typed: []const []const u8) Comple
         else => return .none,
     };
     const command = parseCommand(parsed.command, parsed.config_source == .explicit) orelse return .none;
-    return .{ .argument = .{ .parsed = parsed, .kind = commandSpec(command).completion } };
+    return .{ .argument = .{
+        .parsed = parsed,
+        .kind = commandSpec(command).completion,
+        .or_project_command = typed.len == 1 and parsed.project == null and !isGlobalCommand(typed[0]) and
+            (namedProjectExists(context, typed[0]) catch false),
+    } };
+}
+
+fn addCommandCandidates(candidates: *complete.Candidates) !void {
+    for (command_specs) |spec| {
+        if (!spec.show_in_help) continue;
+        for (spec.names) |name| try candidates.add(name);
+    }
 }
 
 fn commandSpec(command: Command) CommandSpec {
@@ -345,8 +361,12 @@ fn parseArgs(context: CommandContext, args: []const []const u8) !ParsedArgs {
 fn shouldUseNamedProject(context: CommandContext, args: []const []const u8) !bool {
     if (args.len < 2) return false;
     if (parseCommand(args[1], false) == null) return false;
+    return namedProjectExists(context, args[0]);
+}
+
+fn namedProjectExists(context: CommandContext, project: []const u8) !bool {
     const io = context.io orelse return false;
-    const path = try cli_context.projectConfigPath(context.gpa, context.environ, args[0]);
+    const path = try cli_context.projectConfigPath(context.gpa, context.environ, project);
     defer context.gpa.free(path);
     std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
@@ -620,11 +640,31 @@ test "cli.completion: lists public commands and config option at top level" {
 test "cli.completion: lists project commands after config selection" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const expected = "open\nclose\nre\nattach\nstart\nstop\nrestart\nlist\nstatus\nlogs\n";
+    const expected = "open\nclose\nre\nattach\nstart\nstop\nrestart\nlist\nstatus\nlogs\ninit\nversion\nhelp\n--help\n-h\n";
 
     try std.testing.expectEqualStrings(expected, try testComplete(arena.allocator(), "zask", &.{ "--config", "testdata/synthetic.json", "" }));
     try std.testing.expectEqualStrings(expected, try testComplete(arena.allocator(), "zask", &.{ "demo", "" }));
     try std.testing.expectEqualStrings("", try testComplete(arena.allocator(), "zask", &.{ "--config", "" }));
+}
+
+test "cli.completion: offers commands after named config sharing a command name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "xdg/zask/logs");
+    try tmp.dir.writeFile(io, .{ .sub_path = "xdg/zask/logs/config.json", .data = "{}" });
+    const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    var environ = env.Map.init(gpa);
+    try environ.put("XDG_CONFIG_HOME", try std.fs.path.join(gpa, &.{ base, "xdg" }));
+    var out: std.Io.Writer.Allocating = .init(gpa);
+
+    try runWithArgs(.{ .gpa = gpa, .io = io, .environ = &environ }, &.{ completion_command, "logs", "li" }, &out.writer);
+
+    try std.testing.expectEqualStrings("list\n", out.written());
 }
 
 test "cli.completion: offers targets from explicit config" {
