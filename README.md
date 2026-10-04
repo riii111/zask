@@ -135,7 +135,10 @@ zask loads the config.
 that generated it:
 `https://raw.githubusercontent.com/riii111/zask/vX.Y.Z/schema/zask.schema.json`.
 After upgrading zask, change `vX.Y.Z` to match `zask version` so editors check
-against the keys that version accepts. Configs without `$schema` keep working.
+against the keys that version accepts. A build from an unreleased commit still
+refers to the last release tag; point `$schema` at that checkout's
+`schema/zask.schema.json` when the keys differ. Configs without `$schema` keep
+working.
 
 ## Requirements
 

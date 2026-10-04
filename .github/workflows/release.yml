@@ -53,6 +53,8 @@ jobs:
           mkdir smoke
           tar -xzf "zask-${{ matrix.target }}.tar.gz" -C smoke
           test "$(smoke/zask version)" = "zask 0.1.3"
+      # Blocks publishing when the tag does not serve the schema that this
+      # binary's `zask init` references (e.g. build.zig.zon not bumped).
       - name: Smoke schema reference
         run: |
           mkdir -p smoke/project smoke/xdg
