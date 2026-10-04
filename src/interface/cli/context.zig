@@ -101,18 +101,15 @@ pub fn loadConfig(context: CommandContext, parsed: ParsedArgs) !config.Config {
     const io = context.io orelse return error.MissingIo;
     var resolved = try resolveConfigPath(context.gpa, io, context, parsed);
     defer resolved.deinitExpectedProjectName(context.gpa);
-    return loadResolvedConfig(context, io, resolved);
+    return (try loadConfigFile(context, resolved)).cfg;
 }
 
 fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
     const io = context.io orelse return error.MissingIo;
     var resolved = try resolveConfigPath(context.gpa, io, context, parsed);
     defer resolved.deinitExpectedProjectName(context.gpa);
-    if (context.error_context) |err_ctx| {
-        err_ctx.config_path = resolved.path;
-        err_ctx.config_source = resolved.source;
-    }
-    const cfg = try loadResolvedConfig(context, io, resolved);
+    recordSelection(context, resolved);
+    const cfg = (try loadConfigFile(context, resolved)).cfg;
     switch (resolved.source) {
         // Named configs written by `zask init` reference the shared schema copy.
         // Refreshing it here keeps editors in step with an upgraded zask; a
@@ -134,16 +131,6 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
         .docker_impl = docker_client.Compose{ .gpa = context.gpa, .runner = runner, .dir = try cfg.dockerDir(context.gpa), .file = cfg.dockerComposeFile() },
         .service_log_dir = try service_log.directory(context.gpa, context.environ, try cfg.projectName()),
     };
-}
-
-fn loadResolvedConfig(context: CommandContext, io: std.Io, resolved: ResolvedConfigPath) !config.Config {
-    const home = try paths.home(context.environ);
-    const cfg = if (context.diagnostics) |diags|
-        try config.loadPathWithDiagnostics(context.gpa, io, resolved.path, home, diags)
-    else
-        try config.loadPath(context.gpa, io, resolved.path, home);
-    try validateSelectedProjectName(context, resolved, cfg);
-    return cfg;
 }
 
 fn recordSelection(context: CommandContext, resolved: ResolvedConfigPath) void {
