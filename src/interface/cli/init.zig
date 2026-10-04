@@ -40,7 +40,7 @@ pub fn run(ctx: *Context, opts: Options) !void {
     const project = opts.project orelse std.fs.path.basename(cwd);
     try validate.identifier(project);
 
-    const config_path = try cli_context.projectConfigPath(ctx.base.gpa, ctx.base.environ, project);
+    const config_path = try cli_context.projectConfigPath(ctx.base.gpa, io, ctx.base.environ, project, ctx.base.error_context);
     defer ctx.base.gpa.free(config_path);
     if (!opts.force and paths.exists(io, config_path)) {
         try ctx.writer.print("Config already exists: {s}\n", .{config_path});
@@ -556,6 +556,30 @@ test "init.run: rejects existing config without force" {
     try run(&ctx, try Options.parse(&.{"demo"}));
     try std.testing.expectError(error.ConfigAlreadyExists, run(&ctx, try Options.parse(&.{"demo"})));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Re-run with --force") != null);
+}
+
+test "init.run: rejects existing config.jsonc without creating config.json" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    const config_home = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}", .{&tmp.sub_path});
+    try environ.put("HOME", "/home/me");
+    try environ.put("XDG_CONFIG_HOME", config_home);
+    try tmp.dir.createDirPath(io, "zask/demo");
+    try tmp.dir.writeFile(io, .{ .sub_path = "zask/demo/config.jsonc", .data = "// keep\n{}" });
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var ctx = testContext(arena.allocator(), io, &environ, &writer);
+
+    try std.testing.expectError(error.ConfigAlreadyExists, run(&ctx, try Options.parse(&.{"demo"})));
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "config.jsonc") != null);
+    try std.testing.expect(!paths.exists(io, try std.fs.path.join(arena.allocator(), &.{ config_home, "zask", "demo", "config.json" })));
 }
 
 test "init.run: overwrites existing config with force" {

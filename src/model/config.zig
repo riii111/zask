@@ -2,6 +2,7 @@ const std = @import("std");
 const config_value = @import("config_value.zig");
 const validate = @import("validate.zig");
 const diagnostics = @import("diagnostics.zig");
+const jsonc = @import("jsonc.zig");
 const watch = @import("watch.zig");
 
 const Value = std.json.Value;
@@ -102,9 +103,18 @@ pub const Config = struct {
     // Like parse, but records validation problems into the caller's collector so
     // the CLI can render them. On error.InvalidConfig, diags holds every issue.
     pub fn parseWithDiagnostics(gpa: std.mem.Allocator, json: []const u8, home: []const u8, diags: *diagnostics.Diagnostics) !Config {
-        const value = parseJsonBytes(gpa, json) catch |err| switch (err) {
-            error.OutOfMemory => return err,
-            else => return error.InvalidConfigSyntax,
+        return parseFormatWithDiagnostics(gpa, json, .json, home, diags);
+    }
+
+    // On error.InvalidConfigSyntax, diags holds one entry with the position.
+    pub fn parseFormatWithDiagnostics(gpa: std.mem.Allocator, bytes: []const u8, format: jsonc.Format, home: []const u8, diags: *diagnostics.Diagnostics) !Config {
+        var syntax_error: jsonc.SyntaxError = undefined;
+        const value = jsonc.parse(gpa, bytes, format, &syntax_error) catch |err| switch (err) {
+            error.InvalidSyntax => {
+                try diags.addFmt("", "line {d}, column {d}: {s}", .{ syntax_error.line, syntax_error.column, syntax_error.message });
+                return error.InvalidConfigSyntax;
+            },
+            else => return err,
         };
         try validateAll(gpa, value, diags);
         if (!diags.isEmpty()) return error.InvalidConfig;
@@ -467,7 +477,7 @@ pub fn loadPathWithDiagnostics(gpa: std.mem.Allocator, io: std.Io, path: []const
         error.StreamTooLong => return error.ConfigTooLarge,
         else => return err,
     };
-    return Config.parseWithDiagnostics(gpa, bytes, home, diags);
+    return Config.parseFormatWithDiagnostics(gpa, bytes, jsonc.Format.fromPath(path), home, diags);
 }
 
 pub fn parseJsonBytes(gpa: std.mem.Allocator, bytes: []const u8) !Value {
@@ -1879,6 +1889,47 @@ test "config.parse: parses receipt lab showcase fixture" {
     try std.testing.expectEqualStrings("testdata/showcase/receipt-lab/infra", try cfg.dockerDir(arena.allocator()));
     try std.testing.expectEqualStrings("compose.yaml", cfg.dockerComposeFile());
     try std.testing.expectEqual(@as(i64, 5), cfg.dockerWaitTimeout());
+}
+
+test "config.loadPath: jsonc fixture normalizes like the json fixture" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const json_cfg = try loadPath(arena.allocator(), threaded.io(), "testdata/synthetic.json", "/home/me");
+
+    const jsonc_cfg = try loadPath(arena.allocator(), threaded.io(), "testdata/synthetic.jsonc", "/home/me");
+
+    try std.testing.expectEqualStrings(
+        try std.json.Stringify.valueAlloc(arena.allocator(), json_cfg.value, .{}),
+        try std.json.Stringify.valueAlloc(arena.allocator(), jsonc_cfg.value, .{}),
+    );
+}
+
+test "config.loadPath: reports syntax position by file format" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cases = [_]struct { name: []const u8, data: []const u8, message: []const u8 }{
+        .{ .name = "comment.json", .data = "{\n  // note\n}", .message = "line 2, column 3: comments are allowed only in .jsonc config files" },
+        .{ .name = "trailing.jsonc", .data = "{\n  // note\n  \"groups\": [],\n}", .message = "line 3, column 15: trailing comma is not allowed" },
+    };
+
+    for (cases) |case| {
+        try tmp.dir.writeFile(io, .{ .sub_path = case.name, .data = case.data });
+        const path = try tmp.dir.realPathFileAlloc(io, case.name, arena.allocator());
+        var diags = diagnostics.Diagnostics.init(arena.allocator());
+
+        try std.testing.expectError(error.InvalidConfigSyntax, loadPathWithDiagnostics(arena.allocator(), io, path, "/home/me", &diags));
+
+        try std.testing.expectEqual(@as(usize, 1), diags.slice().len);
+        try std.testing.expectEqualStrings("", diags.slice()[0].path);
+        try std.testing.expectEqualStrings(case.message, diags.slice()[0].message);
+    }
 }
 
 test "config.serviceWatch: applies defaults and resolves paths from the service dir" {

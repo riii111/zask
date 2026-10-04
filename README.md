@@ -62,6 +62,15 @@ zask close
 Run `zask help` for the full command list.
 Commands exit with `1` for runtime or environment failures, and `2` for usage or config errors.
 
+zask reads `zask.json`, `.zask.json`, `zask.jsonc`, or `.zask.jsonc` from the
+current directory. Named configs live at
+`${XDG_CONFIG_HOME:-~/.config}/zask/<project>/config.json` or `config.jsonc`. If more than one candidate exists in the same place, zask
+lists them and stops; pass `--config <file>` to choose one.
+
+`.jsonc` files accept `//` and `/* */` comments. `.json` files stay strict JSON,
+so a comment there is reported as an error. Trailing commas are rejected in
+both. Syntax errors report the line and column.
+
 Named configs are stored under the same name as `project.name`. For example,
 `zask demo open` loads the `demo` config, and that config must set
 `"project": {"name": "demo", ...}`.
@@ -126,8 +135,8 @@ file relative to that service directory:
 
 [`schema/zask.schema.json`](schema/zask.schema.json) describes the config for
 editors that support JSON Schema. Point a top-level `"$schema"` key at it to get
-completion, descriptions, and diagnostics for keys, types, and allowed values;
-zask ignores the value. References between groups, services, and aliases,
+completion, descriptions, and diagnostics for keys, types, and allowed values,
+in `.json` and `.jsonc` files alike; zask ignores the value. References between groups, services, and aliases,
 duplicate names, and paths that leave the project root are checked only when
 zask loads the config.
 

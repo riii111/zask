@@ -1,0 +1,82 @@
+// Same config as synthetic.json, written as JSONC.
+{
+  "$schema": "../schema/zask.schema.json",
+  "project": {
+    "name": "demo",
+    "root": "/tmp/zask-demo"
+  },
+  /* Compose starts first so the API can reach its database. */
+  "docker": {
+    "compose": "infra/compose.yaml",
+    "wait_timeout_seconds": 5
+  },
+  "start_profiles": {
+    "core": {
+      "profile": "core",
+      "label": "core services",
+      "group_overrides": {
+        "backend": "core-backend"
+      }
+    }
+  },
+  "startup_order": [
+    {
+      "name": "Docker",
+      "docker": true
+    },
+    {
+      "name": "Backend",
+      "group": "backend",
+      "wait_ports": [
+        18080 // the api port
+      ]
+    },
+    {
+      "name": "Frontend",
+      "group": "frontend"
+    }
+  ],
+  "group_aliases": {
+    "backend": [
+      "api",
+      "worker"
+    ],
+    "core-backend": [
+      "api"
+    ],
+    "frontend": [
+      "web"
+    ]
+  },
+  "groups": [
+    {
+      "name": "backend",
+      "services": [
+        {
+          "name": "api",
+          "dir": "backend",
+          "command": "serve",
+          "port": 18080
+        },
+        // Usually stopped; start it with `zask start worker`.
+        {
+          "name": "worker",
+          "dir": "backend",
+          "command": "work"
+        }
+      ]
+    },
+    {
+      "name": "frontend",
+      "services": [
+        {
+          "name": "web",
+          "dir": "frontend",
+          "runtime": "npm",
+          "command": "run dev",
+          "port": 15173
+        }
+      ]
+    }
+  ]
+}
