@@ -248,14 +248,23 @@ const MonitorStatus = enum {
     }
 };
 
+const RowKind = enum { service, docker };
+// ':' is excluded from service identifiers, so this key cannot collide.
+const docker_selection_key = ":docker";
+
 const MonitorRow = struct {
     name: []const u8,
+    kind: RowKind = .service,
     status: MonitorStatus,
     exit_code: []const u8,
     command: []const u8,
     port: []const u8,
     /// Last non-empty pane line; only captured for rows that are not live.
     log: []const u8 = "",
+
+    fn selectionKey(self: MonitorRow) []const u8 {
+        return if (self.kind == .docker) docker_selection_key else self.name;
+    }
 };
 
 const Snapshot = struct {
@@ -294,7 +303,7 @@ fn visibleNames(gpa: std.mem.Allocator, snapshot: Snapshot) ![]const []const u8 
     var names: std.ArrayList([]const u8) = .empty;
     errdefer names.deinit(gpa);
     for (snapshot.rows) |row| {
-        if (isVisible(row, snapshot.mode)) try names.append(gpa, row.name);
+        if (isVisible(row, snapshot.mode)) try names.append(gpa, row.selectionKey());
     }
     return names.toOwnedSlice(gpa);
 }
@@ -329,7 +338,7 @@ fn writeFrame(gpa: std.mem.Allocator, writer: *std.Io.Writer, cfg: config.Config
     for (snapshot.rows) |row| {
         if (!isVisible(row, snapshot.mode)) continue;
         if (view.selected) |name| {
-            if (std.mem.eql(u8, name, row.name)) selected_index = visible.items.len;
+            if (std.mem.eql(u8, name, row.selectionKey())) selected_index = visible.items.len;
         }
         try visible.append(gpa, row);
     }
@@ -433,7 +442,7 @@ fn serviceMonitorRow(ctx: RenderContext, service: std.json.Value) !MonitorRow {
 fn dockerMonitorRow(ctx: RenderContext) !MonitorRow {
     const observation = observer(ctx).observeDocker();
     defer observation.compose.deinit(ctx.gpa);
-    return .{ .name = "docker", .status = dockerMonitorStatus(observation), .exit_code = observation.pane.exit_code, .command = observation.pane.command, .port = "compose" };
+    return .{ .name = "docker", .kind = .docker, .status = dockerMonitorStatus(observation), .exit_code = observation.pane.exit_code, .command = observation.pane.command, .port = "compose" };
 }
 
 fn observer(ctx: RenderContext) service_observation.Observer {
@@ -858,6 +867,36 @@ test "monitor.render: highlights only the selected row and shows the key guide" 
     try std.testing.expect(std.mem.startsWith(u8, selected, ansi.bold ++ ">"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, ansi.reverse));
     try std.testing.expect(std.mem.indexOf(u8, body, key_guide) != null);
+}
+
+test "monitor.selection: distinguishes Docker from a service named docker" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var compose = testRow("docker", .live);
+    compose.kind = .docker;
+    compose.port = "compose";
+    const rows = [_]MonitorRow{ compose, testRow("docker", .dead) };
+    const snapshot: Snapshot = .{ .rows = &rows };
+    const names = try visibleNames(gpa, snapshot);
+    var selection: Selection = .{};
+    defer selection.deinit(gpa);
+
+    try selection.track(gpa, names);
+    const first = try testRender(gpa, snapshot, .{ .selected = selection.name });
+    try std.testing.expect(std.mem.indexOf(u8, testSelectedLine(first).?, "compose") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, first, ansi.reverse));
+
+    try selection.move(gpa, names, .down);
+    try std.testing.expectEqual(@as(?usize, 1), selection.position(names));
+    const second = try testRender(gpa, snapshot, .{ .selected = selection.name });
+    try std.testing.expect(std.mem.indexOf(u8, testSelectedLine(second).?, "no check") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, second, ansi.reverse));
+
+    try selection.track(gpa, try visibleNames(gpa, .{ .rows = &rows, .mode = .bad }));
+    try std.testing.expectEqualStrings("docker", selection.name.?);
+    try selection.move(gpa, names, .up);
+    try std.testing.expectEqualStrings(docker_selection_key, selection.name.?);
 }
 
 test "monitor.render: hidden selection highlights no other row" {

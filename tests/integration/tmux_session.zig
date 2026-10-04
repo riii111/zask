@@ -111,13 +111,24 @@ test "tmux_setup.bindControlKeys: refreshes stale list binding in existing sessi
 
     try zask.tmux_setup.bindControlKeys(arena.allocator(), client);
 
-    const binding = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "list-keys", "-T", "prefix", "w" });
-    defer std.testing.allocator.free(binding.stdout);
-    defer std.testing.allocator.free(binding.stderr);
-    try std.testing.expect(std.mem.indexOf(u8, binding.stdout, "preview-list") != null);
-    try std.testing.expect(std.mem.indexOf(u8, binding.stdout, "#{pane_id}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, binding.stdout, "#{client_width}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, binding.stdout, "#{client_height}") != null);
+    const bindings = try run(std.testing.allocator, io, &.{ build_options.tmux_path, "list-keys", "-T", "prefix" });
+    defer std.testing.allocator.free(bindings.stdout);
+    defer std.testing.allocator.free(bindings.stderr);
+    const binding = found: {
+        var lines = std.mem.splitScalar(u8, bindings.stdout, '\n');
+        while (lines.next()) |line| {
+            var fields = std.mem.tokenizeAny(u8, line, " \t");
+            const expected = [_][]const u8{ "bind-key", "-T", "prefix", "w" };
+            for (expected) |field| {
+                if (!std.mem.eql(u8, fields.next() orelse "", field)) break;
+            } else break :found line;
+        }
+        return error.MissingListBinding;
+    };
+    try std.testing.expect(std.mem.indexOf(u8, binding, "preview-list") != null);
+    try std.testing.expect(std.mem.indexOf(u8, binding, "#{pane_id}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, binding, "#{client_width}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, binding, "#{client_height}") != null);
 }
 
 test "cli.start: recreates missing service window" {
