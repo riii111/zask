@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const config = @import("../../model/config.zig");
 const env = @import("../../platform/env.zig");
 const init_inference = @import("../../workflow/init_inference.zig");
@@ -7,6 +8,10 @@ const validate = @import("../../model/validate.zig");
 const cli_context = @import("context.zig");
 
 const Context = cli_context.Context;
+
+/// Pinned to this binary's release tag so editors check the config against the
+/// spec this zask accepts. The release workflow verifies the URL resolves.
+pub const schema_url = "https://raw.githubusercontent.com/riii111/zask/v" ++ build_options.version ++ "/schema/zask.schema.json";
 
 pub const Options = struct {
     project: ?[]const u8 = null,
@@ -142,6 +147,8 @@ fn renderConfig(gpa: std.mem.Allocator, project: []const u8, detected: DetectedO
     var json: std.json.Stringify = .{ .writer = writer, .options = .{ .whitespace = .indent_2 } };
 
     try json.beginObject();
+    try json.objectField(config.keys.schema);
+    try json.write(schema_url);
     try json.objectField(config.keys.project);
     try json.beginObject();
     try json.objectField(config.keys.name);
@@ -226,6 +233,8 @@ fn writeReport(writer: *std.Io.Writer, project: []const u8, detected: DetectedOp
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
+
+const test_config_head = "{\n  \"$schema\": \"" ++ schema_url ++ "\",\n";
 
 fn testContext(gpa: std.mem.Allocator, io: std.Io, environ: *const env.Map, writer: *std.Io.Writer) Context {
     return .{
@@ -327,8 +336,7 @@ test "init.config: renders minimal config verbatim" {
     const opts = try Options.parse(&.{"demo"});
     const json = try renderConfig(std.testing.allocator, "demo", .{ .opts = opts });
     defer std.testing.allocator.free(json);
-    try std.testing.expectEqualStrings(
-        \\{
+    try std.testing.expectEqualStrings(test_config_head ++
         \\  "project": {
         \\    "name": "demo",
         \\    "root": "."
@@ -344,8 +352,7 @@ test "init.config: renders service and docker config verbatim" {
     defer detected.deinit(std.testing.allocator);
     const json = try renderConfig(std.testing.allocator, "demo", detected);
     defer std.testing.allocator.free(json);
-    try std.testing.expectEqualStrings(
-        \\{
+    try std.testing.expectEqualStrings(test_config_head ++
         \\  "project": {
         \\    "name": "demo",
         \\    "root": "."
@@ -384,8 +391,7 @@ test "init.config: renders service-only config verbatim" {
     defer detected.deinit(std.testing.allocator);
     const json = try renderConfig(std.testing.allocator, "demo", detected);
     defer std.testing.allocator.free(json);
-    try std.testing.expectEqualStrings(
-        \\{
+    try std.testing.expectEqualStrings(test_config_head ++
         \\  "project": {
         \\    "name": "demo",
         \\    "root": "."
@@ -426,6 +432,14 @@ test "init.config: renders service and docker config" {
     try std.testing.expectEqual(@as(usize, 2), cfg.phases().len);
 }
 
+test "init.schemaUrl: resolves to the tracked schema at this version's tag" {
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const tag_prefix = "https://raw.githubusercontent.com/riii111/zask/v" ++ build_options.version ++ "/";
+
+    try std.testing.expect(std.mem.startsWith(u8, schema_url, tag_prefix));
+    try std.Io.Dir.cwd().access(threaded.io(), schema_url[tag_prefix.len..], .{});
+}
+
 test "init.detect: infers compose file" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -458,8 +472,7 @@ test "init.detect: renders detected default compose file" {
     defer std.testing.allocator.free(json);
 
     try std.testing.expectEqualStrings("docker-compose.yml", detected.compose_file.?);
-    try std.testing.expectEqualStrings(
-        \\{
+    try std.testing.expectEqualStrings(test_config_head ++
         \\  "project": {
         \\    "name": "demo",
         \\    "root": "."

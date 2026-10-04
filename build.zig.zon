@@ -10,6 +10,7 @@
         "install.sh",
         "build.zig",
         "build.zig.zon",
+        "schema",
         "src",
     },
 }

@@ -131,6 +131,12 @@ zask ignores the value. References between groups, services, and aliases,
 duplicate names, and paths that leave the project root are checked only when
 zask loads the config.
 
+`zask init` writes the reference for you, pinned to the release tag of the zask
+that generated it:
+`https://raw.githubusercontent.com/riii111/zask/vX.Y.Z/schema/zask.schema.json`.
+After upgrading zask, change `vX.Y.Z` to match `zask version` so editors check
+against the keys that version accepts. Configs without `$schema` keep working.
+
 ## Requirements
 
 - tmux
