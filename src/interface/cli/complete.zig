@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("../../model/config.zig");
+const completion = @import("completion.zig");
 
 /// Argument shape each command accepts. Completion offers only words the
 /// command's own `Options.parse` and runtime target resolution accept.
@@ -10,12 +11,13 @@ pub const ArgKind = enum {
     restart_target,
     service,
     init_options,
+    shell,
 
     /// Whether candidates for this argument come from the selected config.
     pub fn needsConfig(self: ArgKind) bool {
         return switch (self) {
             .open_profile, .start_target, .restart_target, .service => true,
-            .none, .init_options => false,
+            .none, .init_options, .shell => false,
         };
     }
 };
@@ -63,6 +65,7 @@ pub fn collectArguments(kind: ArgKind, typed_args: []const []const u8, cfg: ?con
     switch (kind) {
         .none => {},
         .init_options => try collectInitOptions(typed_args, candidates),
+        .shell => if (typed_args.len == 0) for (std.meta.fieldNames(completion.Shell)) |shell| try candidates.add(shell),
         .open_profile, .start_target, .restart_target, .service => {
             if (typed_args.len != 0) return;
             if (kind == .start_target) try candidates.add("--all");
@@ -98,7 +101,7 @@ fn collectConfigTargets(kind: ArgKind, cfg: config.Config, candidates: *Candidat
         .service => {
             for (try cfg.services()) |service| try candidates.add(try config.Config.serviceName(service));
         },
-        .none, .init_options => {},
+        .none, .init_options, .shell => {},
     }
 }
 
