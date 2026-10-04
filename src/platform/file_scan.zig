@@ -120,8 +120,7 @@ const Scanner = struct {
         };
         self.root_path = root.path;
         // A path named in `paths` skips `include` but still honors excludes.
-        const name = std.mem.trimEnd(u8, root.label, "/");
-        if (self.spec.excludes(name)) return;
+        if (rootExcluded(self.spec, root.label)) return;
         if (stat.kind != .directory) return self.append(try self.arena.dupe(u8, root.label), stat);
 
         var dir = Dir.cwd().openDir(self.io, root.path, .{ .iterate = true }) catch |err| switch (err) {
@@ -194,6 +193,15 @@ const Scanner = struct {
         return error.ScanFailed;
     }
 };
+
+// `.` and `..` name the starting point rather than a file, so patterns such as
+// `.*` must not exclude the whole tree.
+fn rootExcluded(spec: watch.Spec, label: []const u8) bool {
+    const name = std.mem.trimEnd(u8, label, "/");
+    const base = std.fs.path.basenamePosix(name);
+    if (base.len == 0 or std.mem.eql(u8, base, ".") or std.mem.eql(u8, base, "..")) return false;
+    return spec.excludes(name);
+}
 
 fn reasonFor(err: anyerror) FailureReason {
     return switch (err) {
@@ -365,6 +373,18 @@ test "file_scan.scan: fails when watched files exceed the limit" {
 
     try std.testing.expectEqual(FailureReason.too_many_files, result.failed.reason);
     try std.testing.expectEqualStrings(tree.root, result.failed.path);
+}
+
+test "file_scan.scan: hidden-file excludes keep the default root" {
+    var tree = try TestTree.init();
+    defer tree.deinit();
+    try tree.write("main.rs", "");
+    try tree.write(".env", "");
+
+    var result = try tree.scanAll(testSpec(&.{}, &.{".*"}), .{ .missing_root = .fail });
+    defer result.ok.deinit();
+
+    try testExpectPaths(&.{"main.rs"}, result.ok);
 }
 
 test "file_scan.scan: applies excludes to paths named as roots" {
