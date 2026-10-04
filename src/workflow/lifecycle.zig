@@ -19,6 +19,11 @@ const zask_command = @import("zask_command.zig");
 /// can be respawned without re-observing them.
 pub const StartMode = enum { observe, prime };
 
+/// How a single-target stop or restart ended. `incomplete` follows a warning
+/// the workflow printed before returning normally, so the CLI still exits 0,
+/// but the target may not have reached the requested state.
+pub const Outcome = enum { done, incomplete };
+
 /// `failed` is split from `signaled` so `stop --all` can surface services it could
 /// not signal — they may still be running in the workspace it leaves up.
 const StopBroadcast = struct {
@@ -81,7 +86,7 @@ pub const Lifecycle = struct {
         // stop --all leaves the workspace up: wait for the signaled services and fail
         // loudly for any we could not signal, since they may still be running.
         try waits.waitForAllStopped(self, broadcast.signaled.items, writer);
-        try self.stopDocker(writer);
+        _ = try self.stopDocker(writer);
         if (broadcast.failed.items.len > 0) {
             for (broadcast.failed.items) |name|
                 try writeProgress(writer, "Warning: could not signal {s}; it may still be running\n", .{name});
@@ -97,7 +102,7 @@ pub const Lifecycle = struct {
         // the session and must confirm.
         var broadcast = try self.broadcastStopWithProgress(services, progress);
         broadcast.deinit(self.gpa);
-        try self.stopDockerWithProgress(progress);
+        _ = try self.stopDockerWithProgress(progress);
     }
 
     pub fn startTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
@@ -127,11 +132,17 @@ pub const Lifecycle = struct {
     }
 
     pub fn stopTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
-        if (std.mem.eql(u8, target, "docker")) return self.stopDocker(writer);
+        if (std.mem.eql(u8, target, "docker")) {
+            _ = try self.stopDocker(writer);
+            return;
+        }
         switch (self.tmux.observeSession()) {
             .active => {},
             .missing => {
-                if (std.mem.eql(u8, target, "--all")) return self.stopDocker(writer);
+                if (std.mem.eql(u8, target, "--all")) {
+                    _ = try self.stopDocker(writer);
+                    return;
+                }
                 return sessionNotRunning(writer);
             },
             .unavailable => return waits.reportTmuxUnavailable(writer),
@@ -139,27 +150,25 @@ pub const Lifecycle = struct {
         if (std.mem.eql(u8, target, "--all")) return self.stopAll(writer);
         if (self.cfg.resolveGroup(self.gpa, target)) |services| {
             defer self.gpa.free(services);
-            for (services) |svc| try self.stopService(svc, writer);
-        } else |_| try self.stopService(target, writer);
+            for (services) |svc| _ = try self.stopService(svc, writer);
+        } else |_| _ = try self.stopService(target, writer);
     }
 
     /// Stops exactly `service`, even when a group or alias shares its name.
-    pub fn stopServiceTarget(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
+    pub fn stopServiceTarget(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !Outcome {
         switch (self.tmux.observeSession()) {
             .active => {},
-            .missing => return sessionNotRunning(writer),
-            .unavailable => return waits.reportTmuxUnavailable(writer),
+            // Both report and return an error, so the stop below never runs.
+            .missing => try sessionNotRunning(writer),
+            .unavailable => try waits.reportTmuxUnavailable(writer),
         }
-        try self.stopService(service, writer);
+        return self.stopService(service, writer);
     }
 
     pub fn restartTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
         if (std.mem.eql(u8, target, "docker")) {
-            try self.ensureSessionActive(writer);
-            try self.stopDocker(writer);
-            var progress = progress_mod.Line.init(writer);
-            try self.ensureDockerStartedWithProgress(&progress);
-            return self.waitForDockerReadyWithProgress(&progress);
+            _ = try self.restartDockerTarget(writer);
+            return;
         }
         try self.ensureSessionActive(writer);
         if (self.cfg.resolveGroup(self.gpa, target)) |services| {
@@ -167,14 +176,29 @@ pub const Lifecycle = struct {
             try self.warnServicesWithoutPort(services, writer);
             var progress = progress_mod.Line.init(writer);
             try self.writeProjectEnvFileTipForServices(services, &progress);
-            for (services) |svc| try self.restartService(svc, writer);
-        } else |_| try self.restartNamedService(target, writer);
+            for (services) |svc| _ = try self.restartService(svc, writer);
+        } else |_| _ = try self.restartNamedService(target, writer);
     }
 
     /// Restarts exactly `service`, even when a group or alias shares its name.
-    pub fn restartServiceTarget(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
+    pub fn restartServiceTarget(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !Outcome {
         try self.ensureSessionActive(writer);
-        try self.restartNamedService(service, writer);
+        return self.restartNamedService(service, writer);
+    }
+
+    /// Same steps as `stop docker`.
+    pub fn stopDockerTarget(self: Lifecycle, writer: *std.Io.Writer) !Outcome {
+        return self.stopDocker(writer);
+    }
+
+    /// Same steps as `restart docker`.
+    pub fn restartDockerTarget(self: Lifecycle, writer: *std.Io.Writer) !Outcome {
+        try self.ensureSessionActive(writer);
+        const stopped = try self.stopDocker(writer);
+        var progress = progress_mod.Line.init(writer);
+        try self.ensureDockerStartedWithProgress(&progress);
+        try self.waitForDockerReadyWithProgress(&progress);
+        return stopped;
     }
 
     pub fn startService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer, mode: StartMode) !void {
@@ -186,13 +210,13 @@ pub const Lifecycle = struct {
         try self.ensureServiceRunning(service, progress, mode);
     }
 
-    pub fn stopDocker(self: Lifecycle, writer: *std.Io.Writer) !void {
+    pub fn stopDocker(self: Lifecycle, writer: *std.Io.Writer) !Outcome {
         var progress = progress_mod.Line.init(writer);
-        try self.stopDockerWithProgress(&progress);
+        return self.stopDockerWithProgress(&progress);
     }
 
-    pub fn stopDockerWithProgress(self: Lifecycle, progress: anytype) !void {
-        if (!self.cfg.dockerEnabled()) return;
+    pub fn stopDockerWithProgress(self: Lifecycle, progress: anytype) !Outcome {
+        if (!self.cfg.dockerEnabled()) return .done;
         try progress.step("Stopping Docker...\n", .{});
         try progress.command("docker compose down\n", .{});
         // Interrupt the pane's `compose up` so the window returns to a shell, but
@@ -204,11 +228,13 @@ pub const Lifecycle = struct {
         }
         self.docker.down() catch {
             try progress.warn("Warning: docker compose down failed\n", .{});
+            return .incomplete;
         };
+        return .done;
     }
 
-    fn stopService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
-        try self.ensureServiceStopped(service, writer);
+    fn stopService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !Outcome {
+        return self.ensureServiceStopped(service, writer);
     }
 
     fn startNamedService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
@@ -218,11 +244,11 @@ pub const Lifecycle = struct {
         try self.startService(service, writer, .observe);
     }
 
-    fn restartNamedService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
+    fn restartNamedService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !Outcome {
         try self.warnServiceWithoutPort(service, writer);
         var progress = progress_mod.Line.init(writer);
         try self.writeProjectEnvFileTipForServices(&.{service}, &progress);
-        try self.restartService(service, writer);
+        return self.restartService(service, writer);
     }
 
     /// A failed signal continues the loop (so the rest still get C-c) but is
@@ -300,9 +326,12 @@ pub const Lifecycle = struct {
         try writer.print("  {s}\n", .{command});
     }
 
-    fn restartService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
-        try self.stopService(service, writer);
+    /// A stop that did not finish leaves the pane busy, so the start that
+    /// follows finds it running and does not respawn it.
+    fn restartService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !Outcome {
+        const stopped = try self.stopService(service, writer);
         try self.startService(service, writer, .observe);
+        return stopped;
     }
 
     fn ensureSessionActive(self: Lifecycle, writer: *std.Io.Writer) !void {
@@ -464,7 +493,7 @@ pub const Lifecycle = struct {
         }
     }
 
-    fn ensureServiceStopped(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
+    fn ensureServiceStopped(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !Outcome {
         _ = try self.cfg.findService(service);
         const pane = self.tmux.observePane(service);
         defer pane.deinit(self.gpa);
@@ -472,7 +501,7 @@ pub const Lifecycle = struct {
             .send_stop => {},
             .no_op => {
                 try writeProgress(writer, "  {s} ... already stopped\n", .{service});
-                return;
+                return .done;
             },
             .tmux_unavailable => {
                 try writeProgress(writer, "Warning: tmux unavailable for {s}\n", .{service});
@@ -480,7 +509,7 @@ pub const Lifecycle = struct {
             },
         }
         try self.tmux.sendKeys(service, &.{"C-c"});
-        try waits.waitForStopped(self, service, writer);
+        return if (try waits.waitForStopped(self, service, writer)) .done else .incomplete;
     }
 
     fn ensureDockerStartedWithProgress(self: Lifecycle, progress: anytype) !void {
@@ -1115,7 +1144,7 @@ test "lifecycle.restartTarget: records a new start marker with the respawn" {
 
     const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
     const marker = respawn.argv[respawn.argv.len - 3 ..];
-    try proc_runner.expectCommandArgv(.{ .argv = marker, .cwd = null, .interactive = false }, &.{ "demo:=api", "@zask_started_at", "1700000500" });
+    try proc_runner.expectCommandArgv(.{ .argv = marker, .cwd = null, .interactive = false }, &.{ "=demo:=api", "@zask_started_at", "1700000500" });
     try proc_runner.expectCommandOrder(&recorder, "C-c", "respawn-pane");
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
@@ -1138,9 +1167,10 @@ test "lifecycle.restartServiceTarget: ignores a group with the same name" {
     var buffer: [512]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try lifecycle.restartServiceTarget("api", &writer);
+    const outcome = try lifecycle.restartServiceTarget("api", &writer);
 
-    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "demo:=api-worker") == null);
+    try std.testing.expectEqual(Outcome.done, outcome);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "=demo:=api-worker") == null);
     try proc_runner.expectCommandOrder(&recorder, "C-c", "respawn-pane");
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
@@ -1161,9 +1191,10 @@ test "lifecycle.stopServiceTarget: ignores a group with the same name" {
     var buffer: [512]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try lifecycle.stopServiceTarget("api", &writer);
+    const outcome = try lifecycle.stopServiceTarget("api", &writer);
 
-    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "demo:=api-worker") == null);
+    try std.testing.expectEqual(Outcome.done, outcome);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "=demo:=api-worker") == null);
     try proc_runner.expectCommandContaining(&recorder, "C-c");
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
@@ -1184,7 +1215,7 @@ test "lifecycle.startServiceTarget: ignores a group with the same name" {
 
     try lifecycle.startServiceTarget("api", &writer);
 
-    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "demo:=api-worker") == null);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "=demo:=api-worker") == null);
     try proc_runner.expectCommandContaining(&recorder, "respawn-pane");
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
@@ -1218,7 +1249,7 @@ test "lifecycle.startTarget: docker start records a start marker with the respaw
 
     const respawn = proc_runner.findCommandContaining(&recorder, "docker compose") orelse return error.CommandNotFound;
     const marker = respawn.argv[respawn.argv.len - 3 ..];
-    try proc_runner.expectCommandArgv(.{ .argv = marker, .cwd = null, .interactive = false }, &.{ "demo:=docker", "@zask_started_at", "1700000500" });
+    try proc_runner.expectCommandArgv(.{ .argv = marker, .cwd = null, .interactive = false }, &.{ "=demo:=docker", "@zask_started_at", "1700000500" });
 }
 
 test "lifecycle.stopAll: signals every running service before polling once" {
@@ -1449,8 +1480,9 @@ test "waits: report port and stop timeouts" {
     var progress = progress_mod.Line.init(&writer);
 
     try std.testing.expectError(error.PortNotReady, waits.waitForPortWithProgress(lifecycle, 5432, 2, null, &progress));
-    try waits.waitForStopped(lifecycle, "api", &writer);
+    const stopped = try waits.waitForStopped(lifecycle, "api", &writer);
 
+    try std.testing.expect(!stopped);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api ... warning: may not have stopped") != null);
 }
 
@@ -1612,7 +1644,7 @@ test "lifecycle.startAll: recreates missing service window before start" {
 
     const new_window = proc_runner.findCommandContaining(&recorder, "new-window") orelse return error.CommandNotFound;
     try proc_runner.expectCommandArg(new_window, 3, "-a");
-    try proc_runner.expectCommandArg(new_window, 5, "demo:=dashboard");
+    try proc_runner.expectCommandArg(new_window, 5, "=demo:=dashboard");
     try proc_runner.expectCommandArg(new_window, 7, "api");
     try proc_runner.expectCommandArg(new_window, 9, "/tmp/demo/backend");
     try proc_runner.expectCommandArgContains(new_window, 10, "Waiting for start command");

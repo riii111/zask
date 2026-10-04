@@ -11,7 +11,8 @@ const terminal = @import("../../platform/terminal.zig");
 const tmux_options = @import("../../model/tmux_options.zig");
 const tmux_setup = @import("../../workflow/tmux_setup.zig");
 const RenderContext = @import("context.zig").RenderContext;
-const Runtime = @import("../../workflow/runtime.zig").Runtime;
+const runtime_mod = @import("../../workflow/runtime.zig");
+const Runtime = runtime_mod.Runtime;
 const Selection = selection_state.Selection;
 
 const monitor_name_width = 12;
@@ -232,10 +233,12 @@ const Monitor = struct {
         _ = self.operation_arena.reset(.retain_capacity);
         const scratch = self.operation_arena.allocator();
         var output: std.Io.Writer.Allocating = .init(scratch);
-        if (runOperation(self.runtime.withAllocator(scratch), operation, target, &output.writer)) {
-            self.setNotice("{s} {s}", .{ operation.done(), target.name });
+        const printed = &output.writer;
+        if (runOperation(self.runtime.withAllocator(scratch), operation, target, printed)) |outcome| switch (outcome) {
+            .done => self.setNotice("{s} {s}", .{ operation.done(), target.name }),
+            .incomplete => self.setNotice("{s} {s} incomplete: {s}", .{ operation.verb(), target.name, lastOutputLine(printed.buffered(), "see its window") }),
         } else |err| {
-            self.setNotice("{s} {s} failed: {s}", .{ operation.verb(), target.name, failureReason(output.writer.buffered(), err) });
+            self.setNotice("{s} {s} failed: {s}", .{ operation.verb(), target.name, lastOutputLine(printed.buffered(), @errorName(err)) });
         }
 
         terminal.discardInput(terminal.stdin);
@@ -397,34 +400,35 @@ fn selectedTarget(snapshot: Snapshot, selection: Selection) ?Target {
     const name = selection.name orelse return null;
     for (snapshot.rows) |row| {
         if (!isVisible(row, snapshot.mode)) continue;
-        if (std.mem.eql(u8, row.name, name)) return .{ .name = row.name, .kind = row.kind };
+        if (std.mem.eql(u8, rowKey(row), name)) return .{ .name = row.name, .kind = row.kind };
     }
     return null;
 }
 
-/// Uses the same runtime entry points as `zask start|stop|restart`; service
-/// rows go through the service-only variants so a group or alias sharing the
-/// name is never picked up.
-fn runOperation(runtime: Runtime, operation: Operation, target: Target, writer: *std.Io.Writer) !void {
+/// Uses the same runtime steps as `zask start|stop|restart`; service rows go
+/// through the service-only variants so a group or alias sharing the name is
+/// never picked up.
+fn runOperation(runtime: Runtime, operation: Operation, target: Target, writer: *std.Io.Writer) !runtime_mod.Outcome {
     switch (target.kind) {
         .service => switch (operation) {
             .show => try runtime.showWindow(target.name),
             .start => try runtime.startService(target.name, writer),
-            .stop => try runtime.stopService(target.name, writer),
-            .restart => try runtime.restartService(target.name, writer),
+            .stop => return runtime.stopService(target.name, writer),
+            .restart => return runtime.restartService(target.name, writer),
         },
         .docker => switch (operation) {
             .show => try runtime.showWindow(session_layout.docker_window),
             .start => try runtime.start(config.keys.docker, writer),
-            .stop => try runtime.stop(config.keys.docker, writer),
-            .restart => try runtime.restart(config.keys.docker, writer),
+            .stop => return runtime.stopDocker(writer),
+            .restart => return runtime.restartDocker(writer),
         },
     }
+    return .done;
 }
 
-/// The last line the operation printed, which carries the workflow's own error
-/// message; the error name when it printed nothing. Borrows from `output`.
-fn failureReason(output: []const u8, err: anyerror) []const u8 {
+/// The last line the operation printed, which carries the workflow's own
+/// error or warning; `fallback` when it printed nothing. Borrows from `output`.
+fn lastOutputLine(output: []const u8, fallback: []const u8) []const u8 {
     var lines = std.mem.splitBackwardsScalar(u8, output, '\n');
     while (lines.next()) |line| {
         // Progress lines redraw themselves with `\r`; only the last redraw is visible.
@@ -432,15 +436,27 @@ fn failureReason(output: []const u8, err: anyerror) []const u8 {
         const trimmed = std.mem.trim(u8, visible, " \t");
         if (trimmed.len > 0) return trimmed;
     }
-    return @errorName(err);
+    return fallback;
 }
 
-/// Caller owns the returned slice; the names borrow from `snapshot`.
+/// Not a valid service identifier, so a service named `docker` stays a
+/// different row from Compose.
+const docker_row_key = "@docker";
+
+/// What the selection remembers for `row`.
+fn rowKey(row: MonitorRow) []const u8 {
+    return switch (row.kind) {
+        .service => row.name,
+        .docker => docker_row_key,
+    };
+}
+
+/// Caller owns the returned slice; the keys borrow from `snapshot`.
 fn visibleNames(gpa: std.mem.Allocator, snapshot: Snapshot) ![]const []const u8 {
     var names: std.ArrayList([]const u8) = .empty;
     errdefer names.deinit(gpa);
     for (snapshot.rows) |row| {
-        if (isVisible(row, snapshot.mode)) try names.append(gpa, row.name);
+        if (isVisible(row, snapshot.mode)) try names.append(gpa, rowKey(row));
     }
     return names.toOwnedSlice(gpa);
 }
@@ -475,7 +491,7 @@ fn writeFrame(gpa: std.mem.Allocator, writer: *std.Io.Writer, cfg: config.Config
     for (snapshot.rows) |row| {
         if (!isVisible(row, snapshot.mode)) continue;
         if (view.selected) |name| {
-            if (std.mem.eql(u8, name, row.name)) selected_index = visible.items.len;
+            if (std.mem.eql(u8, name, rowKey(row))) selected_index = visible.items.len;
         }
         try visible.append(gpa, row);
     }
@@ -721,6 +737,10 @@ fn testRuntime(gpa: std.mem.Allocator, recorder: *proc_runner.Recorder, json: []
         .validate_configured_dirs = false,
         .emit_env_file_tips = false,
     };
+}
+
+fn testStopAttempts() usize {
+    return @import("../../workflow/waits.zig").stopAttempts();
 }
 
 fn testSelection(name: []const u8) !Selection {
@@ -1182,7 +1202,7 @@ test "monitor.selectedTarget: resolves only a visible selected row" {
     const rows = [_]MonitorRow{ docker_row, testRow("api", .live), testRow("web", .dead) };
     var api = try testSelection("api");
     defer api.deinit(std.testing.allocator);
-    var docker = try testSelection("docker");
+    var docker = try testSelection(docker_row_key);
     defer docker.deinit(std.testing.allocator);
 
     const all = selectedTarget(.{ .rows = &rows }, api) orelse return error.MissingTarget;
@@ -1197,13 +1217,13 @@ test "monitor.selectedTarget: resolves only a visible selected row" {
     try std.testing.expectEqual(RowKind.docker, compose.kind);
 }
 
-test "monitor.failureReason: picks the last visible output line" {
+test "monitor.lastOutputLine: picks the last visible output line" {
     const cases = [_]struct { output: []const u8, expected: []const u8 }{
         .{ .output = "Session not running. Run 'open' first.\n", .expected = "Session not running. Run 'open' first." },
         .{ .output = "Stopping api...\r  api ... stopping.\r  api ... warning: may not have stopped completely\n\n", .expected = "api ... warning: may not have stopped completely" },
         .{ .output = "", .expected = "WindowMissing" },
     };
-    for (cases) |case| try std.testing.expectEqualStrings(case.expected, failureReason(case.output, error.WindowMissing));
+    for (cases) |case| try std.testing.expectEqualStrings(case.expected, lastOutputLine(case.output, "WindowMissing"));
 }
 
 test "monitor.runOperation: restarts only the selected service when a group shares its name" {
@@ -1229,9 +1249,10 @@ test "monitor.runOperation: restarts only the selected service when a group shar
     );
     var output: std.Io.Writer.Allocating = .init(arena.allocator());
 
-    try runOperation(runtime, .restart, .{ .name = "api", .kind = .service }, &output.writer);
+    const outcome = try runOperation(runtime, .restart, .{ .name = "api", .kind = .service }, &output.writer);
 
-    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "demo:=api-worker") == null);
+    try std.testing.expectEqual(runtime_mod.Outcome.done, outcome);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "=demo:=api-worker") == null);
     try proc_runner.expectCommandOrder(&recorder, "C-c", "respawn-pane");
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
@@ -1247,10 +1268,10 @@ test "monitor.runOperation: show selects the docker window for the docker row" {
     );
     var output: std.Io.Writer.Allocating = .init(arena.allocator());
 
-    try runOperation(runtime, .show, .{ .name = "docker", .kind = .docker }, &output.writer);
+    _ = try runOperation(runtime, .show, .{ .name = "docker", .kind = .docker }, &output.writer);
 
     const select = proc_runner.findCommandContaining(&recorder, "select-window") orelse return error.CommandNotFound;
-    try proc_runner.expectCommandArgv(select, &.{ "tmux", "select-window", "-t", "demo:=docker" });
+    try proc_runner.expectCommandArgv(select, &.{ "tmux", "select-window", "-t", "=demo:=docker" });
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "attach-session") == null);
 }
 
@@ -1268,6 +1289,59 @@ test "monitor.runOperation: stop reports a missing session without signaling" {
     const result = runOperation(runtime, .stop, .{ .name = "api", .kind = .service }, &output.writer);
 
     try std.testing.expectError(error.SessionNotRunning, result);
-    try std.testing.expectEqualStrings("Session not running. Run 'open' first.", failureReason(output.writer.buffered(), error.SessionNotRunning));
+    try std.testing.expectEqualStrings("Session not running. Run 'open' first.", lastOutputLine(output.writer.buffered(), "SessionNotRunning"));
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "send-keys") == null);
+}
+
+test "monitor.selectedTarget: a service named docker stays apart from Compose" {
+    var compose_row = testRow("docker", .live);
+    compose_row.kind = .docker;
+    const rows = [_]MonitorRow{ compose_row, testRow("docker", .dead) };
+    var service = try testSelection("docker");
+    defer service.deinit(std.testing.allocator);
+    var compose = try testSelection(docker_row_key);
+    defer compose.deinit(std.testing.allocator);
+
+    const service_target = selectedTarget(.{ .rows = &rows }, service) orelse return error.MissingTarget;
+    const compose_target = selectedTarget(.{ .rows = &rows }, compose) orelse return error.MissingTarget;
+    const compose_hidden = selectedTarget(.{ .rows = &rows, .mode = .bad }, compose);
+
+    try std.testing.expectEqual(RowKind.service, service_target.kind);
+    try std.testing.expectEqual(RowKind.docker, compose_target.kind);
+    try std.testing.expectEqual(@as(?Target, null), compose_hidden);
+}
+
+test "monitor.render: highlights the service named docker, not Compose" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var compose_row = testRow("docker", .live);
+    compose_row.kind = .docker;
+    compose_row.port = "compose";
+    const rows = [_]MonitorRow{ compose_row, testRow("docker", .dead) };
+
+    const body = try testRender(arena.allocator(), .{ .rows = &rows }, .{ .selected = "docker" });
+
+    const selected = testSelectedLine(body) orelse return error.MissingSelectedRow;
+    try std.testing.expect(std.mem.indexOf(u8, selected, "compose") == null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, ansi.reverse));
+}
+
+test "monitor.runOperation: reports an unfinished stop as incomplete" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|sleep\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    for (0..testStopAttempts()) |_| try recorder.enqueue("0||123|sleep\n", "", .{ .exited = 0 });
+    const runtime = try testRuntime(arena.allocator(), &recorder,
+        \\{"project": {"name":"demo","root":"/tmp/demo"}, "groups": [{"name":"backend","services":[{"name":"api","command":"serve"}]}]}
+    );
+    var output: std.Io.Writer.Allocating = .init(arena.allocator());
+
+    const outcome = try runOperation(runtime, .stop, .{ .name = "api", .kind = .service }, &output.writer);
+
+    try std.testing.expectEqual(runtime_mod.Outcome.incomplete, outcome);
+    try std.testing.expectEqualStrings("api ... warning: may not have stopped completely", lastOutputLine(output.writer.buffered(), ""));
 }

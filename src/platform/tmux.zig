@@ -14,7 +14,9 @@ pub const Client = struct {
     }
 
     pub fn observeSession(self: Client) observations.SessionObservation {
-        const result = runner.captured(self.runner.run(&.{ self.tmux_path, "has-session", "-t", self.session }, .{}) catch return .unavailable);
+        const session_target = self.sessionTarget() catch return .unavailable;
+        defer self.gpa.free(session_target);
+        const result = runner.captured(self.runner.run(&.{ self.tmux_path, "has-session", "-t", session_target }, .{}) catch return .unavailable);
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
         if (result.term == .exited and result.term.exited == 0) return .active;
@@ -27,15 +29,21 @@ pub const Client = struct {
     }
 
     pub fn killSession(self: Client) !void {
-        _ = try self.runner.run(&.{ self.tmux_path, "kill-session", "-t", self.session }, .{ .check = true, .discard = true });
+        const session_target = try self.sessionTarget();
+        defer self.gpa.free(session_target);
+        _ = try self.runner.run(&.{ self.tmux_path, "kill-session", "-t", session_target }, .{ .check = true, .discard = true });
     }
 
     pub fn switchClient(self: Client) !void {
-        _ = try self.runner.run(&.{ self.tmux_path, "switch-client", "-t", self.session }, .{ .check = true, .discard = true });
+        const session_target = try self.sessionTarget();
+        defer self.gpa.free(session_target);
+        _ = try self.runner.run(&.{ self.tmux_path, "switch-client", "-t", session_target }, .{ .check = true, .discard = true });
     }
 
     pub fn attachSession(self: Client) !void {
-        _ = try self.runner.run(&.{ self.tmux_path, "attach-session", "-t", self.session }, .{ .interactive = true, .check = true });
+        const session_target = try self.sessionTarget();
+        defer self.gpa.free(session_target);
+        _ = try self.runner.run(&.{ self.tmux_path, "attach-session", "-t", session_target }, .{ .interactive = true, .check = true });
     }
 
     pub fn detachClientExec(self: Client, command: []const u8) !void {
@@ -48,7 +56,9 @@ pub const Client = struct {
 
     /// Caller owns the returned slice; free it with freeClientInfos.
     pub fn listClients(self: Client) ![]ClientInfo {
-        const result = runner.captured(try self.runner.run(&.{ self.tmux_path, "list-clients", "-t", self.session, "-F", "#{client_name}" }, .{ .check = true }));
+        const session_target = try self.sessionTarget();
+        defer self.gpa.free(session_target);
+        const result = runner.captured(try self.runner.run(&.{ self.tmux_path, "list-clients", "-t", session_target, "-F", "#{client_name}" }, .{ .check = true }));
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
 
@@ -87,7 +97,9 @@ pub const Client = struct {
     }
 
     pub fn newWindow(self: Client, window_name: []const u8, cwd: []const u8, command: []const u8) !void {
-        _ = try self.runner.run(&.{ self.tmux_path, "new-window", "-d", "-t", self.session, "-n", window_name, "-c", cwd, command }, .{ .check = true, .discard = true });
+        const session_target = try self.sessionTarget();
+        defer self.gpa.free(session_target);
+        _ = try self.runner.run(&.{ self.tmux_path, "new-window", "-d", "-t", session_target, "-n", window_name, "-c", cwd, command }, .{ .check = true, .discard = true });
     }
 
     pub fn newWindowAfter(self: Client, after_window: []const u8, window_name: []const u8, cwd: []const u8, command: []const u8) !void {
@@ -98,7 +110,9 @@ pub const Client = struct {
 
     /// Caller owns the returned slice; free it with freeWindowSizes.
     pub fn listWindowSizes(self: Client) ![]WindowSize {
-        const result = runner.captured(try self.runner.run(&.{ self.tmux_path, "list-windows", "-t", self.session, "-F", "#{window_id}|#{window_width}|#{window_height}" }, .{ .check = true }));
+        const session_target = try self.sessionTarget();
+        defer self.gpa.free(session_target);
+        const result = runner.captured(try self.runner.run(&.{ self.tmux_path, "list-windows", "-t", session_target, "-F", "#{window_id}|#{window_width}|#{window_height}" }, .{ .check = true }));
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
 
@@ -282,16 +296,22 @@ pub const Client = struct {
     }
 
     pub fn setOption(self: Client, name: []const u8, value: []const u8) !void {
-        _ = try self.runner.run(&.{ self.tmux_path, "set-option", "-t", self.session, name, value }, .{ .check = true, .discard = true });
+        const session_target = try self.sessionTarget();
+        defer self.gpa.free(session_target);
+        _ = try self.runner.run(&.{ self.tmux_path, "set-option", "-t", session_target, name, value }, .{ .check = true, .discard = true });
     }
 
     pub fn setHook(self: Client, name: []const u8, command: []const u8) !void {
-        _ = try self.runner.run(&.{ self.tmux_path, "set-hook", "-t", self.session, name, command }, .{ .check = true, .discard = true });
+        const session_target = try self.sessionTarget();
+        defer self.gpa.free(session_target);
+        _ = try self.runner.run(&.{ self.tmux_path, "set-hook", "-t", session_target, name, command }, .{ .check = true, .discard = true });
     }
 
     /// Caller owns the returned slice when the result is non-null.
     pub fn showOption(self: Client, name: []const u8) !?[]const u8 {
-        const result = runner.captured(self.runner.run(&.{ self.tmux_path, "show-option", "-t", self.session, "-qv", name }, .{}) catch return null);
+        const session_target = try self.sessionTarget();
+        defer self.gpa.free(session_target);
+        const result = runner.captured(self.runner.run(&.{ self.tmux_path, "show-option", "-t", session_target, "-qv", name }, .{}) catch return null);
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
         const value = std.mem.trim(u8, result.stdout, " \t\r\n");
@@ -307,11 +327,15 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ self.tmux_path, "choose-tree", "-Zw", "-t", pane_id }, .{ .check = true, .discard = true });
     }
 
-    // `=` makes tmux accept only an exact window name. Without it a missing
-    // `api` window resolves to `api-worker` by prefix, and the command lands
-    // on another service.
+    // `=` makes tmux accept only exact session and window names. Without it a
+    // missing `api` window resolves to `api-worker`, or a closed `demo` session
+    // to `demo-other`, by prefix, and the command lands on another service.
     fn target(self: Client, window: []const u8) ![]const u8 {
-        return std.fmt.allocPrint(self.gpa, "{s}:={s}", .{ self.session, window });
+        return std.fmt.allocPrint(self.gpa, "={s}:={s}", .{ self.session, window });
+    }
+
+    fn sessionTarget(self: Client) ![]const u8 {
+        return std.fmt.allocPrint(self.gpa, "={s}:", .{self.session});
     }
 
     fn buildRespawnScript(self: Client, command: []const u8) ![]const u8 {
@@ -520,13 +544,13 @@ test "tmux.window: layout helpers record argv" {
     try client.selectLayout("dashboard", "main-vertical");
 
     const split = recorder.commands.items[0];
-    try runner.expectCommandArgv(split, &.{ "tmux", "split-window", "-t", "demo:=dashboard", "-c", "/tmp/demo app", "zask monitor" });
+    try runner.expectCommandArgv(split, &.{ "tmux", "split-window", "-t", "=demo:=dashboard", "-c", "/tmp/demo app", "zask monitor" });
 
     const option = recorder.commands.items[1];
-    try runner.expectCommandArgv(option, &.{ "tmux", "set-window-option", "-t", "demo:=dashboard", "main-pane-width", "50%" });
+    try runner.expectCommandArgv(option, &.{ "tmux", "set-window-option", "-t", "=demo:=dashboard", "main-pane-width", "50%" });
 
     const layout = recorder.commands.items[2];
-    try runner.expectCommandArgv(layout, &.{ "tmux", "select-layout", "-t", "demo:=dashboard", "main-vertical" });
+    try runner.expectCommandArgv(layout, &.{ "tmux", "select-layout", "-t", "=demo:=dashboard", "main-vertical" });
 }
 
 test "tmux.newWindow: records append target when requested" {
@@ -538,10 +562,10 @@ test "tmux.newWindow: records append target when requested" {
     try client.newWindowAfter("api", "worker", "/tmp/demo app/worker", "echo worker");
 
     const window = recorder.commands.items[0];
-    try runner.expectCommandArgv(window, &.{ "tmux", "new-window", "-d", "-t", "demo", "-n", "api", "-c", "/tmp/demo app/backend", "echo waiting" });
+    try runner.expectCommandArgv(window, &.{ "tmux", "new-window", "-d", "-t", "=demo:", "-n", "api", "-c", "/tmp/demo app/backend", "echo waiting" });
 
     const after_window = recorder.commands.items[1];
-    try runner.expectCommandArgv(after_window, &.{ "tmux", "new-window", "-d", "-a", "-t", "demo:=api", "-n", "worker", "-c", "/tmp/demo app/worker", "echo worker" });
+    try runner.expectCommandArgv(after_window, &.{ "tmux", "new-window", "-d", "-a", "-t", "=demo:=api", "-n", "worker", "-c", "/tmp/demo app/worker", "echo worker" });
 }
 
 test "tmux.client: lifecycle commands record argv" {
@@ -555,12 +579,12 @@ test "tmux.client: lifecycle commands record argv" {
     try client.detachTargetClientExec("/dev/ttys001", "zask re");
     try client.killSession();
 
-    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "switch-client", "-t", "demo" });
-    try runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "attach-session", "-t", "demo" });
+    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "switch-client", "-t", "=demo:" });
+    try runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "attach-session", "-t", "=demo:" });
     try std.testing.expect(recorder.commands.items[1].interactive);
     try runner.expectCommandArgv(recorder.commands.items[2], &.{ "tmux", "detach-client", "-E", "zask re" });
     try runner.expectCommandArgv(recorder.commands.items[3], &.{ "tmux", "detach-client", "-t", "/dev/ttys001", "-E", "zask re" });
-    try runner.expectCommandArgv(recorder.commands.items[4], &.{ "tmux", "kill-session", "-t", "demo" });
+    try runner.expectCommandArgv(recorder.commands.items[4], &.{ "tmux", "kill-session", "-t", "=demo:" });
 }
 
 test "tmux.listClients: parses attached client names" {
@@ -572,7 +596,7 @@ test "tmux.listClients: parses attached client names" {
     const clients = try client.listClients();
     defer freeClientInfos(std.testing.allocator, clients);
 
-    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "list-clients", "-t", "demo", "-F", "#{client_name}" });
+    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "list-clients", "-t", "=demo:", "-F", "#{client_name}" });
     try std.testing.expectEqual(@as(usize, 2), clients.len);
     try std.testing.expectEqualStrings("/dev/ttys001", clients[0].name);
     try std.testing.expectEqualStrings("/dev/ttys002", clients[1].name);
@@ -587,8 +611,8 @@ test "tmux.option: option and binding helpers record argv" {
     try client.setHook("client-attached", "zask sync-size");
     try client.bindRunShell("w", "zask preview-list");
 
-    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "set-option", "-t", "demo", "@mode", "all" });
-    try runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "set-hook", "-t", "demo", "client-attached", "zask sync-size" });
+    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "set-option", "-t", "=demo:", "@mode", "all" });
+    try runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "set-hook", "-t", "=demo:", "client-attached", "zask sync-size" });
     try runner.expectCommandArgv(recorder.commands.items[2], &.{ "tmux", "bind-key", "-T", "prefix", "w", "run-shell", "zask preview-list" });
 }
 
@@ -600,7 +624,7 @@ test "tmux.sendKeys: records command through runner" {
     try client.sendKeys("api", &.{ "echo ok", "Enter" });
 
     const command = recorder.commands.items[0];
-    try runner.expectCommandArgv(command, &.{ "tmux", "send-keys", "-t", "demo:=api", "echo ok", "Enter" });
+    try runner.expectCommandArgv(command, &.{ "tmux", "send-keys", "-t", "=demo:=api", "echo ok", "Enter" });
 }
 
 test "tmux.respawnPane: records wrapped shell command" {
@@ -628,7 +652,7 @@ test "tmux.respawnPane: records start marker after respawn in the same invocatio
 
     try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
     const argv = recorder.commands.items[0].argv;
-    try runner.expectCommandArgv(.{ .argv = argv[10..], .cwd = null, .interactive = false }, &.{ ";", "set-option", "-p", "-t", "demo:=api", "@zask_started_at", "1700000000" });
+    try runner.expectCommandArgv(.{ .argv = argv[10..], .cwd = null, .interactive = false }, &.{ ";", "set-option", "-p", "-t", "=demo:=api", "@zask_started_at", "1700000000" });
 }
 
 test "tmux.buildRespawnScript: propagates command exit status" {
@@ -670,7 +694,7 @@ test "tmux.resizeWindow: sizing helpers record and parse argv" {
     try std.testing.expectEqualStrings("@1", windows[0].id);
     try std.testing.expectEqual(@as(u16, 120), windows[0].width);
     try std.testing.expectEqual(@as(u16, 39), windows[0].height);
-    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "list-windows", "-t", "demo", "-F", "#{window_id}|#{window_width}|#{window_height}" });
+    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "list-windows", "-t", "=demo:", "-F", "#{window_id}|#{window_width}|#{window_height}" });
     try runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "resize-window", "-x", "120", "-y", "39", "-t", "@1" });
     try runner.expectCommandArgv(recorder.commands.items[2], &.{ "tmux", "set-option", "-w", "-t", "@1", "window-size", "latest" });
     try runner.expectCommandArgv(recorder.commands.items[3], &.{ "tmux", "choose-tree", "-Zw", "-t", "%1" });
@@ -866,7 +890,7 @@ test "tmux.captureTail: returns last display-safe pane lines" {
     try std.testing.expectEqual(@as(usize, 2), tail.lines.len);
     try std.testing.expectEqualStrings("second", tail.lines[0]);
     try std.testing.expectEqualStrings("bad?[2J?secret?", tail.lines[1]);
-    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "capture-pane", "-t", "demo:=api", "-p", "-S", "-2" });
+    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "capture-pane", "-t", "=demo:=api", "-p", "-S", "-2" });
 }
 
 test "tmux.captureTail: keeps order after multiple ring wraps" {
@@ -998,7 +1022,7 @@ test "tmux.paneInfo: queries the start marker option" {
     const info = try client.paneInfo("api");
     defer info.deinit(std.testing.allocator);
 
-    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "list-panes", "-t", "demo:=api", "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}|#{@zask_started_at}" });
+    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "list-panes", "-t", "=demo:=api", "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}|#{@zask_started_at}" });
 }
 
 test "tmux.observePane: carries start marker into the observation" {

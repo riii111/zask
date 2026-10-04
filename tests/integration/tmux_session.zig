@@ -688,6 +688,52 @@ test "monitor: operation keys act only on the selected service" {
     try waitForPaneState(client, gpa, io, "api-worker", .busy);
 }
 
+test "runtime: closed session never reaches a session whose name extends it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-prefix", .{std.c.getpid()});
+    const other = tmuxClient(gpa, io, try std.fmt.allocPrint(gpa, "{s}-other", .{session}));
+
+    other.killSession() catch {};
+    try other.newSession("dashboard", "/tmp", "sleep 60");
+    defer other.killSession() catch {};
+    try other.newWindowAfter("dashboard", "api", "/tmp", "sleep 60");
+    const other_api = try std.fmt.allocPrint(gpa, "{s}:=api", .{other.session});
+    const other_pid = try panePid(gpa, io, other_api);
+    const cfg = try zask.config.Config.parse(gpa, try std.fmt.allocPrint(gpa,
+        \\{{
+        \\  "project": {{"name":"{s}","root":"/tmp"}},
+        \\  "groups": [{{"name":"backend","services":[{{"name":"api","dir":".","command":"sleep 60"}}]}}]
+        \\}}
+    , .{session}), "/tmp");
+    const run_impl: zask.runner.Runner = .{ .gpa = gpa, .io = io };
+    const runtime = zask.runtime.Runtime{
+        .gpa = gpa,
+        .io = io,
+        .cfg = cfg,
+        .config_path = "/tmp/config.json",
+        .zask_path = "zask",
+        .command_hint = .{ .config = "/tmp/config.json" },
+        .runner_impl = run_impl,
+        .tmux_impl = tmuxClient(gpa, io, session),
+        .docker_impl = .{ .gpa = gpa, .runner = run_impl, .dir = "/tmp", .file = "compose.yaml" },
+        .validate_configured_dirs = false,
+    };
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.SessionNotRunning, runtime.stopService("api", &writer));
+    try std.testing.expectError(error.SessionNotRunning, runtime.restartService("api", &writer));
+    try std.testing.expectError(error.WindowMissing, runtime.showWindow("api"));
+
+    try std.testing.expectEqualStrings(other_pid, try panePid(gpa, io, other_api));
+    try waitForPaneState(other, gpa, io, "api", .busy);
+}
+
 fn panePid(gpa: std.mem.Allocator, io: std.Io, target: []const u8) ![]const u8 {
     const result = try run(gpa, io, &.{ build_options.tmux_path, "list-panes", "-t", target, "-F", "#{pane_pid}" });
     return std.mem.trim(u8, result.stdout, "\n");
