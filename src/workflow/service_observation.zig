@@ -18,22 +18,29 @@ pub const Observer = struct {
     pub fn observeService(self: Observer, service: std.json.Value) !observations.ServiceObservation {
         const pane = self.tmux.observePane(try config.Config.serviceName(service));
         errdefer pane.deinit(self.gpa);
+        var result = self.unprobedService(service, pane);
+        if (!pane.running()) return result;
+        const configured_port = result.port orelse return result;
+
+        result.listen = try self.probeListen(configured_port);
+        if (result.listen != .passed or result.http == .not_configured) return result;
+        result.http = try self.probeHttp(configured_port, config.Config.serviceHealthcheckPath(service));
+        return result;
+    }
+
+    /// Observation with the given pane and no probe run, for callers that know
+    /// the pane without asking tmux (e.g. the session is not running). Takes
+    /// ownership of `pane`; deinit the result, not the pane.
+    pub fn unprobedService(self: Observer, service: std.json.Value, pane: observations.PaneObservation) observations.ServiceObservation {
         const port = config.Config.servicePort(service);
         const http_configured = port != null and std.mem.eql(u8, config.Config.serviceHealthcheckType(service), "http");
-        var result: observations.ServiceObservation = .{
+        return .{
             .pane = pane,
             .port = port,
             .listen = if (port == null) .not_configured else .not_observed,
             .http = if (http_configured) .not_observed else .not_configured,
             .observed_at = self.runner.nowSeconds(),
         };
-        if (!pane.running()) return result;
-        const configured_port = port orelse return result;
-
-        result.listen = try self.probeListen(configured_port);
-        if (result.listen != .passed or !http_configured) return result;
-        result.http = try self.probeHttp(configured_port, config.Config.serviceHealthcheckPath(service));
-        return result;
     }
 
     /// Caller owns the result and must deinit it with this observer's allocator.

@@ -15,6 +15,7 @@ const re = @import("cli/re.zig");
 const restart = @import("cli/restart.zig");
 const start = @import("cli/start.zig");
 const status = @import("cli/status.zig");
+const status_json = @import("cli/status_json.zig");
 const stop = @import("cli/stop.zig");
 const sync_size = @import("cli/sync_size.zig");
 const version = @import("cli/version.zig");
@@ -89,7 +90,7 @@ const command_specs = [_]CommandSpec{
     .{ .command = .stop, .names = &.{"stop"}, .usage = "stop <--all|svc|group|docker>", .description = "Stop resources, keeping workspace open" },
     .{ .command = .restart, .names = &.{"restart"}, .usage = "restart <svc|group|docker>", .description = "Restart service, group, or docker" },
     .{ .command = .list, .names = &.{"list"}, .usage = "list", .description = "List configured services" },
-    .{ .command = .status, .names = &.{"status"}, .usage = "status", .description = "Show service state" },
+    .{ .command = .status, .names = &.{"status"}, .usage = "status [--json]", .description = "Show service state" },
     .{ .command = .check, .names = &.{"check"}, .usage = "check", .description = "Check config without opening a session" },
     .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window" },
     .{ .command = .init, .names = &.{"init"}, .usage = "init [project] [--root <path>] [--from <Procfile>] [--force]", .description = "Create project config", .global = true },
@@ -119,7 +120,22 @@ pub fn run(init: std.process.Init) !void {
     var stdout_file_writer: std.Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);
     const stdout = &stdout_file_writer.interface;
 
-    runWithArgs(context, if (args.len > 1) args[1..] else &.{}, stdout) catch |err| switch (err) {
+    runWithArgs(context, if (args.len > 1) args[1..] else &.{}, stdout) catch |err| {
+        if (err_ctx.json_output) return exitWithJsonError(arena, stdout, err, err_ctx, diags);
+        return exitWithTextError(stdout, err, err_ctx, diags);
+    };
+    try stdout.flush();
+}
+
+fn exitWithJsonError(gpa: std.mem.Allocator, stdout: *std.Io.Writer, err: anyerror, err_ctx: cli_context.ErrorContext, diags: diagnostics.Diagnostics) !void {
+    const failure = try status_json.writeError(gpa, stdout, err, .{ .config_path = err_ctx.config_path, .diagnostics = diags.slice() });
+    try stdout.flush();
+    if (failure) |known| std.process.exit(known.exit_code);
+    return err;
+}
+
+fn exitWithTextError(stdout: *std.Io.Writer, err: anyerror, err_ctx: cli_context.ErrorContext, diags: diagnostics.Diagnostics) !void {
+    switch (err) {
         error.InvalidArguments, error.UnknownCommand, error.ProjectRequired, error.ConfigAlreadyExists, error.InvalidProcfile => {
             try stdout.flush();
             std.process.exit(2);
@@ -174,8 +190,7 @@ pub fn run(init: std.process.Init) !void {
             std.process.exit(1);
         },
         else => return err,
-    };
-    try stdout.flush();
+    }
 }
 
 pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *std.Io.Writer) !void {
@@ -516,6 +531,38 @@ test "cli.runWithArgs: prints usage for incomplete config" {
 
     try std.testing.expectError(error.InvalidArguments, runWithArgs(.{ .gpa = std.testing.allocator }, &.{"--config"}, &writer));
     try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Usage:\n  zask <command>"));
+}
+
+test "cli.status: --json routes config failures to JSON output" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    try environ.put("HOME", "/home/me");
+    const cases = [_]struct {
+        args: []const []const u8,
+        json_output: bool,
+    }{
+        .{ .args = &.{ "--config", "testdata/missing.json", "status", "--json" }, .json_output = true },
+        .{ .args = &.{ "--config", "testdata/missing.json", "status" }, .json_output = false },
+    };
+
+    for (cases) |case| {
+        var buffer: [256]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buffer);
+        var err_ctx: cli_context.ErrorContext = .{};
+
+        try std.testing.expectError(error.ConfigNotFound, runWithArgs(.{
+            .gpa = arena.allocator(),
+            .io = threaded.io(),
+            .environ = &environ,
+            .error_context = &err_ctx,
+        }, case.args, &writer));
+
+        try std.testing.expectEqual(case.json_output, err_ctx.json_output);
+        try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+    }
 }
 
 test "cli.open: prints usage for invalid profile" {

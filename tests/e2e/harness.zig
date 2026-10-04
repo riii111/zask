@@ -22,6 +22,8 @@ pub const SpawnOptions = struct {
     cwd: []const u8,
     xdg_config_home: []const u8,
     home: []const u8,
+    /// Child PATH; unset means the child gets no PATH and the platform default applies.
+    path: ?[]const u8 = null,
 };
 
 pub fn spawnZask(
@@ -39,6 +41,7 @@ pub fn spawnZask(
     defer env_map.deinit();
     try env_map.put("HOME", opts.home);
     try env_map.put("XDG_CONFIG_HOME", opts.xdg_config_home);
+    if (opts.path) |path| try env_map.put("PATH", path);
 
     const output_limit = 1024 * 1024;
     const result = try std.process.run(gpa, io, .{

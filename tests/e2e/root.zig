@@ -3,4 +3,5 @@ test {
     _ = @import("config_failure.zig");
     _ = @import("config_discovery.zig");
     _ = @import("check.zig");
+    _ = @import("status_json.zig");
 }
