@@ -109,10 +109,10 @@ pub fn collect(ctx: Context, options: Options, report: *Report) !void {
     bounded.docker.runner = bounded.runner;
 
     const project_root = try ctx.cfg.projectRoot(ctx.gpa);
-    try checkTmux(bounded, project_root, report);
-    try checkDocker(bounded, project_root, report);
-    try checkBash(bounded, project_root, report);
-    const nc_found = try checkNc(bounded, project_root, report);
+    try checkTmux(bounded, report);
+    try checkDocker(bounded, report);
+    try checkBash(bounded, report);
+    const nc_found = try checkNc(bounded, report);
     try checkServiceCommands(bounded, report);
     if (nc_found) try checkServicePorts(bounded, report);
     if (options.run_prechecks) {
@@ -122,8 +122,8 @@ pub fn collect(ctx: Context, options: Options, report: *Report) !void {
     }
 }
 
-fn checkTmux(ctx: Context, project_root: []const u8, report: *Report) !void {
-    if (try findTool(ctx, project_root, "tmux")) return;
+fn checkTmux(ctx: Context, report: *Report) !void {
+    if (try findTool(ctx, "tmux")) return;
     try report.add(.{
         .severity = .problem,
         .subject = "tmux",
@@ -132,9 +132,9 @@ fn checkTmux(ctx: Context, project_root: []const u8, report: *Report) !void {
     });
 }
 
-fn checkDocker(ctx: Context, project_root: []const u8, report: *Report) !void {
+fn checkDocker(ctx: Context, report: *Report) !void {
     if (!ctx.cfg.dockerEnabled()) return;
-    if (!try findTool(ctx, project_root, "docker")) {
+    if (!try findTool(ctx, "docker")) {
         try report.add(.{
             .severity = .problem,
             .subject = "docker",
@@ -171,9 +171,9 @@ fn checkDocker(ctx: Context, project_root: []const u8, report: *Report) !void {
     }
 }
 
-fn checkBash(ctx: Context, project_root: []const u8, report: *Report) !void {
+fn checkBash(ctx: Context, report: *Report) !void {
     if (ctx.cfg.prechecks().len == 0 and !hasCommandPhase(ctx.cfg)) return;
-    if (try findTool(ctx, project_root, "bash")) return;
+    if (try findTool(ctx, "bash")) return;
     try report.add(.{
         .severity = .problem,
         .subject = "bash",
@@ -183,10 +183,10 @@ fn checkBash(ctx: Context, project_root: []const u8, report: *Report) !void {
 }
 
 /// Returns whether nc exists; port checks are skipped without it.
-fn checkNc(ctx: Context, project_root: []const u8, report: *Report) !bool {
+fn checkNc(ctx: Context, report: *Report) !bool {
     const needed_by_wait_ports = hasWaitPorts(ctx.cfg);
     if (!needed_by_wait_ports and !try hasServicePort(ctx.cfg)) return true;
-    if (try findTool(ctx, project_root, "nc")) return true;
+    if (try findTool(ctx, "nc")) return true;
     if (needed_by_wait_ports) {
         try report.add(.{
             .severity = .problem,
@@ -210,8 +210,15 @@ fn checkServiceCommands(ctx: Context, report: *Report) !void {
         const command = try config.Config.serviceStartCommand(ctx.gpa, service);
         switch (classifyCommand(command)) {
             .program => |name| {
+                const has_slash = std.mem.indexOfScalar(u8, name, '/') != null;
+                // The launch script applies env_file before the command, so a
+                // PATH it sets decides the lookup whether or not ours succeeds.
+                if (!has_slash and try envFilesSetPath(ctx, service)) {
+                    try report.add(.{ .severity = .unverified, .subject = subject, .message = "env_file sets PATH; command not checked" });
+                    continue;
+                }
                 if (try executable.find(ctx.gpa, ctx.io, ctx.search_path, dir, name) != null) continue;
-                try report.add(try missingProgramFinding(ctx, service, subject, name));
+                try report.add(try missingProgramFinding(ctx, subject, name, has_slash));
             },
             .compound => try report.add(.{ .severity = .unverified, .subject = subject, .message = "compound shell command; not checked" }),
             .shell_syntax => try report.add(.{ .severity = .unverified, .subject = subject, .message = "command name uses shell syntax; not checked" }),
@@ -219,19 +226,13 @@ fn checkServiceCommands(ctx: Context, report: *Report) !void {
     }
 }
 
-/// The pane shell resolves builtins itself and applies env_file before the
-/// command, so a PATH miss is only a problem when neither can explain it.
-fn missingProgramFinding(ctx: Context, service: std.json.Value, subject: []const u8, name: []const u8) !Finding {
-    const has_slash = std.mem.indexOfScalar(u8, name, '/') != null;
+/// The pane shell resolves builtins itself, so a PATH miss on a builtin name
+/// is not a problem.
+fn missingProgramFinding(ctx: Context, subject: []const u8, name: []const u8, has_slash: bool) !Finding {
     if (!has_slash and isShellBuiltin(name)) return .{
         .severity = .unverified,
         .subject = subject,
         .message = try std.fmt.allocPrint(ctx.gpa, "starts with shell builtin '{s}'; not checked", .{name}),
-    };
-    if (!has_slash and try envFilesSetPath(ctx, service)) return .{
-        .severity = .unverified,
-        .subject = subject,
-        .message = try std.fmt.allocPrint(ctx.gpa, "'{s}' not found in PATH, but env_file sets PATH; not checked", .{name}),
     };
     return .{
         .severity = .problem,
@@ -242,11 +243,13 @@ fn missingProgramFinding(ctx: Context, service: std.json.Value, subject: []const
 }
 
 /// Mirrors the key parsing of the launch script in lifecycle: blank lines and
-/// comments are skipped and a leading `export ` is dropped. Unreadable files
-/// are already path problems and count as not setting PATH.
+/// comments are skipped and a leading `export ` is dropped. Missing,
+/// non-regular, or unreadable files are already path problems and count as
+/// not setting PATH; a FIFO is never opened, so reading cannot block.
 fn envFilesSetPath(ctx: Context, service: std.json.Value) !bool {
     for (try config.Config.serviceEnvFiles(ctx.gpa, service)) |env_file| {
         const path = try ctx.cfg.serviceEnvFilePath(ctx.gpa, service, env_file);
+        if (try configured_path.inspect(ctx.io, path, .file) != null) continue;
         const bytes = std.Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.gpa, .limited(1024 * 1024)) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => continue,
@@ -459,8 +462,10 @@ fn classifyCommand(command: []const u8) CommandShape {
     return .{ .program = name };
 }
 
-fn findTool(ctx: Context, cwd: []const u8, name: []const u8) !bool {
-    return try executable.find(ctx.gpa, ctx.io, ctx.search_path, cwd, name) != null;
+/// zask spawns tools from its own working directory, so relative PATH entries
+/// resolve from there, not from the project root.
+fn findTool(ctx: Context, name: []const u8) !bool {
+    return try executable.find(ctx.gpa, ctx.io, ctx.search_path, ".", name) != null;
 }
 
 fn hasCommandPhase(cfg: config.Config) bool {
@@ -683,6 +688,7 @@ test "environment_check.collect: checks service commands without running them" {
         \\  {"name":"exec","command":"exec serve"},
         \\  {"name":"reader","command":"read -r line"},
         \\  {"name":"venv","dir":"web","env_file":".env","command":"uvicorn app"},
+        \\  {"name":"venv_npm","dir":"web","env_file":".env","command":"npm start"},
         \\  {"name":"app","dir":"web","env_file":".env.app","command":"uvicorn app"},
         \\  {"name":"gone","dir":"absent","command":"missing-in-absent-dir"}
         \\]}]
@@ -698,7 +704,8 @@ test "environment_check.collect: checks service commands without running them" {
         .{ .severity = .unverified, .subject = "groups[be].services[envvar].command", .message = "command name uses shell syntax; not checked" },
         .{ .severity = .unverified, .subject = "groups[be].services[exec].command", .message = "starts with shell builtin 'exec'; not checked" },
         .{ .severity = .unverified, .subject = "groups[be].services[reader].command", .message = "starts with shell builtin 'read'; not checked" },
-        .{ .severity = .unverified, .subject = "groups[be].services[venv].command", .message = "'uvicorn' not found in PATH, but env_file sets PATH; not checked" },
+        .{ .severity = .unverified, .subject = "groups[be].services[venv].command", .message = "env_file sets PATH; command not checked" },
+        .{ .severity = .unverified, .subject = "groups[be].services[venv_npm].command", .message = "env_file sets PATH; command not checked" },
         .{ .severity = .problem, .subject = "groups[be].services[app].command", .message = "'uvicorn' not found in PATH" },
     }, report.findings.items);
     try std.testing.expectEqual(@as(usize, 0), recorder.commands.items.len);
@@ -857,4 +864,56 @@ test "environment_check.classifyCommand: separates plain programs from shell syn
     };
 
     for (cases) |case| try std.testing.expectEqualDeep(case.expected, classifyCommand(case.command));
+}
+
+extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
+
+test "environment_check.collect: skips a FIFO env file without reading it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var project = try TestProject.init(gpa, io, &.{"tmux"});
+    defer project.deinit();
+    const fifo = try std.fmt.allocPrintSentinel(gpa, "{s}/.env", .{project.root}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), mkfifo(fifo, 0o644));
+    var recorder = proc_runner.Recorder.init(gpa);
+    const ctx = try project.context(gpa, io, &recorder,
+        \\"groups":[{"name":"be","services":[{"name":"api","env_file":".env","command":"serve"}]}]
+    );
+    var report = Report.init(gpa);
+
+    try collect(ctx, .{}, &report);
+
+    try testExpectFindings(&.{
+        .{ .severity = .problem, .subject = "groups[be].services[api].command", .message = "'serve' not found in PATH" },
+    }, report.findings.items);
+}
+
+test "environment_check.collect: resolves relative PATH tools from the working directory" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var project = try TestProject.init(gpa, io, &.{ "tmux", "serve" });
+    defer project.deinit();
+    try project.tmp.dir.createDirPath(io, "project");
+    const previous = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", gpa);
+    try std.process.setCurrentPath(io, project.root);
+    defer std.process.setCurrentPath(io, previous) catch unreachable;
+    var recorder = proc_runner.Recorder.init(gpa);
+    var ctx = try project.context(gpa, io, &recorder,
+        \\"groups":[{"name":"be","services":[{"name":"api","command":"/bin/sh"}]}]
+    );
+    ctx.cfg = try config.Config.parse(gpa, try std.fmt.allocPrint(gpa,
+        \\{{"project":{{"name":"demo","root":"{s}/project"}},"groups":[{{"name":"be","services":[{{"name":"api","command":"/bin/sh"}}]}}]}}
+    , .{project.root}), "/home/me");
+    ctx.search_path = "bin";
+    var report = Report.init(gpa);
+
+    try collect(ctx, .{}, &report);
+
+    try std.testing.expectEqual(@as(usize, 0), report.findings.items.len);
 }
