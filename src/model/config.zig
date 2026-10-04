@@ -2,6 +2,7 @@ const std = @import("std");
 const config_value = @import("config_value.zig");
 const validate = @import("validate.zig");
 const diagnostics = @import("diagnostics.zig");
+const suggest = @import("suggest.zig");
 const watch = @import("watch.zig");
 
 const Value = std.json.Value;
@@ -205,9 +206,17 @@ pub const Config = struct {
         service,
     };
 
+    /// Where the entry was written: top-level, group, or service `env_file`.
+    pub const EnvFileScope = enum {
+        project,
+        group,
+        service,
+    };
+
     pub const EnvFile = struct {
         path: []const u8,
         base: EnvFileBase,
+        scope: EnvFileScope,
     };
 
     /// Caller owns the returned slice; entries borrow strings from the config.
@@ -219,9 +228,11 @@ pub const Config = struct {
             if (file != .object) return error.InvalidConfig;
             const path = try config_value.requiredObjectString(file, "path");
             const base = try config_value.requiredObjectString(file, "base");
+            const scope = try config_value.requiredObjectString(file, "scope");
             try result.append(gpa, .{
                 .path = path,
                 .base = if (std.mem.eql(u8, base, "service")) .service else .project,
+                .scope = std.meta.stringToEnum(EnvFileScope, scope) orelse return error.InvalidConfig,
             });
         }
         return result.toOwnedSlice(gpa);
@@ -541,27 +552,29 @@ fn normalizeServices(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: 
 fn normalizeServiceEnvFiles(gpa: std.mem.Allocator, project_env: ?Value, group_env: ?Value, service_env: ?Value) !std.json.Array {
     var files = std.json.Array.init(gpa);
     errdefer files.deinit();
-    try appendEnvFileValues(gpa, &files, project_env, "project");
-    try appendEnvFileValues(gpa, &files, group_env, "project");
-    try appendEnvFileValues(gpa, &files, service_env, "service");
+    try appendEnvFileValues(gpa, &files, project_env, .project);
+    try appendEnvFileValues(gpa, &files, group_env, .group);
+    try appendEnvFileValues(gpa, &files, service_env, .service);
     return files;
 }
 
-fn appendEnvFileValues(gpa: std.mem.Allocator, files: *std.json.Array, value: ?Value, base: []const u8) !void {
+fn appendEnvFileValues(gpa: std.mem.Allocator, files: *std.json.Array, value: ?Value, scope: Config.EnvFileScope) !void {
     const node = value orelse return;
-    if (node == .string) return appendEnvFile(gpa, files, node.string, base);
+    if (node == .string) return appendEnvFile(gpa, files, node.string, scope);
     if (node != .array) return error.InvalidConfig;
     for (node.array.items) |item| {
         if (item != .string) return error.InvalidConfig;
-        try appendEnvFile(gpa, files, item.string, base);
+        try appendEnvFile(gpa, files, item.string, scope);
     }
 }
 
-fn appendEnvFile(gpa: std.mem.Allocator, files: *std.json.Array, path: []const u8, base: []const u8) !void {
+fn appendEnvFile(gpa: std.mem.Allocator, files: *std.json.Array, path: []const u8, scope: Config.EnvFileScope) !void {
+    const base = if (scope == .service) "service" else "project";
     var object: std.json.ObjectMap = .empty;
     errdefer object.deinit(gpa);
     try object.put(gpa, "path", .{ .string = path });
     try object.put(gpa, "base", .{ .string = base });
+    try object.put(gpa, "scope", .{ .string = @tagName(scope) });
     try files.append(.{ .object = object });
 }
 
@@ -706,6 +719,24 @@ const ValidationIndex = struct {
 
     fn containsGroupOrAlias(self: ValidationIndex, name: []const u8) bool {
         return self.groups.contains(name) or self.aliases.contains(name);
+    }
+
+    fn groupOrAliasNames(self: ValidationIndex, gpa: std.mem.Allocator) ![]const []const u8 {
+        var names: std.ArrayList([]const u8) = .empty;
+        try appendMapKeys(gpa, &names, self.groups);
+        try appendMapKeys(gpa, &names, self.aliases);
+        return names.items;
+    }
+
+    fn serviceNames(self: ValidationIndex, gpa: std.mem.Allocator) ![]const []const u8 {
+        var names: std.ArrayList([]const u8) = .empty;
+        try appendMapKeys(gpa, &names, self.services);
+        return names.items;
+    }
+
+    fn appendMapKeys(gpa: std.mem.Allocator, names: *std.ArrayList([]const u8), map: std.StringHashMap(void)) !void {
+        var it = map.keyIterator();
+        while (it.next()) |key| try names.append(gpa, key.*);
     }
 };
 
@@ -901,7 +932,7 @@ fn validateStartupStep(gpa: std.mem.Allocator, step: Value, path: []const u8, di
         if (group != .string) {
             try diags.add(group_path, "must be a string");
         } else if (!refs.containsGroupOrAlias(group.string)) {
-            try diags.addFmt(group_path, "unknown group '{s}'", .{group.string});
+            try addUnknownName(diags, group_path, "unknown group", group.string, try refs.groupOrAliasNames(gpa));
         }
         if (step.object.get(keys.wait_ports)) |wait_ports| {
             const wpath = try joinPath(gpa, path, "wait_ports");
@@ -977,7 +1008,7 @@ fn validateGroupAliases(gpa: std.mem.Allocator, source: Value, diags: *diagnosti
             if (value != .string) {
                 try diags.add(value_path, "must be a string");
             } else if (!refs.services.contains(value.string)) {
-                try diags.addFmt(value_path, "unknown service '{s}'", .{value.string});
+                try addUnknownName(diags, value_path, "unknown service", value.string, try refs.serviceNames(gpa));
             }
         }
     }
@@ -988,11 +1019,12 @@ fn checkGroupOverrideRefs(gpa: std.mem.Allocator, value: Value, path: []const u8
     var it = value.object.iterator();
     while (it.next()) |entry| {
         const entry_path = try joinPath(gpa, path, entry.key_ptr.*);
-        if (!refs.containsGroupOrAlias(entry.key_ptr.*)) try diags.addFmt(entry_path, "unknown group '{s}'", .{entry.key_ptr.*});
+        if (!refs.containsGroupOrAlias(entry.key_ptr.*))
+            try addUnknownName(diags, entry_path, "unknown group", entry.key_ptr.*, try refs.groupOrAliasNames(gpa));
         if (entry.value_ptr.* != .string) {
             try diags.add(entry_path, "must be a string");
         } else if (!refs.containsGroupOrAlias(entry.value_ptr.string)) {
-            try diags.addFmt(entry_path, "unknown group '{s}'", .{entry.value_ptr.string});
+            try addUnknownName(diags, entry_path, "unknown group", entry.value_ptr.string, try refs.groupOrAliasNames(gpa));
         }
     }
 }
@@ -1066,7 +1098,7 @@ fn checkOptionalEnum(gpa: std.mem.Allocator, node: Value, key: []const u8, path:
         try diags.add(field_path, "must be a string");
         return;
     }
-    if (!containsString(value.string, allowed)) try diags.addFmt(field_path, "unknown value '{s}'", .{value.string});
+    if (!containsString(value.string, allowed)) try addUnknownName(diags, field_path, "unknown value", value.string, allowed);
 }
 
 fn checkOptionalRuntime(gpa: std.mem.Allocator, node: Value, path: []const u8, diags: *diagnostics.Diagnostics) !void {
@@ -1076,14 +1108,24 @@ fn checkOptionalRuntime(gpa: std.mem.Allocator, node: Value, path: []const u8, d
         return;
     }
     if (value.string.len > 0 and !isAllowedRuntime(value.string))
-        try diags.addFmt(try joinPath(gpa, path, keys.runtime), "unknown runtime '{s}'", .{value.string});
+        try addUnknownName(diags, try joinPath(gpa, path, keys.runtime), "unknown runtime", value.string, &allowed_values.runtime);
 }
 
 fn checkKeys(gpa: std.mem.Allocator, node: Value, path: []const u8, allowed: []const []const u8, diags: *diagnostics.Diagnostics) !void {
     var it = node.object.iterator();
     while (it.next()) |entry| {
-        if (!containsString(entry.key_ptr.*, allowed)) try diags.add(try joinPath(gpa, path, entry.key_ptr.*), "unknown key");
+        if (containsString(entry.key_ptr.*, allowed)) continue;
+        const key_path = try joinPath(gpa, path, entry.key_ptr.*);
+        if (suggest.closest(entry.key_ptr.*, allowed)) |candidate| {
+            try diags.addFmt(key_path, "unknown key; did you mean '{s}'?", .{candidate});
+        } else try diags.add(key_path, "unknown key");
     }
+}
+
+fn addUnknownName(diags: *diagnostics.Diagnostics, path: []const u8, comptime problem: []const u8, name: []const u8, candidates: []const []const u8) !void {
+    if (suggest.closest(name, candidates)) |candidate| {
+        try diags.addFmt(path, problem ++ " '{s}'; did you mean '{s}'?", .{ name, candidate });
+    } else try diags.addFmt(path, problem ++ " '{s}'", .{name});
 }
 
 fn expectObject(node: Value, path: []const u8, diags: *diagnostics.Diagnostics) !bool {
@@ -1302,10 +1344,13 @@ test "config.env_file: normalizes project group and service scopes" {
     const env_files = try Config.serviceEnvFiles(arena.allocator(), service);
     try std.testing.expectEqual(@as(usize, 3), env_files.len);
     try std.testing.expectEqual(Config.EnvFileBase.project, env_files[0].base);
+    try std.testing.expectEqual(Config.EnvFileScope.project, env_files[0].scope);
     try std.testing.expectEqualStrings(".env", env_files[0].path);
     try std.testing.expectEqual(Config.EnvFileBase.project, env_files[1].base);
+    try std.testing.expectEqual(Config.EnvFileScope.group, env_files[1].scope);
     try std.testing.expectEqualStrings("backend/.env", env_files[1].path);
     try std.testing.expectEqual(Config.EnvFileBase.service, env_files[2].base);
+    try std.testing.expectEqual(Config.EnvFileScope.service, env_files[2].scope);
     try std.testing.expectEqualStrings(".env.local", env_files[2].path);
 
     try std.testing.expectEqualStrings("/tmp/demo/.env", try cfg.serviceEnvFilePath(arena.allocator(), service, env_files[0]));
@@ -1675,7 +1720,7 @@ test "config.validateAll: rejects unknown enumerated values" {
     const want = [_]diagnostics.Diagnostic{
         .{ .path = "groups[0].services[0].healthcheck.type", .message = "unknown value 'grpc'" },
         .{ .path = "startup_order[0].on_fail", .message = "unknown value 'ignore'" },
-        .{ .path = "prechecks[0].on_fail", .message = "unknown value 'Abort'" },
+        .{ .path = "prechecks[0].on_fail", .message = "unknown value 'Abort'; did you mean 'abort'?" },
     };
     try std.testing.expectEqual(want.len, diags.slice().len);
     for (want, diags.slice()) |expected, actual| {
@@ -1941,6 +1986,42 @@ test "config.validateAll: reports watch problems with field paths" {
         .{ .path = "groups[0].services[0].watch.include[1]", .message = "must be relative to the watched path" },
         .{ .path = "groups[0].services[0].watch.exclude", .message = "must be an array of strings" },
         .{ .path = "groups[0].services[0].watch.debounce_ms", .message = "must be >= 0" },
+    };
+    try std.testing.expectEqual(expected.len, diags.slice().len);
+    for (expected, diags.slice()) |want, got| {
+        try std.testing.expectEqualStrings(want.path, got.path);
+        try std.testing.expectEqualStrings(want.message, got.message);
+    }
+}
+
+test "config.validateAll: suggests close keys and references without guessing ties" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [
+        \\    {"name":"backend","services":[{"name":"api","comand":"serve","prot":3000},{"name":"app","command":"run"}]},
+        \\    {"name":"bakery","services":[{"name":"web","command":"dev"}]}
+        \\  ],
+        \\  "startup_order": [{"group":"backnd"},{"group":"bake"}],
+        \\  "group_aliases": {"front":["wbe","apx"]}
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const value = try parseJsonBytes(arena.allocator(), json);
+    var diags = diagnostics.Diagnostics.init(arena.allocator());
+    defer diags.deinit();
+
+    try validateAll(arena.allocator(), value, &diags);
+
+    const expected = [_]diagnostics.Diagnostic{
+        .{ .path = "groups[0].services[0].comand", .message = "unknown key; did you mean 'command'?" },
+        .{ .path = "groups[0].services[0].prot", .message = "unknown key; did you mean 'port'?" },
+        .{ .path = "groups[0].services[0]", .message = "missing required string 'command'" },
+        .{ .path = "startup_order[0].group", .message = "unknown group 'backnd'; did you mean 'backend'?" },
+        .{ .path = "startup_order[1].group", .message = "unknown group 'bake'" },
+        .{ .path = "group_aliases.front[0]", .message = "unknown service 'wbe'; did you mean 'web'?" },
+        .{ .path = "group_aliases.front[1]", .message = "unknown service 'apx'" },
     };
     try std.testing.expectEqual(expected.len, diags.slice().len);
     for (expected, diags.slice()) |want, got| {

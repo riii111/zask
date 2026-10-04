@@ -9,36 +9,58 @@ pub const Problem = struct {
     path: []const u8,
 };
 
-pub fn ensureDir(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, problem: Problem) !void {
-    const resolved = try pathing.absoluteForDisplay(gpa, io, problem.path);
-    defer gpa.free(resolved);
-    const stat = std.Io.Dir.cwd().statFile(io, resolved, .{}) catch |err| switch (err) {
-        error.FileNotFound => {
-            try writeError(writer, "directory", "not found", problem, resolved);
-            return error.ConfigPathNotFound;
-        },
-        else => return err,
-    };
-    if (stat.kind != .directory) {
-        try writeError(writer, "directory", "not a directory", problem, resolved);
-        return error.ConfigPathNotFound;
+pub const Kind = enum {
+    directory,
+    file,
+
+    pub fn label(self: Kind) []const u8 {
+        return @tagName(self);
     }
+};
+
+pub const Issue = enum {
+    not_found,
+    wrong_kind,
+
+    pub fn reason(self: Issue, kind: Kind) []const u8 {
+        return switch (self) {
+            .not_found => "not found",
+            .wrong_kind => switch (kind) {
+                .directory => "not a directory",
+                .file => "not a file",
+            },
+        };
+    }
+};
+
+pub fn ensureDir(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, problem: Problem) !void {
+    try ensure(gpa, io, writer, problem, .directory);
 }
 
 pub fn ensureFile(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, problem: Problem) !void {
-    const resolved = try pathing.absoluteForDisplay(gpa, io, problem.path);
-    defer gpa.free(resolved);
-    const stat = std.Io.Dir.cwd().statFile(io, resolved, .{}) catch |err| switch (err) {
-        error.FileNotFound => {
-            try writeError(writer, "file", "not found", problem, resolved);
-            return error.ConfigPathNotFound;
-        },
+    try ensure(gpa, io, writer, problem, .file);
+}
+
+/// Returns null when `path` exists with the expected kind. Errors other than a
+/// missing entry stay errors so callers do not report them as config mistakes.
+pub fn inspect(io: std.Io, path: []const u8, kind: Kind) !?Issue {
+    const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return .not_found,
         else => return err,
     };
-    if (stat.kind != .file) {
-        try writeError(writer, "file", "not a file", problem, resolved);
-        return error.ConfigPathNotFound;
-    }
+    const expected: std.Io.File.Kind = switch (kind) {
+        .directory => .directory,
+        .file => .file,
+    };
+    return if (stat.kind == expected) null else .wrong_kind;
+}
+
+fn ensure(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, problem: Problem, kind: Kind) !void {
+    const resolved = try pathing.absoluteForDisplay(gpa, io, problem.path);
+    defer gpa.free(resolved);
+    const issue = try inspect(io, resolved, kind) orelse return;
+    try writeError(writer, kind.label(), issue.reason(kind), problem, resolved);
+    return error.ConfigPathNotFound;
 }
 
 fn writeError(writer: *std.Io.Writer, kind: []const u8, reason: []const u8, problem: Problem, resolved: []const u8) !void {

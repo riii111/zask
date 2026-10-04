@@ -1,5 +1,6 @@
 const std = @import("std");
 const attach = @import("cli/attach.zig");
+const check = @import("cli/check.zig");
 const close = @import("cli/close.zig");
 const cli_context = @import("cli/context.zig");
 const dashboard = @import("cli/dashboard.zig");
@@ -30,6 +31,7 @@ const Command = enum {
     init,
     list,
     status,
+    check,
     attach,
     logs,
     open,
@@ -50,6 +52,7 @@ const Command = enum {
             .init => runCommand(init_cmd, context),
             .list => runCommand(list, context),
             .status => runCommand(status, context),
+            .check => runCommand(check, context),
             .attach => runCommand(attach, context),
             .logs => runCommand(logs, context),
             .open => runCommand(open, context),
@@ -86,6 +89,7 @@ const command_specs = [_]CommandSpec{
     .{ .command = .restart, .names = &.{"restart"}, .usage = "restart <svc|group|docker>", .description = "Restart service, group, or docker" },
     .{ .command = .list, .names = &.{"list"}, .usage = "list", .description = "List configured services" },
     .{ .command = .status, .names = &.{"status"}, .usage = "status", .description = "Show service state" },
+    .{ .command = .check, .names = &.{"check"}, .usage = "check", .description = "Check config without opening a session" },
     .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window" },
     .{ .command = .init, .names = &.{"init"}, .usage = "init [project] [--root <path>] [--force]", .description = "Create project config", .global = true },
     .{ .command = .version, .names = &.{"version"}, .usage = "version", .description = "Print zask version", .global = true },
@@ -143,7 +147,7 @@ pub fn run(init: std.process.Init) !void {
             try stdout.flush();
             std.process.exit(2);
         },
-        error.ConfigPathNotFound => {
+        error.ConfigPathNotFound, error.CheckFailed => {
             try stdout.flush();
             std.process.exit(2);
         },
@@ -325,6 +329,7 @@ test "cli.command: parses public and internal names" {
         .{ .input = "kill", .expected = null },
         .{ .input = "exec", .expected = null },
         .{ .input = "list", .expected = .list },
+        .{ .input = "check", .expected = .check },
         .{ .input = "detach", .expected = null },
         .{ .input = "dashboard", .expected = null },
         .{ .input = "preview-list", .expected = null },
@@ -522,4 +527,102 @@ test "cli.open: prints usage for invalid profile" {
         .environ = &environ,
     }, &.{ "--config", "testdata/synthetic.json", "open", "--missing" }, &writer));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Usage:\n  zask <command>") != null);
+}
+
+fn testRunCheck(gpa: std.mem.Allocator, io: std.Io, config_path: []const u8, writer: *std.Io.Writer) !void {
+    var environ = env.Map.init(gpa);
+    try environ.put("HOME", "/home/me");
+    var diags = diagnostics.Diagnostics.init(gpa);
+    var err_ctx: cli_context.ErrorContext = .{};
+    try runWithArgs(.{
+        .gpa = gpa,
+        .io = io,
+        .environ = &environ,
+        .diagnostics = &diags,
+        .error_context = &err_ctx,
+    }, &.{ "--config", config_path, "check" }, writer);
+}
+
+fn testWriteConfig(gpa: std.mem.Allocator, io: std.Io, tmp: std.testing.TmpDir, comptime body: []const u8) ![]const u8 {
+    const project_root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    const json = try std.fmt.allocPrint(gpa, "{{\"project\":{{\"name\":\"demo\",\"root\":\"{s}\"}},{s}}}", .{ project_root, body });
+    try tmp.dir.writeFile(io, .{ .sub_path = "zask.json", .data = json });
+    return std.fs.path.join(gpa, &.{ project_root, "zask.json" });
+}
+
+test "cli.check: reports success for a valid config with existing paths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "backend");
+    const config_path = try testWriteConfig(gpa, io, tmp,
+        \\"groups":[{"name":"be","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+    );
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try testRunCheck(gpa, io, config_path, &writer);
+
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(gpa, "Config OK: {s}\n", .{config_path}), writer.buffered());
+}
+
+test "cli.check: lists every validation problem and skips path checks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const config_path = try testWriteConfig(gpa, io, tmp,
+        \\"groups":[{"name":"be","services":[{"name":"api","dir":"missing","comand":"serve"}]}],
+        \\"startup_order":[{"group":"bee"}]
+    );
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.CheckFailed, testRunCheck(gpa, io, config_path, &writer));
+
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(gpa,
+        \\Error: 3 config problems
+        \\Config: {s}
+        \\  groups[0].services[0].comand: unknown key; did you mean 'command'?
+        \\  groups[0].services[0]: missing required string 'command'
+        \\  startup_order[0].group: unknown group 'bee'; did you mean 'be'?
+        \\Path checks were skipped; fix the problems above and run check again.
+        \\
+    , .{config_path}), writer.buffered());
+}
+
+test "cli.check: lists every missing configured path" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const config_path = try testWriteConfig(gpa, io, tmp,
+        \\"groups":[{"name":"be","services":[
+        \\  {"name":"api","dir":"backend","command":"serve"},
+        \\  {"name":"web","command":"dev","env_file":".env"}
+        \\]}]
+    );
+    const project_root = std.fs.path.dirname(config_path).?;
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.CheckFailed, testRunCheck(gpa, io, config_path, &writer));
+
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(gpa,
+        \\Error: 2 config problems
+        \\Config: {s}
+        \\  groups[be].services[api].dir: directory not found: {s}/backend
+        \\  groups[be].services[web].env_file: file not found: {s}/.env
+        \\
+    , .{ config_path, project_root, project_root }), writer.buffered());
 }

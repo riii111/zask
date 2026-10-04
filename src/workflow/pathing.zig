@@ -8,7 +8,7 @@ pub fn absolute(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u
 }
 
 pub fn absoluteForDisplay(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
-    if (std.fs.path.isAbsolute(path)) return gpa.dupe(u8, path);
+    if (std.fs.path.isAbsolute(path)) return std.fs.path.resolve(gpa, &.{path});
     const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", gpa);
     defer gpa.free(cwd);
     return std.fs.path.resolve(gpa, &.{ cwd, path });
