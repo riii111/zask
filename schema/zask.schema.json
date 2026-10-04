@@ -199,7 +199,7 @@
           "default": ["."]
         },
         "include": {
-          "description": "Only files matching one of these patterns are watched. Watch every file when omitted.",
+          "description": "Only files matching one of these patterns are watched. Watch every file when omitted. Files listed directly in `paths` are watched regardless.",
           "type": "array",
           "items": { "$ref": "#/definitions/watchPattern" }
         },

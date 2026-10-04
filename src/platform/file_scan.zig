@@ -109,6 +109,7 @@ const Scanner = struct {
     options: Options,
     entries: std.ArrayList(Entry) = .empty,
     rel_path: std.ArrayList(u8) = .empty,
+    root_path: []const u8 = "",
     failure_reason: FailureReason = .io_error,
     failure_path: []const u8 = "",
 
@@ -117,7 +118,10 @@ const Scanner = struct {
             error.FileNotFound => return self.missingRoot(root),
             else => return self.fail(reasonFor(err), root.path),
         };
-        // A path named in `paths` is watched even when a pattern would skip it.
+        self.root_path = root.path;
+        // A path named in `paths` skips `include` but still honors excludes.
+        const name = std.mem.trimEnd(u8, root.label, "/");
+        if (self.spec.excludes(name)) return;
         if (stat.kind != .directory) return self.append(try self.arena.dupe(u8, root.label), stat);
 
         var dir = Dir.cwd().openDir(self.io, root.path, .{ .iterate = true }) catch |err| switch (err) {
@@ -166,7 +170,7 @@ const Scanner = struct {
     }
 
     fn append(self: *Scanner, path: []const u8, stat: std.Io.File.Stat) ScanError!void {
-        if (self.entries.items.len >= self.options.max_entries) return self.fail(.too_many_files, path);
+        if (self.entries.items.len >= self.options.max_entries) return self.fail(.too_many_files, self.root_path);
         try self.entries.append(self.arena, .{
             .path = path,
             .kind = stat.kind,
@@ -360,4 +364,25 @@ test "file_scan.scan: fails when watched files exceed the limit" {
     defer result.failed.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(FailureReason.too_many_files, result.failed.reason);
+    try std.testing.expectEqualStrings(tree.root, result.failed.path);
+}
+
+test "file_scan.scan: applies excludes to paths named as roots" {
+    var tree = try TestTree.init();
+    defer tree.deinit();
+    try tree.write("app.log", "");
+    try tree.write(".git/HEAD", "");
+    try tree.write("build/out.js", "");
+    try tree.write("main.rs", "");
+    const names = [_][]const u8{ "app.log", ".git", "build/", "main.rs" };
+    var roots: [names.len]Root = undefined;
+    for (names, &roots) |name, *root| {
+        root.* = .{ .path = try std.fs.path.join(std.testing.allocator, &.{ tree.root, name }), .label = name };
+    }
+    defer for (roots) |root| std.testing.allocator.free(root.path);
+
+    var result = try scan(std.testing.allocator, std.testing.io, &roots, testSpec(&.{"*.txt"}, &.{ "*.log", "build" }), .{ .missing_root = .fail });
+    defer result.ok.deinit();
+
+    try testExpectPaths(&.{"main.rs"}, result.ok);
 }

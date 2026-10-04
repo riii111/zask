@@ -39,7 +39,7 @@ pub const Spec = struct {
         return matchesAny(self.include, rel_path);
     }
 
-    fn excludes(self: Spec, rel_path: []const u8) bool {
+    pub fn excludes(self: Spec, rel_path: []const u8) bool {
         return matchesAny(&builtin_excludes, rel_path) or matchesAny(self.exclude, rel_path);
     }
 };
