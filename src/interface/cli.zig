@@ -2,6 +2,7 @@ const std = @import("std");
 const attach = @import("cli/attach.zig");
 const close = @import("cli/close.zig");
 const complete = @import("cli/complete.zig");
+const completion = @import("cli/completion.zig");
 const cli_context = @import("cli/context.zig");
 const dashboard = @import("cli/dashboard.zig");
 const help = @import("cli/help.zig");
@@ -29,6 +30,7 @@ const Command = enum {
     version,
     help,
     init,
+    completion,
     list,
     status,
     attach,
@@ -49,6 +51,7 @@ const Command = enum {
             .version => runCommand(version, context),
             .help => runCommand(help, context),
             .init => runCommand(init_cmd, context),
+            .completion => runCommand(completion, context),
             .list => runCommand(list, context),
             .status => runCommand(status, context),
             .attach => runCommand(attach, context),
@@ -95,6 +98,7 @@ const command_specs = [_]CommandSpec{
     .{ .command = .status, .names = &.{"status"}, .usage = "status", .description = "Show service state" },
     .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window", .completion = .service },
     .{ .command = .init, .names = &.{"init"}, .usage = "init [project] [--root <path>] [--force]", .description = "Create project config", .completion = .init_options, .global = true },
+    .{ .command = .completion, .names = &.{"completion"}, .usage = "completion [zsh|bash|fish]", .description = "Print shell completion script", .completion = .shell, .global = true },
     .{ .command = .version, .names = &.{"version"}, .usage = "version", .description = "Print zask version", .global = true },
     .{ .command = .help, .names = &.{ "help", "--help", "-h" }, .usage = "help", .description = "Print this help", .global = true },
     .{ .command = .dashboard, .names = &.{"dashboard"}, .internal = true, .show_in_help = false },
@@ -629,7 +633,7 @@ test "cli.open: prints usage for invalid profile" {
 test "cli.completion: lists public commands and config option at top level" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const expected = "open\nclose\nre\nattach\nstart\nstop\nrestart\nlist\nstatus\nlogs\ninit\nversion\nhelp\n--help\n-h\n--config\n";
+    const expected = "open\nclose\nre\nattach\nstart\nstop\nrestart\nlist\nstatus\nlogs\ninit\ncompletion\nversion\nhelp\n--help\n-h\n--config\n";
 
     try std.testing.expectEqualStrings(expected, try testComplete(arena.allocator(), "zask", &.{""}));
     try std.testing.expectEqualStrings(expected, try testComplete(arena.allocator(), "zask", &.{}));
@@ -640,7 +644,7 @@ test "cli.completion: lists public commands and config option at top level" {
 test "cli.completion: lists project commands after config selection" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const expected = "open\nclose\nre\nattach\nstart\nstop\nrestart\nlist\nstatus\nlogs\ninit\nversion\nhelp\n--help\n-h\n";
+    const expected = "open\nclose\nre\nattach\nstart\nstop\nrestart\nlist\nstatus\nlogs\ninit\ncompletion\nversion\nhelp\n--help\n-h\n";
 
     try std.testing.expectEqualStrings(expected, try testComplete(arena.allocator(), "zask", &.{ "--config", "testdata/synthetic.json", "" }));
     try std.testing.expectEqualStrings(expected, try testComplete(arena.allocator(), "zask", &.{ "demo", "" }));
@@ -716,4 +720,12 @@ test "cli.completion: offers init options without config" {
 
     try std.testing.expectEqualStrings("--root\n--force\n", try testComplete(arena.allocator(), "zask", &.{ "init", "demo", "--" }));
     try std.testing.expectEqualStrings("", try testComplete(arena.allocator(), "zask", &.{ "init", "--root", "" }));
+}
+
+test "cli.completion: offers shell names for completion command" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try std.testing.expectEqualStrings("zsh\nbash\nfish\n", try testComplete(arena.allocator(), "zask", &.{ "completion", "" }));
+    try std.testing.expectEqualStrings("", try testComplete(arena.allocator(), "zask", &.{ "completion", "zsh", "" }));
 }

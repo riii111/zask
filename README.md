@@ -47,6 +47,23 @@ direnv allow
 zig build install
 ```
 
+### Shell completion
+
+Commands, services, groups, and `open --<profile>` names complete from the
+same config the command would load. Run the line for your shell once, then open
+a new shell:
+
+```bash
+# zsh
+echo 'eval "$(zask completion zsh)"' >> ~/.zshrc
+# bash
+echo 'eval "$(zask completion bash)"' >> ~/.bashrc
+# fish
+echo 'zask completion fish | source' >> ~/.config/fish/config.fish
+```
+
+`zask completion` prints the same lines.
+
 ## Quick Start
 
 Initialize the current project once, then run zask from that project directory:
