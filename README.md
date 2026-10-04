@@ -143,6 +143,20 @@ project root. An object value takes the same settings as an array entry except
 }
 ```
 
+`zask add <svc> <command>` adds a service to the selected config, the same one
+other commands use. Pass `--group <group>` when the config has more than one
+group; a group that does not exist is reported, not created. `--port <port>`
+sets the port. The entry follows the group's form: an object entry in an array,
+the command string in an object, or a detailed object entry when a port is set.
+The rest of the file is kept as written. zask leaves the file unchanged and
+reports why when a service with the same name exists, the result would fail
+validation, or the file changed during the edit. `.jsonc` configs are not
+edited yet; add the service by hand.
+
+```bash
+zask add api "cargo run" --group backend --port 8080
+```
+
 [`schema/zask.schema.json`](schema/zask.schema.json) describes the config for
 editors that support JSON Schema. Point a top-level `"$schema"` key at it to get
 completion, descriptions, and diagnostics for keys, types, and allowed values;

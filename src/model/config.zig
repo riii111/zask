@@ -464,12 +464,30 @@ pub fn loadPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []co
 // Like loadPath, but records config validation problems into the caller's
 // collector. File and JSON-syntax failures stay as plain errors.
 pub fn loadPathWithDiagnostics(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []const u8, diags: *diagnostics.Diagnostics) !Config {
-    const bytes = readFile(gpa, io, path) catch |err| switch (err) {
+    return (try loadFileWithDiagnostics(gpa, io, path, home, diags)).cfg;
+}
+
+pub const ConfigFile = struct {
+    /// The exact file content `cfg` was parsed from.
+    bytes: []const u8,
+    cfg: Config,
+};
+
+/// Like loadPathWithDiagnostics, but keeps the file content for editing.
+/// Both fields are allocated from `gpa`; pass an arena.
+pub fn loadFileWithDiagnostics(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []const u8, diags: *diagnostics.Diagnostics) !ConfigFile {
+    const bytes = try readConfigBytes(gpa, io, path);
+    return .{ .bytes = bytes, .cfg = try Config.parseWithDiagnostics(gpa, bytes, home, diags) };
+}
+
+/// Returns the file content owned by the caller, with the same size limit
+/// and errors as loading a config.
+pub fn readConfigBytes(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
+    return readFile(gpa, io, path) catch |err| switch (err) {
         error.FileNotFound => return error.ConfigNotFound,
         error.StreamTooLong => return error.ConfigTooLarge,
         else => return err,
     };
-    return Config.parseWithDiagnostics(gpa, bytes, home, diags);
 }
 
 pub fn parseJsonBytes(gpa: std.mem.Allocator, bytes: []const u8) !Value {

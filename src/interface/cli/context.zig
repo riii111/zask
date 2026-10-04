@@ -59,6 +59,20 @@ pub const Context = struct {
         }
         return self.runtime_value.?;
     }
+
+    /// Selects the config the same way as `runtime()` and records it for
+    /// error output. The caller releases it with `deinitExpectedProjectName`.
+    pub fn selectConfig(self: *Context) !ResolvedConfigPath {
+        const io = self.base.io orelse return error.MissingIo;
+        const resolved = try resolveConfigPath(self.base.gpa, io, self.base, self.parsed);
+        recordSelection(self.base, resolved);
+        return resolved;
+    }
+
+    /// Loads a config from `selectConfig` with the same validation as `runtime()`.
+    pub fn loadSelectedConfig(self: *Context, selected: ResolvedConfigPath) !config.ConfigFile {
+        return loadConfigFile(self.base, selected);
+    }
 };
 
 pub fn isProjectAlias(argv0: []const u8) bool {
@@ -74,16 +88,8 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
     const io = context.io orelse return error.MissingIo;
     var resolved = try resolveConfigPath(context.gpa, io, context, parsed);
     defer resolved.deinitExpectedProjectName(context.gpa);
-    if (context.error_context) |err_ctx| {
-        err_ctx.config_path = resolved.path;
-        err_ctx.config_source = resolved.source;
-    }
-    const home = try paths.home(context.environ);
-    const cfg = if (context.diagnostics) |diags|
-        try config.loadPathWithDiagnostics(context.gpa, io, resolved.path, home, diags)
-    else
-        try config.loadPath(context.gpa, io, resolved.path, home);
-    try validateSelectedProjectName(context, resolved, cfg);
+    recordSelection(context, resolved);
+    const cfg = (try loadConfigFile(context, resolved)).cfg;
     const runner: proc_runner.Runner = .{ .gpa = context.gpa, .io = io };
     return .{
         .gpa = context.gpa,
@@ -97,6 +103,23 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
         .tmux_impl = tmux_client.Client{ .gpa = context.gpa, .runner = runner, .session = try cfg.projectName() },
         .docker_impl = docker_client.Compose{ .gpa = context.gpa, .runner = runner, .dir = try cfg.dockerDir(context.gpa), .file = cfg.dockerComposeFile() },
     };
+}
+
+fn recordSelection(context: CommandContext, resolved: ResolvedConfigPath) void {
+    if (context.error_context) |err_ctx| {
+        err_ctx.config_path = resolved.path;
+        err_ctx.config_source = resolved.source;
+    }
+}
+
+fn loadConfigFile(context: CommandContext, resolved: ResolvedConfigPath) !config.ConfigFile {
+    const io = context.io orelse return error.MissingIo;
+    const home = try paths.home(context.environ);
+    var fallback = diagnostics.Diagnostics.init(context.gpa);
+    defer fallback.deinit();
+    const file = try config.loadFileWithDiagnostics(context.gpa, io, resolved.path, home, context.diagnostics orelse &fallback);
+    try validateSelectedProjectName(context, resolved, file.cfg);
+    return file;
 }
 
 fn commandHint(gpa: std.mem.Allocator, io: std.Io, resolved: ResolvedConfigPath, cfg: config.Config) !zask_command.InvocationHint {
@@ -120,14 +143,14 @@ fn cwdIsProjectRoot(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config) !boo
     return std.mem.eql(u8, cwd, absolute_root);
 }
 
-const ResolvedConfigPath = struct {
+pub const ResolvedConfigPath = struct {
     path: []const u8,
     source: ConfigSource,
     expected_project_name: ?[]const u8 = null,
     expected_project_name_owned: bool = false,
 
     /// Frees only the temporary project-name copy used for named-config validation.
-    fn deinitExpectedProjectName(self: ResolvedConfigPath, gpa: std.mem.Allocator) void {
+    pub fn deinitExpectedProjectName(self: ResolvedConfigPath, gpa: std.mem.Allocator) void {
         if (self.expected_project_name_owned) {
             gpa.free(self.expected_project_name.?);
         }

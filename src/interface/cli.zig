@@ -1,4 +1,5 @@
 const std = @import("std");
+const add = @import("cli/add.zig");
 const attach = @import("cli/attach.zig");
 const close = @import("cli/close.zig");
 const cli_context = @import("cli/context.zig");
@@ -42,6 +43,7 @@ const Command = enum {
     monitor,
     preview_list,
     sync_size,
+    add,
 
     fn run(self: Command, context: *cli_context.Context) !void {
         return switch (self) {
@@ -62,6 +64,7 @@ const Command = enum {
             .monitor => runCommand(monitor, context),
             .preview_list => runCommand(preview_list, context),
             .sync_size => runCommand(sync_size, context),
+            .add => runCommand(add, context),
         };
     }
 };
@@ -87,6 +90,7 @@ const command_specs = [_]CommandSpec{
     .{ .command = .list, .names = &.{"list"}, .usage = "list", .description = "List configured services" },
     .{ .command = .status, .names = &.{"status"}, .usage = "status", .description = "Show service state" },
     .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service>", .description = "Focus service window" },
+    .{ .command = .add, .names = &.{"add"}, .usage = "add <svc> <command> [--group <group>] [--port <port>]", .description = "Add a service to the config" },
     .{ .command = .init, .names = &.{"init"}, .usage = "init [project] [--root <path>] [--force]", .description = "Create project config", .global = true },
     .{ .command = .version, .names = &.{"version"}, .usage = "version", .description = "Print zask version", .global = true },
     .{ .command = .help, .names = &.{ "help", "--help", "-h" }, .usage = "help", .description = "Print this help", .global = true },
@@ -115,7 +119,7 @@ pub fn run(init: std.process.Init) !void {
     const stdout = &stdout_file_writer.interface;
 
     runWithArgs(context, if (args.len > 1) args[1..] else &.{}, stdout) catch |err| switch (err) {
-        error.InvalidArguments, error.UnknownCommand, error.ProjectRequired, error.ConfigAlreadyExists => {
+        error.InvalidArguments, error.UnknownCommand, error.ProjectRequired, error.ConfigAlreadyExists, error.CommentedConfigNotEditable, error.ServiceAlreadyExists, error.GroupNotFound, error.GroupRequired, error.ServiceNotAdded => {
             try stdout.flush();
             std.process.exit(2);
         },
@@ -153,6 +157,10 @@ pub fn run(init: std.process.Init) !void {
             std.process.exit(2);
         },
         error.SessionNotRunning, error.TmuxUnavailable, error.ServiceStopIncomplete, error.StartupFailed, error.WindowNotReady => {
+            try stdout.flush();
+            std.process.exit(1);
+        },
+        error.ConfigChanged, error.ConfigWriteFailed => {
             try stdout.flush();
             std.process.exit(1);
         },
