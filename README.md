@@ -138,6 +138,9 @@ read with `grep` or an editor after `zask close`.
   replacing the older one, and a new log begins.
 - The log keeps the output as the terminal received it, including color codes
   and `\r\n` line endings.
+- Logs may contain secrets, so the logs directory and the log files are made
+  owner-only (`0700` / `0600`), including logs that already existed with wider
+  permissions. `<service>.log.lock` coordinates concurrent starts.
 - If the log cannot be written at start, zask warns and starts the service
   anyway; its output then stays only in the tmux window. If writing fails
   while the service runs (for example, a full disk), a

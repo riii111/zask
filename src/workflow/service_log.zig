@@ -38,6 +38,12 @@ pub const Recording = struct {
 /// Readies the service log for a start at `started_at` (Unix seconds), rotating
 /// it first when it reached rotate_at_bytes. Earlier output is never truncated.
 /// Fails when the log cannot be written; the caller owns the result.
+///
+/// Concurrent calls for one service, even from separate zask processes, are
+/// serialized only while the log is prepared (see log_file.prepareAppend), so
+/// rotation never loses a generation. Two starts that both get here still
+/// each set up their own pipe; keeping one start per service from pane
+/// observation through respawn is the caller's lock to hold.
 pub fn begin(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, service: []const u8, started_at: i64) !Recording {
     return beginRotatingAt(gpa, io, dir, service, started_at, rotate_at_bytes);
 }
