@@ -1,12 +1,13 @@
 const std = @import("std");
 const config = @import("../model/config.zig");
 const observations = @import("../model/observations.zig");
+const proc_runner = @import("../platform/runner.zig");
 const service_observation = @import("service_observation.zig");
 const waits = @import("waits.zig");
 
 /// Matches the startup port wait so `wait` gives up no sooner than `open` would.
 pub const default_timeout_seconds = 180;
-const poll_interval_seconds = 1;
+const poll_interval_ms = 1_000;
 
 /// What one observation means for a service being waited on.
 pub const WaitDecision = enum {
@@ -38,36 +39,43 @@ pub fn waitReady(cfg: config.Config, observer: service_observation.Observer, tar
     const gpa = observer.gpa;
     const services = try expandTargets(gpa, cfg, targets, writer);
     defer gpa.free(services);
-    const deadline = observer.runner.nowSeconds() + timeout_seconds;
-    switch (observer.tmux.observeSession()) {
-        .active => {},
-        .missing => {
-            try waits.writeProgress(writer, "Session not running\n", .{});
-            return error.SessionNotRunning;
-        },
-        .unavailable => return waits.reportTmuxUnavailable(writer),
-    }
+    const deadline = observer.runner.nowMilliseconds() + @as(i64, timeout_seconds) * std.time.ms_per_s;
+    // Every tmux and probe command is killed at the deadline, so a command
+    // that never returns cannot hold the wait past it. Such a command reads as
+    // unavailable; past the deadline that is reported as the timeout it is.
+    const bounded = observer.withDeadline(deadline);
+    const timeout: Timeout = .{ .runner = bounded.runner, .deadline = deadline };
 
     // Last health per service for the timeout report; null until observed.
     const last = try gpa.alloc(?observations.HealthObservation, services.len);
     defer gpa.free(last);
     @memset(last, null);
+
+    switch (bounded.tmux.observeSession()) {
+        .active => {},
+        .missing => {
+            try waits.writeProgress(writer, "Session not running\n", .{});
+            return error.SessionNotRunning;
+        },
+        .unavailable => {
+            if (timeout.passed()) return reportTimeout(writer, services, last, timeout_seconds);
+            return waits.reportTmuxUnavailable(writer);
+        },
+    }
+
     const reported = try gpa.alloc(bool, services.len);
     defer gpa.free(reported);
     @memset(reported, false);
 
     // Every round re-observes all targets, so one that became ready and then
-    // exited still fails the wait. The deadline is checked before each
-    // observation as well; since every probe is time-bounded (nc -w 1, curl
-    // --max-time 1), the wait overruns the deadline by at most one probe.
+    // exited still fails the wait.
     while (true) {
         var all_ready = true;
         for (services, last, reported) |service, *health, *was_reported| {
-            if (observer.runner.nowSeconds() > deadline) return reportTimeout(writer, services, last, timeout_seconds);
+            if (timeout.passed()) return reportTimeout(writer, services, last, timeout_seconds);
             const name = try config.Config.serviceName(service);
-            const observation = try observer.observeService(service);
+            const observation = try bounded.observeService(service);
             defer observation.deinit(gpa);
-            health.* = observation.health();
             switch (waitDecision(observation.health())) {
                 .ready => if (!was_reported.*) {
                     was_reported.* = true;
@@ -79,15 +87,31 @@ pub fn waitReady(cfg: config.Config, observer: service_observation.Observer, tar
                 },
                 .pending => all_ready = false,
                 .not_running => return reportNotRunning(writer, name, observation.pane),
-                .unobservable => return reportUnobservable(writer, name, observation),
+                .unobservable => {
+                    if (timeout.passed()) return reportTimeout(writer, services, last, timeout_seconds);
+                    return reportUnobservable(writer, name, observation);
+                },
             }
+            health.* = observation.health();
         }
-        const now = observer.runner.nowSeconds();
-        if (all_ready and now <= deadline) return;
-        if (now >= deadline) return reportTimeout(writer, services, last, timeout_seconds);
-        observer.runner.sleep(std.Io.Duration.fromSeconds(@min(poll_interval_seconds, deadline - now)));
+        if (timeout.passed()) return reportTimeout(writer, services, last, timeout_seconds);
+        if (all_ready) return;
+        bounded.runner.sleep(std.Io.Duration.fromMilliseconds(@min(poll_interval_ms, timeout.remaining())));
     }
 }
+
+const Timeout = struct {
+    runner: proc_runner.Runner,
+    deadline: i64,
+
+    fn passed(self: Timeout) bool {
+        return self.runner.nowMilliseconds() >= self.deadline;
+    }
+
+    fn remaining(self: Timeout) i64 {
+        return self.deadline - self.runner.nowMilliseconds();
+    }
+};
 
 /// Caller owns the returned slice; the values borrow from `cfg`.
 fn expandTargets(gpa: std.mem.Allocator, cfg: config.Config, targets: []const []const u8, writer: *std.Io.Writer) ![]std.json.Value {
@@ -164,7 +188,7 @@ fn reportTimeout(writer: *std.Io.Writer, services: []const std.json.Value, last:
         }
         listed += 1;
     }
-    if (listed == 0) try writer.writeAll("  all targets became ready only after the deadline\n");
+    if (listed == 0) try writer.writeAll("  all targets were ready only as the deadline passed\n");
     try writer.flush();
     return error.WaitTimedOut;
 }
@@ -172,8 +196,6 @@ fn reportTimeout(writer: *std.Io.Writer, services: []const std.json.Value, last:
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
-
-const proc_runner = @import("../platform/runner.zig");
 
 const test_config =
     \\{
@@ -362,7 +384,7 @@ test "readiness_wait.waitReady: fails when a ready service exits before the othe
     try proc_runner.expectNoRemainingResponses(&h.recorder);
 }
 
-test "readiness_wait.waitReady: does not succeed when observing outlasts the deadline" {
+test "readiness_wait.waitReady: cuts off a check that outlasts the deadline" {
     var h: TestHarness = undefined;
     h.init();
     defer h.deinit();
@@ -372,15 +394,15 @@ test "readiness_wait.waitReady: does not succeed when observing outlasts the dea
     try h.enqueue("", 0);
     try h.enqueue("", 0);
 
-    try std.testing.expectError(error.WaitTimedOut, h.wait(&.{ "api", "web" }, 1));
+    try std.testing.expectError(error.WaitTimedOut, h.wait(&.{ "api", "web" }, 3));
 
     try std.testing.expectEqualStrings(
-        \\api ready
-        \\Timed out after 1s waiting for:
+        \\Timed out after 3s waiting for:
+        \\  api: not checked before the deadline
         \\  web: not checked before the deadline
         \\
     , h.output());
-    try std.testing.expectEqual(@as(usize, 2), h.commandCount("tmux"));
+    try std.testing.expectEqual(@as(usize, 1), h.commandCount("curl"));
     try proc_runner.expectNoRemainingResponses(&h.recorder);
 }
 
@@ -397,7 +419,7 @@ test "readiness_wait.waitReady: counts the session check against the deadline" {
     try std.testing.expectEqual(@as(usize, 1), h.recorder.commands.items.len);
 }
 
-test "readiness_wait.waitReady: times out when the last round ends past the deadline" {
+test "readiness_wait.waitReady: times out when the last check ends at the deadline" {
     var h: TestHarness = undefined;
     h.init();
     defer h.deinit();
@@ -405,14 +427,13 @@ test "readiness_wait.waitReady: times out when the last round ends past the dead
     try h.enqueue(test_session_active, 0);
     try h.enqueue(test_pane_running, 0);
     try h.enqueue("", 0);
-    try h.enqueue("", 0);
 
-    try std.testing.expectError(error.WaitTimedOut, h.wait(&.{"api"}, 1));
+    try std.testing.expectError(error.WaitTimedOut, h.wait(&.{"web"}, 3));
 
     try std.testing.expectEqualStrings(
-        \\api ready
-        \\Timed out after 1s waiting for:
-        \\  all targets became ready only after the deadline
+        \\web ready
+        \\Timed out after 3s waiting for:
+        \\  all targets were ready only as the deadline passed
         \\
     , h.output());
 }
@@ -479,7 +500,7 @@ test "readiness_wait.waitReady: times out within the overall limit" {
     h.init();
     defer h.deinit();
     try h.enqueue(test_session_active, 0);
-    for (0..3) |_| {
+    for (0..2) |_| {
         try h.enqueue(test_pane_running, 0);
         try h.enqueue("", 0);
         try h.enqueue("", 22);
@@ -498,19 +519,6 @@ test "readiness_wait.waitReady: times out within the overall limit" {
     try std.testing.expectEqual(@as(usize, 2), h.recorder.sleeps.items.len);
     try std.testing.expectEqual(@as(i64, 1_002), h.recorder.now_seconds);
     try proc_runner.expectNoRemainingResponses(&h.recorder);
-}
-
-test "readiness_wait.waitReady: checks once with a zero timeout" {
-    var h: TestHarness = undefined;
-    h.init();
-    defer h.deinit();
-    try h.enqueue(test_session_active, 0);
-    try h.enqueue(test_pane_running, 0);
-    try h.enqueue("", 1);
-
-    try std.testing.expectError(error.WaitTimedOut, h.wait(&.{"web"}, 0));
-
-    try std.testing.expectEqual(@as(usize, 0), h.recorder.sleeps.items.len);
 }
 
 test "readiness_wait.waitReady: rejects unknown targets before observing" {

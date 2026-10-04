@@ -14,6 +14,17 @@ pub const Observer = struct {
     tmux: tmux_client.Client,
     docker: docker_client.Compose,
 
+    /// Copy whose tmux, Docker, and probe commands are killed at `deadline_ms`
+    /// (Unix milliseconds). A command cut off this way is observed as
+    /// unavailable, so callers must check the deadline before reporting that.
+    pub fn withDeadline(self: Observer, deadline_ms: i64) Observer {
+        var bounded = self;
+        bounded.runner.deadline_ms = deadline_ms;
+        bounded.tmux.runner.deadline_ms = deadline_ms;
+        bounded.docker.runner.deadline_ms = deadline_ms;
+        return bounded;
+    }
+
     /// Caller owns the result and must deinit it with this observer's allocator.
     pub fn observeService(self: Observer, service: std.json.Value) !observations.ServiceObservation {
         const pane = self.tmux.observePane(try config.Config.serviceName(service));

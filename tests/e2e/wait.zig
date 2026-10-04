@@ -42,3 +42,32 @@ test "wait: exit codes separate usage errors from runtime failures" {
         try std.testing.expect(std.mem.startsWith(u8, res.stdout, case.stdout));
     }
 }
+
+test "wait: a tmux call that never returns fails at the deadline" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var ws = try harness.Workspace.init(gpa, io);
+    defer ws.deinit(gpa);
+    try ws.writeProjectFile(io, "config.json", config_json);
+    const fake_tmux = try std.fs.path.join(gpa, &.{ ws.elsewhere, "tmux" });
+    defer gpa.free(fake_tmux);
+    // exec keeps the hung process the direct child, so the deadline kill reaches it.
+    var file = try std.Io.Dir.createFileAbsolute(io, fake_tmux, .{ .permissions = @enumFromInt(0o755) });
+    try file.writeStreamingAll(io, "#!/bin/sh\nexec /bin/sleep 30\n");
+    file.close(io);
+    const started = std.Io.Clock.awake.now(io);
+
+    var res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.project,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+        .path = ws.elsewhere,
+    }, &.{ "--config", "config.json", "wait", "api", "--timeout", "1" });
+    defer res.deinit(gpa);
+
+    try std.testing.expect(res.exitedWith(1));
+    try std.testing.expectEqualStrings("Timed out after 1s waiting for:\n  api: not checked before the deadline\n", res.stdout);
+    try std.testing.expect(started.durationTo(std.Io.Clock.awake.now(io)).toSeconds() < 5);
+}

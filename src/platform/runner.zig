@@ -6,6 +6,10 @@ pub const Runner = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     recorder: ?*Recorder = null,
+    /// Wall-clock Unix milliseconds after which a captured run fails with
+    /// error.Timeout; std.process.run kills the child, so none is left behind.
+    /// Interactive runs ignore it.
+    deadline_ms: ?i64 = null,
 
     pub fn run(self: Runner, argv: []const []const u8, options: RunOptions) !RunOutput {
         if (self.recorder) |recorder| {
@@ -26,12 +30,14 @@ pub const Runner = struct {
                 .cwd = .{ .path = cwd },
                 .stdout_limit = .limited(captured_output_limit),
                 .stderr_limit = .limited(captured_output_limit),
+                .timeout = self.timeout(),
             })
         else
             std.process.run(self.gpa, self.io, .{
                 .argv = argv,
                 .stdout_limit = .limited(captured_output_limit),
                 .stderr_limit = .limited(captured_output_limit),
+                .timeout = self.timeout(),
             })) catch |err| switch (err) {
             error.StreamTooLong => return error.OutputTooLarge,
             else => return err,
@@ -61,6 +67,17 @@ pub const Runner = struct {
         return std.Io.Clock.real.now(self.io).toSeconds();
     }
 
+    /// Wall-clock Unix milliseconds on the same clock as `deadline_ms`.
+    pub fn nowMilliseconds(self: Runner) i64 {
+        if (self.recorder) |recorder| return recorder.now_seconds * std.time.ms_per_s;
+        return std.Io.Clock.real.now(self.io).toMilliseconds();
+    }
+
+    fn timeout(self: Runner) std.Io.Timeout {
+        const deadline_ms = self.deadline_ms orelse return .none;
+        return .{ .deadline = .{ .raw = .{ .nanoseconds = @as(i96, deadline_ms) * std.time.ns_per_ms }, .clock = .real } };
+    }
+
     fn recordedRun(self: Runner, recorder: *Recorder, argv: []const []const u8, options: RunOptions) !RunOutput {
         const result = recorder.record(argv, options.cwd, options.interactive) catch |err| switch (err) {
             error.StreamTooLong => return error.OutputTooLarge,
@@ -68,6 +85,11 @@ pub const Runner = struct {
         };
         errdefer self.gpa.free(result.stdout);
         errdefer self.gpa.free(result.stderr);
+        if (!options.interactive) {
+            if (self.deadline_ms) |deadline_ms| {
+                if (self.nowMilliseconds() > deadline_ms) return error.Timeout;
+            }
+        }
         if (options.check) try checkTerm(result.term);
         if (options.interactive) {
             self.gpa.free(result.stdout);

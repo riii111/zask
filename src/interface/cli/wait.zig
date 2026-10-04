@@ -35,7 +35,11 @@ pub fn run(ctx: *Context, opts: Options) !void {
 }
 
 fn parseTimeout(arg: []const u8) !u32 {
-    return std.fmt.parseUnsigned(u32, arg, 10) catch return error.InvalidArguments;
+    // Zero is rejected: every check is cut off at the deadline, so no check
+    // could ever finish.
+    const seconds = std.fmt.parseUnsigned(u32, arg, 10) catch return error.InvalidArguments;
+    if (seconds == 0) return error.InvalidArguments;
+    return seconds;
 }
 
 // -----------------------------------------------------------------------------
@@ -51,7 +55,7 @@ test "wait.Options: accepts targets with optional timeout" {
         .{ .args = &.{"api"}, .targets = &.{"api"}, .timeout_seconds = readiness_wait.default_timeout_seconds },
         .{ .args = &.{ "api", "backend" }, .targets = &.{ "api", "backend" }, .timeout_seconds = readiness_wait.default_timeout_seconds },
         .{ .args = &.{ "--timeout", "30", "api" }, .targets = &.{"api"}, .timeout_seconds = 30 },
-        .{ .args = &.{ "api", "web", "--timeout", "0" }, .targets = &.{ "api", "web" }, .timeout_seconds = 0 },
+        .{ .args = &.{ "api", "web", "--timeout", "1" }, .targets = &.{ "api", "web" }, .timeout_seconds = 1 },
     };
 
     for (cases) |case| {
@@ -69,6 +73,7 @@ test "wait.Options: rejects missing targets and malformed timeout" {
         &.{"--timeout"},
         &.{ "api", "--timeout" },
         &.{ "api", "--timeout", "-1" },
+        &.{ "api", "--timeout", "0" },
         &.{ "api", "--timeout", "soon" },
         &.{ "--timeout", "5", "api", "--timeout", "6" },
         &.{ "api", "--all" },
