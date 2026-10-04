@@ -53,6 +53,7 @@ Initialize the current project once, then run zask from that project directory:
 
 ```bash
 zask init
+zask check
 zask open
 zask status
 zask logs web
@@ -67,6 +68,7 @@ Compose detection still applies. An invalid line or duplicate name stops init
 with its `Procfile.dev:<line>` location, before any config is written.
 
 Run `zask help` for the full command list.
+`zask check` lists config mistakes and missing configured paths without opening a session.
 Commands exit with `1` for runtime or environment failures, and `2` for usage or config errors.
 
 Named configs are stored under the same name as `project.name`. For example,
