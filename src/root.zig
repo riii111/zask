@@ -9,6 +9,7 @@ pub const dashboard = @import("interface/ui/dashboard.zig");
 pub const docker = @import("platform/docker.zig");
 pub const lifecycle = @import("workflow/lifecycle.zig");
 pub const init_inference = @import("workflow/init_inference.zig");
+pub const jsonc = @import("model/jsonc.zig");
 pub const file_scan = @import("platform/file_scan.zig");
 pub const file_watch = @import("workflow/file_watch.zig");
 pub const lock = @import("platform/lock.zig");

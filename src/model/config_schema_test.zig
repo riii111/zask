@@ -8,6 +8,7 @@
 const std = @import("std");
 const config = @import("config.zig");
 const diagnostics = @import("diagnostics.zig");
+const jsonc = @import("jsonc.zig");
 const validate = @import("validate.zig");
 
 const Value = std.json.Value;
@@ -282,6 +283,18 @@ test "config.schema: accepts fixtures the parser accepts" {
         try std.testing.expect(try testParserAccepts(arena.allocator(), json));
         try std.testing.expect(try testSchemaAccepts(arena.allocator(), checker, json));
     }
+}
+
+test "config.schema: accepts the jsonc fixture once comments are removed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const checker = try testLoadSchema(arena.allocator());
+    const bytes = try testReadFile(arena.allocator(), "testdata/synthetic.jsonc");
+    var syntax_error: jsonc.SyntaxError = undefined;
+
+    const value = try jsonc.parse(arena.allocator(), bytes, .jsonc, &syntax_error);
+
+    try std.testing.expect(try checker.accepts(value));
 }
 
 test "config.schema: accepts every public key with $schema" {

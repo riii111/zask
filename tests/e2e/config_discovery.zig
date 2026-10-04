@@ -70,6 +70,117 @@ test "list: discovers .zask.json in current project" {
     try std.testing.expect(std.mem.startsWith(u8, res.stdout, "demo\n"));
 }
 
+const commented_config =
+    \\// Local workspace for the demo project.
+    \\{
+    \\  "project": {"name":"demo","root":"/tmp/demo"}, // keep root absolute
+    \\  "groups": [
+    \\    /* The api waits for the database. */
+    \\    {"name":"backend","services":[
+    \\      {"name":"api","dir":"backend","command":"serve // not a comment","port":18080}
+    \\    ]}
+    \\  ]
+    \\}
+;
+
+test "list: discovers zask.jsonc with comments" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ws = try harness.Workspace.init(gpa, io);
+    defer ws.deinit(gpa);
+    try ws.writeProjectFile(io, "zask.jsonc", commented_config);
+
+    var res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.project,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{"list"});
+    defer res.deinit(gpa);
+
+    try std.testing.expect(res.exitedWith(0));
+    try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
+    try std.testing.expect(std.mem.startsWith(u8, res.stdout, "demo\n"));
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "- api [backend] :18080") != null);
+}
+
+test "list: rejects zask.json and zask.jsonc together" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ws = try harness.Workspace.init(gpa, io);
+    defer ws.deinit(gpa);
+    try ws.writeProjectFile(io, "zask.json", valid_config);
+    try ws.writeProjectFile(io, "zask.jsonc", commented_config);
+
+    var res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.project,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{"list"});
+    defer res.deinit(gpa);
+
+    try std.testing.expect(res.exitedWith(2));
+    try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "multiple config files found") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "/zask.json\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "/zask.jsonc\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "Use --config <file>") != null);
+}
+
+test "config discovery: named project loads config.jsonc" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ws = try harness.Workspace.init(gpa, io);
+    defer ws.deinit(gpa);
+    try ws.writeNamedConfigFile(gpa, io, "demo", "config.jsonc", commented_config);
+
+    var res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.home,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{ "demo", "list" });
+    defer res.deinit(gpa);
+
+    try std.testing.expect(res.exitedWith(0));
+    try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
+    try std.testing.expect(std.mem.startsWith(u8, res.stdout, "demo\n"));
+}
+
+test "config discovery: rejects named config.json and config.jsonc together" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ws = try harness.Workspace.init(gpa, io);
+    defer ws.deinit(gpa);
+    const config = try namedConfig(gpa, "project");
+    defer gpa.free(config);
+    try ws.writeNamedConfigFile(gpa, io, "project", "config.json", config);
+    try ws.writeNamedConfigFile(gpa, io, "project", "config.jsonc", config);
+
+    var res = try harness.spawnZask(gpa, io, .{
+        .cwd = ws.project,
+        .xdg_config_home = ws.xdg,
+        .home = ws.home,
+    }, &.{"list"});
+    defer res.deinit(gpa);
+
+    try std.testing.expect(res.exitedWith(2));
+    try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "multiple config files found") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "/project/config.json\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "/project/config.jsonc\n") != null);
+}
+
 test "config discovery: reports missing config when local and inferred named are absent" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
@@ -184,7 +295,7 @@ test "list: rejects ambiguous local config files" {
 
     try std.testing.expect(res.exitedWith(2));
     try std.testing.expectEqual(@as(usize, 0), res.stderr.len);
-    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "multiple local config files found") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.stdout, "multiple config files found") != null);
     try std.testing.expect(std.mem.indexOf(u8, res.stdout, "Use --config <file>") != null);
 }
 

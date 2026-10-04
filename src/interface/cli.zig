@@ -21,6 +21,7 @@ const version = @import("cli/version.zig");
 const root = @import("../root.zig");
 const env = @import("../platform/env.zig");
 const diagnostics = @import("../model/diagnostics.zig");
+const jsonc = @import("../model/jsonc.zig");
 
 const CommandContext = cli_context.CommandContext;
 const ParsedArgs = cli_context.ParsedArgs;
@@ -129,14 +130,16 @@ pub fn run(init: std.process.Init) !void {
             std.process.exit(2);
         },
         error.AmbiguousConfig => {
-            try stdout.writeAll("Error: multiple local config files found\n");
+            try stdout.writeAll("Error: multiple config files found\n");
+            for (err_ctx.conflicting_config_paths) |path| try stdout.print("  {s}\n", .{path});
             try stdout.writeAll("Use --config <file> to choose one.\n");
             try stdout.flush();
             std.process.exit(2);
         },
         error.InvalidConfigSyntax => {
-            try stdout.writeAll("Error: config is not valid JSON\n");
+            try stdout.print("Error: config is not valid {s}\n", .{configFormat(err_ctx).label()});
             try renderSelectedConfig(stdout, err_ctx);
+            try renderDiagnostics(stdout, diags);
             try stdout.flush();
             std.process.exit(2);
         },
@@ -202,6 +205,10 @@ fn renderDiagnostics(writer: *std.Io.Writer, diags: diagnostics.Diagnostics) !vo
             try writer.print("  {s}: {s}\n", .{ diagnostic.path, diagnostic.message });
         }
     }
+}
+
+fn configFormat(err_ctx: cli_context.ErrorContext) jsonc.Format {
+    return jsonc.Format.fromPath(err_ctx.config_path orelse return .json);
 }
 
 fn renderSelectedConfig(writer: *std.Io.Writer, err_ctx: cli_context.ErrorContext) !void {
@@ -278,7 +285,7 @@ fn shouldUseNamedProject(context: CommandContext, args: []const []const u8) !boo
     if (args.len < 2) return false;
     if (parseCommand(args[1], false) == null) return false;
     const io = context.io orelse return false;
-    const path = try cli_context.projectConfigPath(context.gpa, context.environ, args[0]);
+    const path = try cli_context.projectConfigPath(context.gpa, io, context.environ, args[0], context.error_context);
     defer context.gpa.free(path);
     std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
