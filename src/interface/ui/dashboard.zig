@@ -6,6 +6,7 @@ const monitor = @import("monitor.zig");
 const proc_runner = @import("../../platform/runner.zig");
 const tmux_client = @import("../../platform/tmux.zig");
 const RenderContext = @import("context.zig").RenderContext;
+const Runtime = @import("../../workflow/runtime.zig").Runtime;
 
 pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env.Map, cfg: config.Config, writer: *std.Io.Writer) !void {
     const run: proc_runner.Runner = .{ .gpa = gpa, .io = io };
@@ -17,8 +18,8 @@ pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env.Map,
     _ = try ctx.runner.run(&.{shell}, .{ .interactive = true });
 }
 
-pub fn runMonitor(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.Io.Writer) !void {
-    try monitor.run(gpa, io, cfg, writer);
+pub fn runMonitor(runtime: Runtime, writer: *std.Io.Writer) !void {
+    try monitor.run(runtime, writer);
 }
 
 const reset = ansi.reset;
