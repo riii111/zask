@@ -211,23 +211,55 @@ fn checkServiceCommands(ctx: Context, report: *Report) !void {
         switch (classifyCommand(command)) {
             .program => |name| {
                 if (try executable.find(ctx.gpa, ctx.io, ctx.search_path, dir, name) != null) continue;
-                const where = if (std.mem.indexOfScalar(u8, name, '/') != null) "as an executable file" else "in PATH";
-                try report.add(.{
-                    .severity = .problem,
-                    .subject = subject,
-                    .message = try std.fmt.allocPrint(ctx.gpa, "'{s}' not found {s}", .{ name, where }),
-                    .fix = "install it, add it to PATH, or fix the command",
-                });
+                try report.add(try missingProgramFinding(ctx, service, subject, name));
             },
             .compound => try report.add(.{ .severity = .unverified, .subject = subject, .message = "compound shell command; not checked" }),
             .shell_syntax => try report.add(.{ .severity = .unverified, .subject = subject, .message = "command name uses shell syntax; not checked" }),
-            .builtin => |name| try report.add(.{
-                .severity = .unverified,
-                .subject = subject,
-                .message = try std.fmt.allocPrint(ctx.gpa, "starts with shell builtin '{s}'; not checked", .{name}),
-            }),
         }
     }
+}
+
+/// The pane shell resolves builtins itself and applies env_file before the
+/// command, so a PATH miss is only a problem when neither can explain it.
+fn missingProgramFinding(ctx: Context, service: std.json.Value, subject: []const u8, name: []const u8) !Finding {
+    const has_slash = std.mem.indexOfScalar(u8, name, '/') != null;
+    if (!has_slash and isShellBuiltin(name)) return .{
+        .severity = .unverified,
+        .subject = subject,
+        .message = try std.fmt.allocPrint(ctx.gpa, "starts with shell builtin '{s}'; not checked", .{name}),
+    };
+    if (!has_slash and try envFilesSetPath(ctx, service)) return .{
+        .severity = .unverified,
+        .subject = subject,
+        .message = try std.fmt.allocPrint(ctx.gpa, "'{s}' not found in PATH, but env_file sets PATH; not checked", .{name}),
+    };
+    return .{
+        .severity = .problem,
+        .subject = subject,
+        .message = try std.fmt.allocPrint(ctx.gpa, "'{s}' not found {s}", .{ name, if (has_slash) "as an executable file" else "in PATH" }),
+        .fix = "install it, add it to PATH, or fix the command",
+    };
+}
+
+/// Mirrors the key parsing of the launch script in lifecycle: blank lines and
+/// comments are skipped and a leading `export ` is dropped. Unreadable files
+/// are already path problems and count as not setting PATH.
+fn envFilesSetPath(ctx: Context, service: std.json.Value) !bool {
+    for (try config.Config.serviceEnvFiles(ctx.gpa, service)) |env_file| {
+        const path = try ctx.cfg.serviceEnvFilePath(ctx.gpa, service, env_file);
+        const bytes = std.Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.gpa, .limited(1024 * 1024)) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => continue,
+        };
+        var lines = std.mem.splitScalar(u8, bytes, '\n');
+        while (lines.next()) |raw_line| {
+            var line = std.mem.trimEnd(u8, raw_line, "\r");
+            if (std.mem.startsWith(u8, line, "export ")) line = line["export ".len..];
+            const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+            if (std.mem.eql(u8, line[0..eq], "PATH")) return true;
+        }
+    }
+    return false;
 }
 
 fn checkServicePorts(ctx: Context, report: *Report) !void {
@@ -392,14 +424,29 @@ const CommandShape = union(enum) {
     program: []const u8,
     compound,
     shell_syntax,
-    builtin: []const u8,
 };
 
+/// bash builtins and keywords plus common zsh-only builtins, since the pane
+/// runs the user's login shell.
 const shell_builtins = [_][]const u8{
-    ".",      ":",     "alias",    "builtin", "case",   "cd",  "command", "eval", "exec",
-    "export", "for",   "function", "if",      "select", "set", "source",  "time", "trap",
-    "ulimit", "umask", "unset",    "until",   "while",
+    ".",        ":",         "[",        "[[",        "alias",  "autoload", "bg",      "bind",     "bindkey",
+    "break",    "builtin",   "caller",   "case",      "cd",     "command",  "compgen", "complete", "compopt",
+    "continue", "coproc",    "declare",  "dirs",      "disown", "do",       "echo",    "emulate",  "enable",
+    "eval",     "exec",      "exit",     "export",    "false",  "fc",       "fg",      "for",      "function",
+    "getopts",  "hash",      "help",     "history",   "if",     "jobs",     "kill",    "let",      "local",
+    "logout",   "mapfile",   "noglob",   "nocorrect", "popd",   "print",    "printf",  "pushd",    "pwd",
+    "read",     "readarray", "readonly", "repeat",    "return", "select",   "set",     "setopt",   "shift",
+    "shopt",    "source",    "suspend",  "test",      "time",   "times",    "trap",    "true",     "type",
+    "typeset",  "ulimit",    "umask",    "unalias",   "unset",  "unsetopt", "until",   "wait",     "whence",
+    "where",    "which",     "while",    "zmodload",
 };
+
+fn isShellBuiltin(name: []const u8) bool {
+    for (shell_builtins) |builtin| {
+        if (std.mem.eql(u8, name, builtin)) return true;
+    }
+    return false;
+}
 
 /// Only a plain `name args...` command can be resolved without running a
 /// shell; anything else is reported as unverified instead of guessed.
@@ -409,9 +456,6 @@ fn classifyCommand(command: []const u8) CommandShape {
     const end = std.mem.indexOfAny(u8, trimmed, " \t") orelse trimmed.len;
     const name = trimmed[0..end];
     if (name.len == 0 or std.mem.indexOfAny(u8, name, "$'\"\\*?[]{}~=!#<>") != null) return .shell_syntax;
-    for (shell_builtins) |builtin| {
-        if (std.mem.eql(u8, name, builtin)) return .{ .builtin = name };
-    }
     return .{ .program = name };
 }
 
@@ -625,6 +669,8 @@ test "environment_check.collect: checks service commands without running them" {
     defer project.deinit();
     try project.tmp.dir.createDirPath(io, "web/bin");
     try project.tmp.dir.writeFile(io, .{ .sub_path = "web/bin/dev", .data = "", .flags = .{ .permissions = .executable_file } });
+    try project.tmp.dir.writeFile(io, .{ .sub_path = "web/.env", .data = "# venv\nexport PATH=/opt/venv/bin\n" });
+    try project.tmp.dir.writeFile(io, .{ .sub_path = "web/.env.app", .data = "PATHS=x\n" });
     var recorder = proc_runner.Recorder.init(gpa);
     const ctx = try project.context(gpa, io, &recorder,
         \\"groups":[{"name":"be","services":[
@@ -635,6 +681,9 @@ test "environment_check.collect: checks service commands without running them" {
         \\  {"name":"chain","command":"make build && ./server"},
         \\  {"name":"envvar","command":"PORT=3000 serve"},
         \\  {"name":"exec","command":"exec serve"},
+        \\  {"name":"reader","command":"read -r line"},
+        \\  {"name":"venv","dir":"web","env_file":".env","command":"uvicorn app"},
+        \\  {"name":"app","dir":"web","env_file":".env.app","command":"uvicorn app"},
         \\  {"name":"gone","dir":"absent","command":"missing-in-absent-dir"}
         \\]}]
     );
@@ -648,6 +697,9 @@ test "environment_check.collect: checks service commands without running them" {
         .{ .severity = .unverified, .subject = "groups[be].services[chain].command", .message = "compound shell command; not checked" },
         .{ .severity = .unverified, .subject = "groups[be].services[envvar].command", .message = "command name uses shell syntax; not checked" },
         .{ .severity = .unverified, .subject = "groups[be].services[exec].command", .message = "starts with shell builtin 'exec'; not checked" },
+        .{ .severity = .unverified, .subject = "groups[be].services[reader].command", .message = "starts with shell builtin 'read'; not checked" },
+        .{ .severity = .unverified, .subject = "groups[be].services[venv].command", .message = "'uvicorn' not found in PATH, but env_file sets PATH; not checked" },
+        .{ .severity = .problem, .subject = "groups[be].services[app].command", .message = "'uvicorn' not found in PATH" },
     }, report.findings.items);
     try std.testing.expectEqual(@as(usize, 0), recorder.commands.items.len);
 }
@@ -801,7 +853,7 @@ test "environment_check.classifyCommand: separates plain programs from shell syn
         .{ .command = "PORT=3000 serve", .expected = .shell_syntax },
         .{ .command = "$HOME/bin/serve", .expected = .shell_syntax },
         .{ .command = "'my tool' run", .expected = .shell_syntax },
-        .{ .command = "cd api", .expected = .{ .builtin = "cd" } },
+        .{ .command = "cd api", .expected = .{ .program = "cd" } },
     };
 
     for (cases) |case| try std.testing.expectEqualDeep(case.expected, classifyCommand(case.command));
