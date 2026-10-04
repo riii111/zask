@@ -176,20 +176,21 @@ pub fn projectConfigPath(gpa: std.mem.Allocator, io: std.Io, environ: ?*const en
 
 fn absoluteConfigPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
     if (std.fs.path.isAbsolute(path)) return path;
-    return std.Io.Dir.cwd().realPathFileAlloc(io, path, gpa) catch |err| switch (err) {
-        error.FileNotFound => return error.ConfigNotFound,
-        else => return err,
-    };
+    // Join with the cwd instead of resolving the file itself: the selected
+    // file name decides JSON or JSONC, even when it is a symlink.
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(cwd);
+    const absolute = try std.fs.path.join(gpa, &.{ cwd, path });
+    errdefer gpa.free(absolute);
+    try ensureConfigPathExists(io, absolute);
+    return absolute;
 }
 
 /// Consumes `path` and returns either the same owned absolute path or a newly resolved one.
 fn absoluteOwnedConfigPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
     errdefer gpa.free(path);
     if (std.fs.path.isAbsolute(path)) return path;
-    const absolute = std.Io.Dir.cwd().realPathFileAlloc(io, path, gpa) catch |err| switch (err) {
-        error.FileNotFound => return error.ConfigNotFound,
-        else => return err,
-    };
+    const absolute = try absoluteConfigPath(gpa, io, path);
     gpa.free(path);
     return absolute;
 }
@@ -436,6 +437,26 @@ test "cli.context.projectConfigPath: selects existing named config" {
             try std.testing.expectEqual(@as(usize, 2), err_ctx.conflicting_config_paths.len);
         }
     }
+}
+
+test "cli.context.absoluteConfigPath: keeps the selected file name of a symlink" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "real.json", .data = "{}" });
+    try tmp.dir.symLink(io, "real.json", "zask.jsonc", .{});
+    const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    const previous = try testWithCwd(gpa, io, base);
+    defer std.process.setCurrentPath(io, previous) catch unreachable;
+
+    const path = try absoluteConfigPath(gpa, io, "zask.jsonc");
+
+    try std.testing.expectEqualStrings(try std.fs.path.join(gpa, &.{ base, "zask.jsonc" }), path);
+    try std.testing.expectError(error.ConfigNotFound, absoluteConfigPath(gpa, io, "missing.jsonc"));
 }
 
 test "cli.context.commandHint: maps config sources to command forms" {

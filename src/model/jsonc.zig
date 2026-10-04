@@ -82,12 +82,12 @@ fn blankComments(gpa: std.mem.Allocator, bytes: []const u8, format: Format) !Bla
             },
             ' ', '\t', '\n', '\r' => {},
             '/' => {
-                const end = commentEnd(bytes, i) orelse {
+                const comment = commentEnd(bytes, i) orelse {
                     last_significant = i;
                     continue;
                 };
                 if (format == .json) return .{ .err = .{ .offset = i, .message = "comments are allowed only in .jsonc config files" } };
-                if (end == bytes.len and bytes[i + 1] == '*') return .{ .err = .{ .offset = i, .message = "unterminated block comment" } };
+                const end = comment orelse return .{ .err = .{ .offset = i, .message = "unterminated block comment" } };
                 if (out == null) out = try gpa.dupe(u8, bytes);
                 for (out.?[i..end]) |*byte| {
                     if (byte.* != '\n' and byte.* != '\r') byte.* = ' ';
@@ -106,14 +106,14 @@ fn blankComments(gpa: std.mem.Allocator, bytes: []const u8, format: Format) !Bla
     return .{ .ok = out orelse bytes };
 }
 
-/// Returns the exclusive end of the comment starting at `start`, or null when
-/// the slash does not start a comment. An unterminated block comment ends at
-/// `bytes.len`.
-fn commentEnd(bytes: []const u8, start: usize) ?usize {
+/// Returns the exclusive end of the comment starting at `start`. The outer
+/// null means the slash does not start a comment; the inner null means an
+/// unterminated block comment.
+fn commentEnd(bytes: []const u8, start: usize) ??usize {
     if (start + 1 >= bytes.len) return null;
     return switch (bytes[start + 1]) {
         '/' => std.mem.indexOfScalarPos(u8, bytes, start + 2, '\n') orelse bytes.len,
-        '*' => if (std.mem.indexOfPos(u8, bytes, start + 2, "*/")) |close| close + 2 else bytes.len,
+        '*' => if (std.mem.indexOfPos(u8, bytes, start + 2, "*/")) |close| close + 2 else @as(?usize, null),
         else => null,
     };
 }
@@ -190,10 +190,12 @@ test "jsonc.parse: jsonc comments parse like the same json" {
         \\}
         \\// trailing note without newline
     , .jsonc);
+    const block_at_end = try testParse(arena.allocator(), "{} /* note */", .jsonc);
 
     try testExpectSameValue(arena.allocator(),
         \\{"port":8080,"tags":[1,2]}
     , value);
+    try testExpectSameValue(arena.allocator(), "{}", block_at_end);
 }
 
 test "jsonc.parse: comment markers inside strings stay literal" {
@@ -237,6 +239,7 @@ test "jsonc.parse: reports syntax errors with original position" {
         .{ .name = "comment in json", .bytes = "{\n  \"a\": 1 // note\n}", .format = .json, .line = 2, .column = 10, .message = "comments are allowed only in .jsonc config files" },
         .{ .name = "block comment in json", .bytes = "/* note */{}", .format = .json, .line = 1, .column = 1, .message = "comments are allowed only in .jsonc config files" },
         .{ .name = "unterminated block comment", .bytes = "{\n  /* note\n}", .format = .jsonc, .line = 2, .column = 3, .message = "unterminated block comment" },
+        .{ .name = "unterminated block comment at end", .bytes = "{} /*", .format = .jsonc, .line = 1, .column = 4, .message = "unterminated block comment" },
         .{ .name = "trailing comma in object", .bytes = "{\n  \"a\": 1,\n}", .format = .json, .line = 2, .column = 9, .message = "trailing comma is not allowed" },
         .{ .name = "trailing comma before comment", .bytes = "{\n  \"a\": [1, // last\n  ]\n}", .format = .jsonc, .line = 2, .column = 10, .message = "trailing comma is not allowed" },
         .{ .name = "error after block comment", .bytes = "{\n  /* one\n     two */ \"a\" 1\n}", .format = .jsonc, .line = 3, .column = 17, .message = "invalid syntax" },
