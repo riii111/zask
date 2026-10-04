@@ -266,9 +266,10 @@ Docker Compose output is not saved.
 - `zask logs api --path` prints only the log path, for an editor or
   `grep pattern "$(zask logs api --path)"`. It prints the path even before the
   first start has created the log.
-- When the session or the service window is gone, `zask logs api` and
+- When the session is not running, `zask logs api` and
   `zask logs api --tail <n>` still fail, and also print the saved log path and
-  the command that reads it, if the log exists.
+  the command that reads it, if the log exists. `--tail` does the same when
+  only the service window is gone.
 - `--saved` exits `1` with the expected path when the service has not saved
   any output yet, and `--saved` or `--path` exits `1` for an unknown service.
 
