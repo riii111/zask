@@ -1,4 +1,5 @@
 const std = @import("std");
+const add = @import("cli/add.zig");
 const attach = @import("cli/attach.zig");
 const check = @import("cli/check.zig");
 const close = @import("cli/close.zig");
@@ -51,6 +52,7 @@ const Command = enum {
     monitor,
     preview_list,
     sync_size,
+    add,
 
     fn run(self: Command, context: *cli_context.Context) !void {
         return switch (self) {
@@ -74,6 +76,7 @@ const Command = enum {
             .monitor => runCommand(monitor, context),
             .preview_list => runCommand(preview_list, context),
             .sync_size => runCommand(sync_size, context),
+            .add => runCommand(add, context),
         };
     }
 };
@@ -109,6 +112,7 @@ const command_specs = [_]CommandSpec{
     .{ .command = .init, .names = &.{"init"}, .usage = "init [project] [--root <path>] [--from <Procfile>] [--force]", .description = "Create project config", .completion = .init_options, .global = true },
     .{ .command = .wait, .names = &.{"wait"}, .usage = "wait <svc|group>... [--timeout <sec>]", .description = "Wait until services are ready" },
     .{ .command = .completion, .names = &.{"completion"}, .usage = "completion [zsh|bash|fish]", .description = "Print shell completion script", .completion = .shell, .global = true },
+    .{ .command = .add, .names = &.{"add"}, .usage = "add <svc> <command> [--group <group>] [--port <port>]", .description = "Add a service to the config" },
     .{ .command = .version, .names = &.{"version"}, .usage = "version", .description = "Print zask version", .global = true },
     .{ .command = .help, .names = &.{ "help", "--help", "-h" }, .usage = "help", .description = "Print this help", .global = true },
     .{ .command = .dashboard, .names = &.{"dashboard"}, .internal = true, .show_in_help = false },
@@ -151,7 +155,7 @@ fn exitWithJsonError(gpa: std.mem.Allocator, stdout: *std.Io.Writer, err: anyerr
 
 fn exitWithTextError(stdout: *std.Io.Writer, err: anyerror, err_ctx: cli_context.ErrorContext, diags: diagnostics.Diagnostics) !void {
     switch (err) {
-        error.InvalidArguments, error.UnknownCommand, error.ProjectRequired, error.ConfigAlreadyExists, error.InvalidProcfile, error.UnknownTarget => {
+        error.InvalidArguments, error.UnknownCommand, error.ProjectRequired, error.ConfigAlreadyExists, error.InvalidProcfile, error.UnknownTarget, error.CommentedConfigNotEditable, error.ServiceAlreadyExists, error.GroupNotFound, error.GroupRequired, error.ServiceNotAdded => {
             try stdout.flush();
             std.process.exit(2);
         },
@@ -191,6 +195,10 @@ fn exitWithTextError(stdout: *std.Io.Writer, err: anyerror, err_ctx: cli_context
             std.process.exit(2);
         },
         error.SessionNotRunning, error.TmuxUnavailable, error.ServiceStopIncomplete, error.StartupFailed, error.WindowNotReady, error.ServiceNotFound, error.ServiceWindowMissing, error.LogOutputTooLarge, error.ServiceNotRunning, error.ReadinessUnavailable, error.WaitTimedOut => {
+            try stdout.flush();
+            std.process.exit(1);
+        },
+        error.ConfigChanged, error.ConfigConflict, error.ConfigWriteFailed => {
             try stdout.flush();
             std.process.exit(1);
         },
@@ -795,7 +803,7 @@ test "cli.check: lists every missing configured path" {
 test "cli.completion: lists public commands and config option at top level" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const expected = "open\nclose\nre\nattach\nstart\nstop\nrestart\nlist\nstatus\ncheck\nlogs\ninit\nwait\ncompletion\nversion\nhelp\n--help\n-h\n--config\n";
+    const expected = "open\nclose\nre\nattach\nstart\nstop\nrestart\nlist\nstatus\ncheck\nlogs\ninit\nwait\ncompletion\nadd\nversion\nhelp\n--help\n-h\n--config\n";
 
     try std.testing.expectEqualStrings(expected, try testComplete(arena.allocator(), "zask", &.{""}));
     try std.testing.expectEqualStrings(expected, try testComplete(arena.allocator(), "zask", &.{}));
@@ -806,7 +814,7 @@ test "cli.completion: lists public commands and config option at top level" {
 test "cli.completion: lists project commands after config selection" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const expected = "open\nclose\nre\nattach\nstart\nstop\nrestart\nlist\nstatus\ncheck\nlogs\ninit\nwait\ncompletion\nversion\nhelp\n--help\n-h\n";
+    const expected = "open\nclose\nre\nattach\nstart\nstop\nrestart\nlist\nstatus\ncheck\nlogs\ninit\nwait\ncompletion\nadd\nversion\nhelp\n--help\n-h\n";
 
     try std.testing.expectEqualStrings(expected, try testComplete(arena.allocator(), "zask", &.{ "--config", "testdata/synthetic.json", "" }));
     try std.testing.expectEqualStrings(expected, try testComplete(arena.allocator(), "zask", &.{ "demo", "" }));

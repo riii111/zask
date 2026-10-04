@@ -7,7 +7,7 @@ const jsonc = @import("jsonc.zig");
 const watch = @import("watch.zig");
 
 const Value = std.json.Value;
-const max_config_bytes = 10 * 1024 * 1024;
+pub const max_config_bytes = 10 * 1024 * 1024;
 
 /// ユーザーが zask.json に書く公開キー名の単一定義。
 /// validate の許可リスト・normalize の入力読み取り・init の生成で共有する。
@@ -523,12 +523,36 @@ pub fn loadPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []co
 // Like loadPath, but records config validation problems into the caller's
 // collector. File and JSON-syntax failures stay as plain errors.
 pub fn loadPathWithDiagnostics(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []const u8, diags: *diagnostics.Diagnostics) !Config {
-    const bytes = readFile(gpa, io, path) catch |err| switch (err) {
+    return (try loadFileWithDiagnostics(gpa, io, path, home, diags)).cfg;
+}
+
+pub const ConfigFile = struct {
+    /// The exact file content `cfg` was parsed from.
+    bytes: []const u8,
+    cfg: Config,
+};
+
+/// Like loadPathWithDiagnostics, but keeps the file content for editing.
+/// Both fields are allocated from `gpa`; pass an arena.
+pub fn loadFileWithDiagnostics(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []const u8, diags: *diagnostics.Diagnostics) !ConfigFile {
+    const bytes = try readConfigBytes(gpa, io, path);
+    return .{ .bytes = bytes, .cfg = try Config.parseFormatWithDiagnostics(gpa, bytes, jsonc.Format.fromPath(path), home, diags) };
+}
+
+/// Whether a config of `len` bytes can be loaded; the read limit counts a
+/// file that reaches it as too large.
+pub fn fitsLoadLimit(len: usize) bool {
+    return len < max_config_bytes;
+}
+
+/// Returns the file content owned by the caller, with the same size limit
+/// and errors as loading a config.
+pub fn readConfigBytes(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
+    return readFile(gpa, io, path) catch |err| switch (err) {
         error.FileNotFound => return error.ConfigNotFound,
         error.StreamTooLong => return error.ConfigTooLarge,
         else => return err,
     };
-    return Config.parseFormatWithDiagnostics(gpa, bytes, jsonc.Format.fromPath(path), home, diags);
 }
 
 pub fn parseJsonBytes(gpa: std.mem.Allocator, bytes: []const u8) !Value {
