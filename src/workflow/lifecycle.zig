@@ -341,6 +341,8 @@ pub const Lifecycle = struct {
 
     fn ensureServiceRunning(self: Lifecycle, service: []const u8, progress: anytype, mode: StartMode) !void {
         const value = try self.cfg.findService(service);
+        const held = try self.holdStopMark(service);
+        defer if (held) |h| h.release();
         var recreate_window = false;
         if (mode == .observe) {
             const pane = self.tmux.observePane(service);
@@ -388,8 +390,6 @@ pub const Lifecycle = struct {
                 else => return err,
             };
         }
-        const held = if (self.respect_stop_mark) try self.holdStopMark(service) else null;
-        defer if (held) |h| h.release();
         if (self.respect_stop_mark and self.observeStopMark(service) != .not_stopped) {
             try progress.info("  {s} was stopped; not starting it\n", .{service});
             return;
@@ -716,11 +716,10 @@ const StopDecision = enum {
 };
 
 fn serviceStartDecision(pane: observations.PaneObservation) ServiceStartDecision {
-    // Raw-field exception: when the pane's current command is a shell, the
-    // service process is not the foreground process, so it must be (re)started
-    // even if pgrep made the pane look busy. Every other case is decided from
-    // the observed state alone.
-    if (pane.command.len > 0 and tmux_client.isShellCommand(pane.command)) return .send_start;
+    // A pane without a zask start marker may be an interactive shell running
+    // unrelated children. Once zask launched it, the shell is the service's
+    // wrapper and its busy observation must prevent a duplicate start.
+    if (pane.started_at == null and pane.command.len > 0 and tmux_client.isShellCommand(pane.command)) return .send_start;
     return switch (pane.state) {
         .busy => .no_op,
         .idle, .dead => .send_start,

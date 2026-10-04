@@ -652,6 +652,66 @@ test "runtime.start: service log keeps output past the pane history across resta
     try std.testing.expect(first_line < crash and crash < second_header and second_header < second_run);
 }
 
+test "cli.start: concurrent starts rotate once and keep the new output connected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-parallel-start", .{std.c.getpid()});
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var project = try writeServiceProject(gpa, io, tmp.dir, session);
+    defer project.env_map.deinit();
+    try project.env_map.put("XDG_STATE_HOME", project.root);
+    const client = tmuxClient(gpa, io, session);
+    const marks = try zask.stop_marks.StopMarks.forSession(gpa, io, session);
+    defer std.Io.Dir.cwd().deleteTree(io, marks.dir) catch {};
+    const log_dir = try zask.service_log.directory(gpa, &project.env_map, session);
+    const log_path = try zask.service_log.servicePath(gpa, log_dir, "api");
+    try std.Io.Dir.cwd().createDirPath(io, log_dir);
+    const previous = try gpa.alloc(u8, zask.service_log.rotate_at_bytes);
+    @memset(previous, 'x');
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = log_path, .data = previous });
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", project.root, "sleep 60");
+    defer client.killSession() catch {};
+    try client.newWindowAfter("dashboard", "api", project.root, try zask.zask_command.waitingPlaceholder(gpa, "api"));
+    try waitForPaneState(client, gpa, io, "api", .idle);
+    const held = try marks.hold(gpa, "api");
+    var released = false;
+    defer if (!released) held.release();
+    var children: [8]std.process.Child = undefined;
+    var spawned: usize = 0;
+    defer for (children[0..spawned]) |*child| {
+        if (child.id != null) _ = child.wait(io) catch {};
+    };
+    for (&children) |*child| {
+        child.* = try std.process.spawn(io, .{
+            .argv = &.{ build_options.zask_path, "start", "api" },
+            .cwd = .{ .path = project.root },
+            .environ_map = &project.env_map,
+            .stdout = .ignore,
+            .stderr = .ignore,
+        });
+        spawned += 1;
+    }
+    try std.Io.sleep(io, .fromMilliseconds(200), .awake);
+    const before_release = try std.Io.Dir.cwd().statFile(io, log_path, .{});
+    try std.testing.expectEqual(@as(u64, previous.len), before_release.size);
+    held.release();
+    released = true;
+    for (&children) |*child| try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try child.wait(io));
+    try waitForPaneState(client, gpa, io, "api", .busy);
+    const log = try waitForFileText(gpa, io, std.Io.Dir.cwd(), log_path, "=== zask: api started at ");
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, log, "=== zask: api started at "));
+    const rotated = try std.fmt.allocPrint(gpa, "{s}.1", .{log_path});
+    const saved = try std.Io.Dir.cwd().readFileAlloc(io, rotated, gpa, .limited(zask.service_log.rotate_at_bytes + 4096));
+    try std.testing.expectEqualSlices(u8, previous, saved);
+}
+
 const ServiceProject = struct {
     root: []const u8,
     env_map: std.process.Environ.Map,
