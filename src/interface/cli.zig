@@ -795,7 +795,7 @@ test "cli.check: lists every missing configured path" {
 test "cli.completion: lists public commands and config option at top level" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const expected = "open\nclose\nre\nattach\nstart\nstop\nrestart\nlist\nstatus\nlogs\ninit\ncompletion\nversion\nhelp\n--help\n-h\n--config\n";
+    const expected = "open\nclose\nre\nattach\nstart\nstop\nrestart\nlist\nstatus\ncheck\nlogs\ninit\nwait\ncompletion\nversion\nhelp\n--help\n-h\n--config\n";
 
     try std.testing.expectEqualStrings(expected, try testComplete(arena.allocator(), "zask", &.{""}));
     try std.testing.expectEqualStrings(expected, try testComplete(arena.allocator(), "zask", &.{}));
@@ -806,7 +806,7 @@ test "cli.completion: lists public commands and config option at top level" {
 test "cli.completion: lists project commands after config selection" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const expected = "open\nclose\nre\nattach\nstart\nstop\nrestart\nlist\nstatus\nlogs\ninit\ncompletion\nversion\nhelp\n--help\n-h\n";
+    const expected = "open\nclose\nre\nattach\nstart\nstop\nrestart\nlist\nstatus\ncheck\nlogs\ninit\nwait\ncompletion\nversion\nhelp\n--help\n-h\n";
 
     try std.testing.expectEqualStrings(expected, try testComplete(arena.allocator(), "zask", &.{ "--config", "testdata/synthetic.json", "" }));
     try std.testing.expectEqualStrings(expected, try testComplete(arena.allocator(), "zask", &.{ "demo", "" }));
@@ -880,7 +880,7 @@ test "cli.completion: offers init options without config" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    try std.testing.expectEqualStrings("--root\n--force\n", try testComplete(arena.allocator(), "zask", &.{ "init", "demo", "--" }));
+    try std.testing.expectEqualStrings("--root\n--from\n--force\n", try testComplete(arena.allocator(), "zask", &.{ "init", "demo", "--" }));
     try std.testing.expectEqualStrings("", try testComplete(arena.allocator(), "zask", &.{ "init", "--root", "" }));
 }
 

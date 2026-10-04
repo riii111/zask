@@ -348,13 +348,13 @@ pub const Config = struct {
         errdefer list.deinit(gpa);
         for (try self.services()) |service| {
             const group = serviceGroup(service);
-            if (group.len == 0 or containsString(list.items, group)) continue;
+            if (group.len == 0 or containsString(group, list.items)) continue;
             try list.append(gpa, group);
         }
         if (self.get(&.{"group_aliases"})) |aliases| {
             if (aliases == .object) {
                 for (aliases.object.keys()) |alias| {
-                    if (!containsString(list.items, alias)) try list.append(gpa, alias);
+                    if (!containsString(alias, list.items)) try list.append(gpa, alias);
                 }
             }
         }
@@ -1283,13 +1283,6 @@ fn optionalStringArray(gpa: std.mem.Allocator, value: ?Value) ![][]const u8 {
 fn arrayItems(value: Value) ![]const Value {
     if (value != .array) return error.InvalidConfig;
     return value.array.items;
-}
-
-fn containsString(values: []const []const u8, needle: []const u8) bool {
-    for (values) |value| {
-        if (std.mem.eql(u8, value, needle)) return true;
-    }
-    return false;
 }
 
 fn isAllowedRuntime(runtime: []const u8) bool {
@@ -2330,7 +2323,7 @@ test "config.validateAll: reports named service problems at the key" {
         .{ .path = "groups[1].services.bad name", .message = "must be a valid identifier" },
         .{ .path = "groups[1].services.num", .message = "must be a command string or a service object" },
         .{ .path = "groups[1].services.job.name", .message = "must not be set; the key 'job' is the service name" },
-        .{ .path = "groups[1].services.cron.comand", .message = "unknown key" },
+        .{ .path = "groups[1].services.cron.comand", .message = "unknown key; did you mean 'command'?" },
         .{ .path = "groups[1].services.cron", .message = "missing required string 'command'" },
         .{ .path = "groups[1].services.web.dir", .message = "must stay within the project root" },
         .{ .path = "groups[2].services", .message = "must be an array or an object" },

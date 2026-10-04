@@ -79,8 +79,8 @@ pub fn collectArguments(kind: ArgKind, typed_args: []const []const u8, cfg: ?con
 }
 
 fn collectInitOptions(typed_args: []const []const u8, candidates: *Candidates) !void {
-    if (typed_args.len > 0 and std.mem.eql(u8, typed_args[typed_args.len - 1], "--root")) return;
-    for ([_][]const u8{ "--root", "--force" }) |option| {
+    if (typed_args.len > 0 and (std.mem.eql(u8, typed_args[typed_args.len - 1], "--root") or std.mem.eql(u8, typed_args[typed_args.len - 1], "--from"))) return;
+    for ([_][]const u8{ "--root", "--from", "--force" }) |option| {
         if (!containsArg(typed_args, option)) try candidates.add(option);
     }
 }
@@ -206,7 +206,7 @@ test "complete.collectArguments: keeps static candidates without config" {
 
     try std.testing.expectEqualStrings("--all\n", try testCollect(gpa, .start_target, &.{}, null, ""));
     try std.testing.expectEqualStrings("", try testCollect(gpa, .restart_target, &.{}, null, ""));
-    try std.testing.expectEqualStrings("--root\n--force\n", try testCollect(gpa, .init_options, &.{"demo"}, null, ""));
+    try std.testing.expectEqualStrings("--root\n--from\n--force\n", try testCollect(gpa, .init_options, &.{"demo"}, null, ""));
 }
 
 test "complete.collectArguments: stops after single target argument" {
@@ -224,7 +224,7 @@ test "complete.collectArguments: init omits used options and path values" {
     defer arena.deinit();
     const gpa = arena.allocator();
 
-    try std.testing.expectEqualStrings("--root\n", try testCollect(gpa, .init_options, &.{"--force"}, null, ""));
+    try std.testing.expectEqualStrings("--root\n--from\n", try testCollect(gpa, .init_options, &.{"--force"}, null, ""));
     try std.testing.expectEqualStrings("", try testCollect(gpa, .init_options, &.{"--root"}, null, ""));
 }
 
