@@ -699,6 +699,7 @@ fn waitForPaneText(gpa: std.mem.Allocator, io: std.Io, target: []const u8, needl
         if (std.mem.indexOf(u8, result.stdout, needle) != null) return;
         try std.Io.sleep(io, service_state_interval, .awake);
     }
+    try dumpPane(gpa, io, target);
     return error.PaneTextTimeout;
 }
 
@@ -714,6 +715,7 @@ fn waitForSelectedRow(gpa: std.mem.Allocator, io: std.Io, target: []const u8, na
         }
         try std.Io.sleep(io, service_state_interval, .awake);
     }
+    try dumpPane(gpa, io, target);
     return error.SelectionTimeout;
 }
 
@@ -764,4 +766,12 @@ fn sendSplitArrow(gpa: std.mem.Allocator, io: std.Io, target: []const u8, tail: 
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "-H", "1b" });
     try std.Io.sleep(io, .fromMilliseconds(150), .awake);
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "-l", tail });
+}
+
+// Printed on timeouts so CI logs show what the monitor actually drew.
+fn dumpPane(gpa: std.mem.Allocator, io: std.Io, target: []const u8) !void {
+    const result = try run(gpa, io, &.{ build_options.tmux_path, "capture-pane", "-p", "-t", target });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    std.debug.print("pane {s}:\n{s}\n", .{ target, result.stdout });
 }
