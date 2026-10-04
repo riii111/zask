@@ -19,6 +19,7 @@ test "tmux.newSession: direct construction keeps dashboard selected" {
     client.killSession() catch {};
     try client.newSession("dashboard", "/tmp", try zask.zask_command.waitingPlaceholder(arena.allocator(), "Dashboard"));
     defer client.killSession() catch {};
+    // Busy with a closed port, api stays `waiting` and shows its last log line.
     try client.newWindowAfter("dashboard", "api", "/tmp", "sleep 60");
     try client.newWindowAfter("api", "worker", "/tmp", "sleep 60");
     try client.selectWindow("dashboard");
@@ -44,6 +45,7 @@ test "zask_command.waitingPlaceholder: keeps placeholder windows alive for later
     client.killSession() catch {};
     try client.newSession("dashboard", "/tmp", try zask.zask_command.waitingPlaceholder(arena.allocator(), "Dashboard"));
     defer client.killSession() catch {};
+    // Busy with a closed port, api stays `waiting` and shows its last log line.
     try client.newWindowAfter("dashboard", "api", "/tmp", try zask.zask_command.waitingPlaceholder(arena.allocator(), "api"));
 
     try expectPaneAlive(std.testing.allocator, io, try std.fmt.allocPrint(arena.allocator(), "{s}:api", .{session}));
@@ -61,6 +63,7 @@ test "runtime.previewList: resizes stale detached windows before tree mode" {
     client.killSession() catch {};
     try client.newSession("dashboard", "/tmp", "sleep 60");
     defer client.killSession() catch {};
+    // Busy with a closed port, api stays `waiting` and shows its last log line.
     try client.newWindowAfter("dashboard", "api", "/tmp", "sleep 60");
     try client.newWindowAfter("api", "docker", "/tmp", "sleep 60");
     try client.resizeWindow(try std.fmt.allocPrint(arena.allocator(), "{s}:api", .{session}), 80, 24);
@@ -243,6 +246,7 @@ test "runtime: open, status, close build, report, then remove workspace" {
         .config_path = "/tmp/config.json",
     });
     try client.splitWindow("dashboard", "/tmp", "sleep 300");
+    // Busy with a closed port, api stays `waiting` and shows its last log line.
     try client.newWindowAfter("dashboard", "api", "/tmp", try zask.zask_command.waitingPlaceholder(a, "api"));
     try client.selectWindow("dashboard");
 
@@ -314,6 +318,7 @@ test "runtime: start, logs, stop, restart move service pane through its lifecycl
     client.killSession() catch {};
     try client.newSession("dashboard", "/tmp", "sleep 60");
     defer client.killSession() catch {};
+    // Busy with a closed port, api stays `waiting` and shows its last log line.
     try client.newWindowAfter("dashboard", "api", "/tmp", try zask.zask_command.waitingPlaceholder(gpa, "api"));
 
     const cfg = try zask.config.Config.parse(gpa,
@@ -373,6 +378,7 @@ test "runtime.start: recreated service windows preserve configured order" {
     client.killSession() catch {};
     try client.newSession("dashboard", "/tmp", "sleep 60");
     defer client.killSession() catch {};
+    // Busy with a closed port, api stays `waiting` and shows its last log line.
     try client.newWindowAfter("dashboard", "api", "/tmp", try zask.zask_command.waitingPlaceholder(gpa, "api"));
     try client.newWindowAfter("api", "worker", "/tmp", try zask.zask_command.waitingPlaceholder(gpa, "worker"));
     try client.newWindowAfter("worker", "web", "/tmp", try zask.zask_command.waitingPlaceholder(gpa, "web"));
@@ -428,6 +434,7 @@ test "runtime.observer: start marker follows start and restart" {
     client.killSession() catch {};
     try client.newSession("dashboard", "/tmp", "sleep 60");
     defer client.killSession() catch {};
+    // Busy with a closed port, api stays `waiting` and shows its last log line.
     try client.newWindowAfter("dashboard", "api", "/tmp", try zask.zask_command.waitingPlaceholder(gpa, "api"));
 
     const cfg = try zask.config.Config.parse(gpa,
@@ -501,7 +508,7 @@ test "monitor: keys move selection, toggle the filter, and quit restores the ter
             \\{{
             \\  "project": {{"name":"{s}","root":"."}},
             \\  "groups": [{{"name":"backend","services":[
-            \\    {{"name":"api","dir":".","command":"/bin/sleep 60"}},
+            \\    {{"name":"api","dir":".","command":"/bin/sleep 60","port":1}},
             \\    {{"name":"web","dir":".","command":"/bin/sleep 60"}}
             \\  ]}}]
             \\}}
@@ -524,6 +531,8 @@ test "monitor: keys move selection, toggle the filter, and quit restores the ter
         .zask_path = build_options.zask_path,
         .config_path = config_path,
     });
+    // Busy with a closed port, api stays `waiting` and shows its last log line.
+    try client.newWindowAfter("dashboard", "api", project_root, "printf 'ログ日本語日本語日本語日本語日本語日本語\\n'; exec sleep 60");
     const target = try std.fmt.allocPrint(gpa, "{s}:dashboard", .{session});
 
     try waitForSelectedRow(gpa, io, target, "api");
@@ -533,6 +542,22 @@ test "monitor: keys move selection, toggle the filter, and quit restores the ter
     try waitForSelectedRow(gpa, io, target, "web");
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "Up" });
     try waitForSelectedRow(gpa, io, target, "api");
+
+    // An arrow key whose bytes reach the monitor in two reads still moves once.
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "-H", "1b" });
+    try std.Io.sleep(io, .fromMilliseconds(150), .awake);
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "-l", "[B" });
+    try waitForSelectedRow(gpa, io, target, "web");
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "k" });
+    try waitForSelectedRow(gpa, io, target, "api");
+
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "resize-window", "-t", target, "-x", "45", "-y", "10" });
+    try waitForPaneText(gpa, io, target, "│ ログ");
+    try expectWideLogClipped(gpa, io, target);
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "resize-window", "-t", target, "-x", "45", "-y", "4" });
+    try waitForPaneText(gpa, io, target, "j/k");
+    try waitForSelectedRow(gpa, io, target, "api");
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "resize-window", "-t", target, "-x", "80", "-y", "24" });
 
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "f" });
     try waitForPaneText(gpa, io, target, "[bad]");
@@ -714,4 +739,18 @@ fn expectPaneFlags(gpa: std.mem.Allocator, io: std.Io, target: []const u8, expec
         try std.Io.sleep(io, service_state_interval, .awake);
     }
     return error.PaneFlagsTimeout;
+}
+
+// A wrapped log would put its tail on a line of its own, without the row's
+// `│` separator.
+fn expectWideLogClipped(gpa: std.mem.Allocator, io: std.Io, target: []const u8) !void {
+    const result = try run(gpa, io, &.{ build_options.tmux_path, "capture-pane", "-p", "-t", target });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "日本") == null) continue;
+        try std.testing.expect(std.mem.indexOf(u8, line, "│") != null);
+    }
 }

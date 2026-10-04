@@ -17,10 +17,9 @@ const monitor_port_width = 8;
 const monitor_status_width = 8;
 const monitor_log_width = 35;
 const refresh_interval_ms = 1000;
-// Title and blank line above the rows; notice, rule, key guide, and command
-// forms below them. Rows scroll so these stay on screen in short panes.
-const header_lines = 2;
-const footer_lines = 4;
+// How long a lone ESC waits for the rest of an arrow-key sequence. Only a
+// bare ESC is delayed by this, and the monitor binds no action to it.
+const escape_timeout_ms = 250;
 const key_guide = "j/k ↑↓ select  f filter  q quit";
 
 /// Runs until `q` / Ctrl+C or the terminal closes. Leaving restores the
@@ -74,6 +73,7 @@ const Monitor = struct {
     selection: Selection = .{},
     notice: ?[]const u8 = null,
     previous: []u8 = &.{},
+    input: keys.Decoder = .{},
 
     fn deinit(self: *Monitor) void {
         self.selection.deinit(self.gpa);
@@ -91,10 +91,13 @@ const Monitor = struct {
             const elapsed = refreshed_at.untilNow(self.io, .awake).toMilliseconds();
             const remaining: i32 = @intCast(std.math.clamp(refresh_interval_ms - elapsed, 0, refresh_interval_ms));
             if (interactive) {
-                switch (try terminal.waitReadable(terminal.stdin, remaining)) {
+                const timeout = if (self.input.pending()) @min(remaining, escape_timeout_ms) else remaining;
+                switch (try terminal.waitReadable(terminal.stdin, timeout)) {
                     .input => if (try self.readKeys() == .quit) return,
                     .closed => return,
-                    .timeout => {},
+                    .timeout => if (self.input.flush()) |key| {
+                        if (try self.handleKey(key) == .quit) return;
+                    },
                 }
             } else {
                 std.Io.sleep(self.io, .fromMilliseconds(remaining), .awake) catch {};
@@ -107,11 +110,10 @@ const Monitor = struct {
     }
 
     fn readKeys(self: *Monitor) !Control {
-        var buffer: [64]u8 = undefined;
-        const len = try terminal.read(terminal.stdin, &buffer);
+        const len = try terminal.read(terminal.stdin, self.input.space());
         if (len == 0) return .quit;
-        var input: keys.Iterator = .{ .bytes = buffer[0..len] };
-        while (input.next()) |key| {
+        self.input.commit(len);
+        while (self.input.next()) |key| {
             if (try self.handleKey(key) == .quit) return .quit;
         }
         return .keep;
@@ -284,11 +286,17 @@ fn render(gpa: std.mem.Allocator, writer: *std.Io.Writer, cfg: config.Config, sn
 }
 
 fn writeFrame(gpa: std.mem.Allocator, writer: *std.Io.Writer, cfg: config.Config, snapshot: Snapshot, view: View) !void {
+    const layout = Layout.fit(if (view.size) |size| size.rows else null, view.notice != null);
     var live_count: usize = 0;
     var warn_count: usize = 0;
     var dead_count: usize = 0;
     for (snapshot.rows) |row| countMonitorRow(row, &live_count, &warn_count, &dead_count);
-    try writer.print("{s}[zask-monitor]{s} {s}LIVE:{d}{s} {s}WARN:{d}{s} {s}DEAD:{d}{s}  {s}[{s}]{s}  {s}Ctrl+q m: toggle{s}\n\n", .{ ansi.bold, ansi.reset, ansi.green, live_count, ansi.reset, ansi.yellow, warn_count, ansi.reset, ansi.red, dead_count, ansi.reset, ansi.dim, snapshot.mode.optionValue(), ansi.reset, ansi.dim, ansi.reset });
+    var lines: LineWriter = .{ .writer = writer };
+    if (layout.title) {
+        try lines.begin();
+        try writer.print("{s}[zask-monitor]{s} {s}LIVE:{d}{s} {s}WARN:{d}{s} {s}DEAD:{d}{s}  {s}[{s}]{s}  {s}Ctrl+q m: toggle{s}", .{ ansi.bold, ansi.reset, ansi.green, live_count, ansi.reset, ansi.yellow, warn_count, ansi.reset, ansi.red, dead_count, ansi.reset, ansi.dim, snapshot.mode.optionValue(), ansi.reset, ansi.dim, ansi.reset });
+    }
+    if (layout.title_gap) try lines.begin();
 
     var visible: std.ArrayList(MonitorRow) = .empty;
     defer visible.deinit(gpa);
@@ -302,27 +310,78 @@ fn writeFrame(gpa: std.mem.Allocator, writer: *std.Io.Writer, cfg: config.Config
     }
 
     if (snapshot.rows.len == 0) {
-        try writer.print("  {s}No services configured{s}\n", .{ ansi.dim, ansi.reset });
+        try lines.begin();
+        try writer.print("  {s}No services configured{s}", .{ ansi.dim, ansi.reset });
     } else if (visible.items.len == 0) {
-        try writer.print("  {s}All services live{s}\n", .{ ansi.green, ansi.reset });
+        try lines.begin();
+        try writer.print("  {s}All services live{s}", .{ ansi.green, ansi.reset });
     } else {
-        const range = rowWindow(visible.items.len, selected_index, rowCapacity(view.size));
+        const range = rowWindow(visible.items.len, selected_index, layout.row_capacity);
         for (visible.items[range.start..range.end], range.start..) |row, i| {
+            try lines.begin();
             try writeMonitorRow(writer, row, selected_index == i);
-            try writer.writeAll("\n");
         }
     }
 
-    if (view.notice) |notice| try writer.print("{s}{s}{s}", .{ ansi.yellow, notice, ansi.reset });
-    try writer.print("\n{s}───────────────────────────────────────────────────────────────{s}\n", .{ ansi.dim, ansi.reset });
-    try writer.print("{s}{s}{s}\n", .{ ansi.dim, key_guide, ansi.reset });
-    try writer.print("{s}zask status | zask logs <service> | zask {s} <command>{s}", .{ ansi.dim, try cfg.projectName(), ansi.reset });
+    if (layout.notice_line) {
+        try lines.begin();
+        if (view.notice) |notice| try writer.print("{s}{s}{s}", .{ ansi.yellow, notice, ansi.reset });
+    }
+    if (layout.rule) {
+        try lines.begin();
+        try writer.print("{s}───────────────────────────────────────────────────────────────{s}", .{ ansi.dim, ansi.reset });
+    }
+    if (layout.guide) {
+        try lines.begin();
+        try writer.print("{s}{s}{s}", .{ ansi.dim, key_guide, ansi.reset });
+    }
+    if (layout.commands) {
+        try lines.begin();
+        try writer.print("{s}zask status | zask logs <service> | zask {s} <command>{s}", .{ ansi.dim, try cfg.projectName(), ansi.reset });
+    }
 }
 
-fn rowCapacity(size: ?terminal.Size) usize {
-    const known = size orelse return std.math.maxInt(usize);
-    return @max(1, @as(usize, known.rows) -| (header_lines + footer_lines));
-}
+/// Separates frame lines without a trailing newline, so a frame of exactly
+/// the pane height does not scroll the first line away.
+const LineWriter = struct {
+    writer: *std.Io.Writer,
+    started: bool = false,
+
+    fn begin(self: *LineWriter) !void {
+        if (self.started) try self.writer.writeAll("\n");
+        self.started = true;
+    }
+};
+
+/// Chooses which fixed lines fit around the service rows. At least one row
+/// always stays so the selection is never pushed off screen; fixed lines are
+/// dropped from the lowest priority first: blank spacers, command forms,
+/// rule, notice, title, key guide.
+const Layout = struct {
+    title: bool = true,
+    title_gap: bool = true,
+    notice_line: bool = true,
+    rule: bool = true,
+    guide: bool = true,
+    commands: bool = true,
+    row_capacity: usize = std.math.maxInt(usize),
+
+    fn fit(height: ?u16, has_notice: bool) Layout {
+        const rows = height orelse return .{};
+        var layout: Layout = .{ .title = false, .title_gap = false, .notice_line = false, .rule = false, .guide = false, .commands = false };
+        var budget: usize = @as(usize, rows) -| 1;
+        const by_priority = [_]*bool{ &layout.guide, &layout.title, &layout.notice_line, &layout.rule, &layout.commands, &layout.title_gap, &layout.notice_line };
+        for (by_priority, 0..) |line, rank| {
+            // The notice slot ranks high only while it carries a message.
+            if (rank == 2 and !has_notice) continue;
+            if (line.* or budget == 0) continue;
+            line.* = true;
+            budget -= 1;
+        }
+        layout.row_capacity = 1 + budget;
+        return layout;
+    }
+};
 
 const RowRange = struct { start: usize, end: usize };
 
@@ -455,8 +514,9 @@ fn testVisibleColumns(line: []const u8) usize {
             i += 1;
             continue;
         }
-        i += std.unicode.utf8ByteSequenceLength(line[i]) catch 1;
-        columns += 1;
+        const len = std.unicode.utf8ByteSequenceLength(line[i]) catch 1;
+        columns += ansi.displayWidth(line[i..@min(i + len, line.len)]);
+        i += len;
     }
     return columns;
 }
@@ -822,9 +882,9 @@ test "monitor.render: short pane scrolls rows and keeps the footer" {
     defer arena.deinit();
     const rows = [_]MonitorRow{ testRow("svc-0", .live), testRow("svc-1", .live), testRow("svc-2", .live), testRow("svc-3", .live), testRow("svc-4", .live) };
 
-    const body = try testRender(arena.allocator(), .{ .rows = &rows }, .{ .selected = "svc-4", .size = .{ .cols = 80, .rows = header_lines + footer_lines + 2 } });
+    const body = try testRender(arena.allocator(), .{ .rows = &rows }, .{ .selected = "svc-4", .size = .{ .cols = 80, .rows = 8 } });
 
-    try std.testing.expectEqual(@as(usize, header_lines + footer_lines + 2), std.mem.count(u8, body, "\n") + 1);
+    try std.testing.expectEqual(@as(usize, 8), std.mem.count(u8, body, "\n") + 1);
     try std.testing.expect(std.mem.indexOf(u8, body, "svc-2") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "svc-3") != null);
     try std.testing.expect(std.mem.indexOf(u8, testSelectedLine(body) orelse return error.MissingSelectedRow, "svc-4") != null);
@@ -873,4 +933,42 @@ test "monitor.observeSnapshot: reads filter mode and captures logs only for rows
     try std.testing.expectEqual(MonitorStatus.dead, snapshot.rows[1].status);
     try std.testing.expectEqualStrings("panic: boom", snapshot.rows[1].log);
     try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "monitor.Layout.fit: drops fixed lines before the selected row" {
+    const cases = [_]struct { height: ?u16, notice: bool, expected: Layout }{
+        .{ .height = null, .notice = false, .expected = .{} },
+        .{ .height = 24, .notice = false, .expected = .{ .row_capacity = 18 } },
+        .{ .height = 7, .notice = false, .expected = .{ .row_capacity = 1 } },
+        .{ .height = 4, .notice = false, .expected = .{ .title_gap = false, .notice_line = false, .commands = false, .row_capacity = 1 } },
+        .{ .height = 4, .notice = true, .expected = .{ .title_gap = false, .rule = false, .commands = false, .row_capacity = 1 } },
+        .{ .height = 2, .notice = false, .expected = .{ .title = false, .title_gap = false, .notice_line = false, .rule = false, .commands = false, .row_capacity = 1 } },
+        .{ .height = 1, .notice = false, .expected = .{ .title = false, .title_gap = false, .notice_line = false, .rule = false, .guide = false, .commands = false, .row_capacity = 1 } },
+    };
+    for (cases) |case| try std.testing.expectEqualDeep(case.expected, Layout.fit(case.height, case.notice));
+}
+
+test "monitor.render: tiny pane keeps the selected row within its height" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const rows = [_]MonitorRow{ testRow("api", .live), testRow("web", .live), testRow("worker", .dead) };
+
+    const body = try testRender(arena.allocator(), .{ .rows = &rows }, .{ .selected = "worker", .size = .{ .cols = 45, .rows = 4 } });
+
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, body, "\n") + 1);
+    try std.testing.expect(std.mem.indexOf(u8, testSelectedLine(body) orelse return error.MissingSelectedRow, "worker") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, key_guide) != null);
+}
+
+test "monitor.render: wide log text stays within the pane width" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var row = testRow("api", .dead);
+    row.log = "ログ日本語日本語日本語日本語日本語日本語";
+    const rows = [_]MonitorRow{row};
+
+    const body = try testRender(arena.allocator(), .{ .rows = &rows }, .{ .selected = "api", .size = .{ .cols = 45, .rows = 10 } });
+
+    var lines = std.mem.splitScalar(u8, body, '\n');
+    while (lines.next()) |line| try std.testing.expect(testVisibleColumns(line) <= 45);
 }

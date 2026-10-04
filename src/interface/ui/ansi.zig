@@ -29,7 +29,8 @@ pub fn writeCentered(writer: *std.Io.Writer, text: []const u8, width: usize) !vo
 
 pub fn writePadded(writer: *std.Io.Writer, text: []const u8, width: usize) !void {
     try writer.writeAll(text);
-    if (text.len < width) try writeSpaces(writer, width - text.len);
+    const columns = displayWidth(text);
+    if (columns < width) try writeSpaces(writer, width - columns);
 }
 
 pub fn writeSpaces(writer: *std.Io.Writer, count: usize) !void {
@@ -44,15 +45,36 @@ pub fn writeRule(writer: *std.Io.Writer, left: []const u8, fill: []const u8, rig
     try writer.writeAll(right);
 }
 
+/// Cuts `text` to at most `width` terminal columns without splitting a UTF-8
+/// sequence. Returns a prefix of `text`.
 pub fn truncate(text: []const u8, width: usize) []const u8 {
-    if (text.len <= width) return text;
-    return text[0..width];
+    var columns: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const char = nextChar(text, i);
+        if (columns + char.width > width) return text[0..i];
+        columns += char.width;
+        i = char.end;
+    }
+    return text;
+}
+
+/// Terminal columns of plain text (no escape sequences).
+pub fn displayWidth(text: []const u8) usize {
+    var columns: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const char = nextChar(text, i);
+        columns += char.width;
+        i = char.end;
+    }
+    return columns;
 }
 
 /// Cuts every line to `width` visible columns so narrow panes do not wrap rows
 /// into each other. Escape sequences are kept up to the cut and do not count
-/// as columns; each UTF-8 code point counts as one column. A cut line ends
-/// with `reset` so a color opened before the cut does not bleed onward.
+/// as columns; characters count by `charWidth`. A cut line ends with `reset`
+/// so a color opened before the cut does not bleed onward.
 /// Caller owns the returned slice.
 pub fn clipLines(gpa: std.mem.Allocator, text: []const u8, width: usize) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -77,16 +99,52 @@ fn appendClippedLine(gpa: std.mem.Allocator, out: *std.ArrayList(u8), line: []co
             i = end;
             continue;
         }
-        if (columns == width) {
+        const char = nextChar(line, i);
+        if (columns + char.width > width) {
             try out.appendSlice(gpa, reset);
             return;
         }
-        const len = std.unicode.utf8ByteSequenceLength(line[i]) catch 1;
-        const end = @min(i + len, line.len);
-        try out.appendSlice(gpa, line[i..end]);
-        columns += 1;
-        i = end;
+        try out.appendSlice(gpa, line[i..char.end]);
+        columns += char.width;
+        i = char.end;
     }
+}
+
+const Char = struct {
+    end: usize,
+    width: usize,
+};
+
+// Invalid UTF-8 bytes count as one column each so a corrupt log line still
+// gets cut instead of stalling the scan.
+fn nextChar(text: []const u8, start: usize) Char {
+    const len = std.unicode.utf8ByteSequenceLength(text[start]) catch return .{ .end = start + 1, .width = 1 };
+    if (start + len > text.len) return .{ .end = text.len, .width = 1 };
+    const code_point = std.unicode.utf8Decode(text[start .. start + len]) catch return .{ .end = start + 1, .width = 1 };
+    return .{ .end = start + len, .width = charWidth(code_point) };
+}
+
+/// Approximates UAX #11 as terminals apply it: East Asian Wide / Fullwidth
+/// characters and emoji take two columns, combining marks and zero-width
+/// characters take none. Ambiguous-width symbols (the monitor's icons and box
+/// drawing) take one, matching tmux's default.
+fn charWidth(code_point: u21) usize {
+    const zero_width = [_][2]u21{
+        .{ 0x0300, 0x036F }, .{ 0x200B, 0x200F }, .{ 0x20D0, 0x20FF }, .{ 0xFE00, 0xFE0F }, .{ 0xFE20, 0xFE2F },
+    };
+    const wide = [_][2]u21{
+        .{ 0x1100, 0x115F },   .{ 0x2E80, 0x303E },   .{ 0x3041, 0x33FF }, .{ 0x3400, 0x4DBF },
+        .{ 0x4E00, 0x9FFF },   .{ 0xA000, 0xA4CF },   .{ 0xAC00, 0xD7A3 }, .{ 0xF900, 0xFAFF },
+        .{ 0xFE30, 0xFE4F },   .{ 0xFF00, 0xFF60 },   .{ 0xFFE0, 0xFFE6 }, .{ 0x1F300, 0x1F64F },
+        .{ 0x1F900, 0x1F9FF }, .{ 0x20000, 0x3FFFD },
+    };
+    for (zero_width) |range| {
+        if (code_point >= range[0] and code_point <= range[1]) return 0;
+    }
+    for (wide) |range| {
+        if (code_point >= range[0] and code_point <= range[1]) return 2;
+    }
+    return 1;
 }
 
 fn escapeEnd(line: []const u8, start: usize) usize {
@@ -108,6 +166,8 @@ test "ansi.clipLines: cuts visible columns per line" {
         .{ .input = "abc", .width = 3, .expected = "abc" },
         .{ .input = red ++ "abcdef" ++ reset, .width = 2, .expected = red ++ "ab" ++ reset },
         .{ .input = "●│abc", .width = 3, .expected = "●│a" ++ reset },
+        .{ .input = "ログ日本語", .width = 5, .expected = "ログ" ++ reset },
+        .{ .input = "aログ", .width = 2, .expected = "a" ++ reset },
         .{ .input = "abc", .width = 0, .expected = reset },
         .{ .input = "", .width = 4, .expected = "" },
     };
@@ -117,4 +177,25 @@ test "ansi.clipLines: cuts visible columns per line" {
 
         try std.testing.expectEqualStrings(case.expected, clipped);
     }
+}
+
+test "ansi.truncate: cuts by columns without splitting characters" {
+    const cases = [_]struct { input: []const u8, width: usize, expected: []const u8 }{
+        .{ .input = "service", .width = 4, .expected = "serv" },
+        .{ .input = "日本語ログ", .width = 5, .expected = "日本" },
+        .{ .input = "aé", .width = 2, .expected = "aé" },
+        .{ .input = "short", .width = 10, .expected = "short" },
+    };
+    for (cases) |case| try std.testing.expectEqualStrings(case.expected, truncate(case.input, case.width));
+}
+
+test "ansi.displayWidth: counts wide and combining characters" {
+    const cases = [_]struct { input: []const u8, expected: usize }{
+        .{ .input = "api", .expected = 3 },
+        .{ .input = "日本語", .expected = 6 },
+        .{ .input = "e\u{0301}", .expected = 1 },
+        .{ .input = "●◐▲", .expected = 3 },
+        .{ .input = "\xff", .expected = 1 },
+    };
+    for (cases) |case| try std.testing.expectEqual(case.expected, displayWidth(case.input));
 }
