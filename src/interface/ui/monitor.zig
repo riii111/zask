@@ -2,14 +2,18 @@ const std = @import("std");
 const ansi = @import("ansi.zig");
 const config = @import("../../model/config.zig");
 const keys = @import("keys.zig");
+const log_popup = @import("../../workflow/log_popup.zig");
 const observations = @import("../../model/observations.zig");
 const proc_runner = @import("../../platform/runner.zig");
 const selection_state = @import("selection.zig");
 const service_observation = @import("../../workflow/service_observation.zig");
+const session_layout = @import("../../workflow/session_layout.zig");
 const terminal = @import("../../platform/terminal.zig");
 const tmux_options = @import("../../model/tmux_options.zig");
 const tmux_setup = @import("../../workflow/tmux_setup.zig");
 const RenderContext = @import("context.zig").RenderContext;
+const runtime_mod = @import("../../workflow/runtime.zig");
+const Runtime = runtime_mod.Runtime;
 const Selection = selection_state.Selection;
 
 const monitor_name_width = 12;
@@ -20,11 +24,12 @@ const refresh_interval_ms = 1000;
 // How long a lone ESC waits for the rest of an arrow-key sequence. Only a
 // bare ESC is delayed by this, and the monitor binds no action to it.
 const escape_timeout_ms = 250;
-const key_guide = "j/k ↑↓ select  f filter  q quit";
+const key_guide = "j/k ↑↓ select  l logs  f filter  q quit";
 
 /// Runs until `q` / Ctrl+C or the terminal closes. Leaving restores the
 /// terminal mode and screen; services are only observed, never stopped.
-pub fn run(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.Io.Writer) !void {
+pub fn run(runtime: Runtime, writer: *std.Io.Writer) !void {
+    const gpa = runtime.gpa;
     const raw_mode = try terminal.RawMode.enter(terminal.stdin);
     defer if (raw_mode) |mode| mode.restore();
     try writer.writeAll(ansi.enter_screen);
@@ -33,7 +38,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.
         writer.flush() catch {};
     }
 
-    var monitor: Monitor = .{ .gpa = gpa, .io = io, .cfg = cfg, .snapshot_arena = .init(gpa) };
+    var monitor: Monitor = .{ .gpa = gpa, .io = runtime.io, .cfg = runtime.cfg, .runtime = runtime, .snapshot_arena = .init(gpa) };
     defer monitor.deinit();
     try monitor.loop(writer, raw_mode != null);
 }
@@ -45,6 +50,7 @@ const Action = union(enum) {
     quit,
     select: selection_state.Direction,
     toggle_filter,
+    show_logs,
 };
 
 fn actionForKey(key: keys.Key) Action {
@@ -55,6 +61,7 @@ fn actionForKey(key: keys.Key) Action {
         .char => |char| switch (char) {
             'k' => .{ .select = .up },
             'j' => .{ .select = .down },
+            'l' => .show_logs,
             'f' => .toggle_filter,
             'q' => .quit,
             else => .none,
@@ -67,11 +74,14 @@ const Monitor = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     cfg: config.Config,
+    runtime: Runtime,
     /// Owns `snapshot`; reset on every refresh.
     snapshot_arena: std.heap.ArenaAllocator,
     snapshot: Snapshot = .{},
     selection: Selection = .{},
+    /// Borrows a static string or `notice_buffer`.
     notice: ?[]const u8 = null,
+    notice_buffer: [256]u8 = undefined,
     previous: []u8 = &.{},
     input: keys.Decoder = .{},
     /// When the pending incomplete sequence in `input` started; null when none is pending.
@@ -155,8 +165,51 @@ const Monitor = struct {
                 self.notice = null;
             },
             .toggle_filter => self.toggleFilter(),
+            .show_logs => try self.showLogs(),
         }
         return .keep;
+    }
+
+    /// Blocks while the popup is open; tmux restores this pane when it closes.
+    /// Keys typed before the popup took over, such as a repeated `l`, are
+    /// dropped so the popup does not reopen.
+    fn showLogs(self: *Monitor) !void {
+        const target = selectedTarget(self.snapshot, self.selection) orelse {
+            self.notice = "no service selected";
+            return;
+        };
+        var scratch = std.heap.ArenaAllocator.init(self.gpa);
+        defer scratch.deinit();
+        const window = switch (target.kind) {
+            .service => target.name,
+            .docker => session_layout.docker_window,
+        };
+        const outcome = self.runtime.withAllocator(scratch.allocator()).showLogPopup(window, target.name) catch |err| {
+            self.setNotice("logs {s} failed: {s}", .{ target.name, @errorName(err) });
+            return;
+        };
+        self.notice = null;
+        switch (outcome) {
+            .shown => {},
+            .empty => self.setNotice("{s} has no log output yet", .{target.name}),
+            .outside_tmux => self.notice = "log popup unavailable: monitor is not in tmux",
+            .no_client => self.notice = "log popup unavailable: no client shows the monitor",
+            .window_missing => self.setNotice("logs {s}: window not found", .{target.name}),
+            .tmux_unavailable => self.notice = "log popup failed: tmux unavailable",
+            .popup_unavailable => self.notice = "log popup unavailable: needs tmux 3.3+",
+        }
+
+        terminal.discardInput(terminal.stdin);
+        self.input = .{};
+        self.pending_since = null;
+        try self.refresh();
+    }
+
+    /// Text that does not fit in `notice_buffer` is cut off.
+    fn setNotice(self: *Monitor, comptime fmt: []const u8, args: anytype) void {
+        var notice: std.Io.Writer = .fixed(&self.notice_buffer);
+        notice.print(fmt, args) catch {};
+        self.notice = notice.buffered();
     }
 
     fn toggleFilter(self: *Monitor) void {
@@ -296,6 +349,24 @@ fn isVisible(row: MonitorRow, mode: tmux_options.DashMode) bool {
         .all => true,
         .bad => row.status != .live,
     };
+}
+
+/// The row an operation acts on. `name` borrows from the snapshot, which stays
+/// unchanged until the operation finishes.
+const Target = struct {
+    name: []const u8,
+    kind: RowKind,
+};
+
+/// Null when nothing is selected or the selected row is hidden by the filter,
+/// so an operation never falls back to a different row.
+fn selectedTarget(snapshot: Snapshot, selection: Selection) ?Target {
+    const name = selection.name orelse return null;
+    for (snapshot.rows) |row| {
+        if (!isVisible(row, snapshot.mode)) continue;
+        if (std.mem.eql(u8, row.selectionKey(), name)) return .{ .name = row.name, .kind = row.kind };
+    }
+    return null;
 }
 
 /// Caller owns the returned slice; the names borrow from `snapshot`.
@@ -829,6 +900,7 @@ test "monitor.actionForKey: maps keys to monitor actions" {
         .{ .key = .down, .expected = .{ .select = .down } },
         .{ .key = .{ .char = 'k' }, .expected = .{ .select = .up } },
         .{ .key = .up, .expected = .{ .select = .up } },
+        .{ .key = .{ .char = 'l' }, .expected = .show_logs },
         .{ .key = .{ .char = 'f' }, .expected = .toggle_filter },
         .{ .key = .{ .char = 'q' }, .expected = .quit },
         .{ .key = .ctrl_c, .expected = .quit },

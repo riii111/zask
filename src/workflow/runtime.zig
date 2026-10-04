@@ -5,6 +5,7 @@ const docker_client = @import("../platform/docker.zig");
 const env = @import("../platform/env.zig");
 const lifecycle_mod = @import("lifecycle.zig");
 const lock = @import("../platform/lock.zig");
+const log_popup = @import("log_popup.zig");
 const observations = @import("../model/observations.zig");
 const paths = @import("../platform/paths.zig");
 const pathing = @import("pathing.zig");
@@ -135,6 +136,20 @@ pub const Runtime = struct {
         defer self.gpa.free(lines);
         try out.writeAll(lines);
         try out.flush();
+    }
+
+    /// Pages the recent lines of `window` in a tmux popup over the caller's
+    /// client and returns once it closes. The caller (the monitor) keeps its
+    /// own pane; nothing is selected, attached, or started.
+    pub fn showLogPopup(self: Runtime, window: []const u8, label: []const u8) !log_popup.Outcome {
+        const scratch_dir = try paths.runtimeBase(self.gpa, self.environ);
+        defer self.gpa.free(scratch_dir);
+        return log_popup.show(self.gpa, self.io, self.tmux(), .{
+            .window = window,
+            .label = label,
+            .pane = env.get(self.environ, "TMUX_PANE"),
+            .scratch_dir = scratch_dir,
+        });
     }
 
     pub fn previewList(self: Runtime, pane_id: []const u8, client_width: u16, client_height: u16) !void {
@@ -302,6 +317,20 @@ pub const Runtime = struct {
 
     pub fn restart(self: Runtime, target: []const u8, writer: *std.Io.Writer) !void {
         try self.lifecycle().restartTarget(target, writer);
+    }
+
+    /// Copy whose tmux, Docker, and lifecycle allocations go to `gpa`, so a
+    /// long-running loop can release them with a per-iteration arena instead
+    /// of growing the CLI arena.
+    pub fn withAllocator(self: Runtime, gpa: std.mem.Allocator) Runtime {
+        var copy = self;
+        copy.gpa = gpa;
+        copy.runner_impl.gpa = gpa;
+        copy.tmux_impl.gpa = gpa;
+        copy.tmux_impl.runner = copy.runner_impl;
+        copy.docker_impl.gpa = gpa;
+        copy.docker_impl.runner = copy.runner_impl;
+        return copy;
     }
 
     fn runner(self: Runtime) proc_runner.Runner {

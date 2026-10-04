@@ -14,6 +14,7 @@ pub const jsonc = @import("model/jsonc.zig");
 pub const file_scan = @import("platform/file_scan.zig");
 pub const file_watch = @import("workflow/file_watch.zig");
 pub const lock = @import("platform/lock.zig");
+pub const log_popup = @import("workflow/log_popup.zig");
 pub const observations = @import("model/observations.zig");
 pub const phases = @import("workflow/phases.zig");
 pub const paths = @import("platform/paths.zig");
