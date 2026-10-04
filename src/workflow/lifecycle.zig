@@ -117,12 +117,13 @@ pub const Lifecycle = struct {
             var progress = progress_mod.Line.init(writer);
             try self.writeProjectEnvFileTipForServices(services, &progress);
             for (services) |svc| try self.startService(svc, writer, .observe);
-        } else |_| {
-            try self.warnServiceWithoutPort(target, writer);
-            var progress = progress_mod.Line.init(writer);
-            try self.writeProjectEnvFileTipForServices(&.{target}, &progress);
-            try self.startService(target, writer, .observe);
-        }
+        } else |_| try self.startNamedService(target, writer);
+    }
+
+    /// Starts exactly `service`, even when a group or alias shares its name.
+    pub fn startServiceTarget(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
+        try self.ensureSessionActive(writer);
+        try self.startNamedService(service, writer);
     }
 
     pub fn stopTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
@@ -142,6 +143,16 @@ pub const Lifecycle = struct {
         } else |_| try self.stopService(target, writer);
     }
 
+    /// Stops exactly `service`, even when a group or alias shares its name.
+    pub fn stopServiceTarget(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
+        switch (self.tmux.observeSession()) {
+            .active => {},
+            .missing => return sessionNotRunning(writer),
+            .unavailable => return waits.reportTmuxUnavailable(writer),
+        }
+        try self.stopService(service, writer);
+    }
+
     pub fn restartTarget(self: Lifecycle, target: []const u8, writer: *std.Io.Writer) !void {
         if (std.mem.eql(u8, target, "docker")) {
             try self.ensureSessionActive(writer);
@@ -157,12 +168,13 @@ pub const Lifecycle = struct {
             var progress = progress_mod.Line.init(writer);
             try self.writeProjectEnvFileTipForServices(services, &progress);
             for (services) |svc| try self.restartService(svc, writer);
-        } else |_| {
-            try self.warnServiceWithoutPort(target, writer);
-            var progress = progress_mod.Line.init(writer);
-            try self.writeProjectEnvFileTipForServices(&.{target}, &progress);
-            try self.restartService(target, writer);
-        }
+        } else |_| try self.restartNamedService(target, writer);
+    }
+
+    /// Restarts exactly `service`, even when a group or alias shares its name.
+    pub fn restartServiceTarget(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
+        try self.ensureSessionActive(writer);
+        try self.restartNamedService(service, writer);
     }
 
     pub fn startService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer, mode: StartMode) !void {
@@ -197,6 +209,20 @@ pub const Lifecycle = struct {
 
     fn stopService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
         try self.ensureServiceStopped(service, writer);
+    }
+
+    fn startNamedService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
+        try self.warnServiceWithoutPort(service, writer);
+        var progress = progress_mod.Line.init(writer);
+        try self.writeProjectEnvFileTipForServices(&.{service}, &progress);
+        try self.startService(service, writer, .observe);
+    }
+
+    fn restartNamedService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
+        try self.warnServiceWithoutPort(service, writer);
+        var progress = progress_mod.Line.init(writer);
+        try self.writeProjectEnvFileTipForServices(&.{service}, &progress);
+        try self.restartService(service, writer);
     }
 
     /// A failed signal continues the loop (so the rest still get C-c) but is
@@ -681,6 +707,18 @@ fn composeDiagnosticStateText(state: observations.ComposeState) []const u8 {
 // Tests
 // -----------------------------------------------------------------------------
 
+/// A group named after one of its services, so a service-only target can be
+/// told apart from the group.
+const test_shared_name_json =
+    \\{
+    \\  "project": {"name":"demo","root":"/tmp/demo"},
+    \\  "groups": [{"name":"api","services":[
+    \\    {"name":"api","dir":"api","command":"serve"},
+    \\    {"name":"api-worker","dir":"api","command":"work"}
+    \\  ]}]
+    \\}
+;
+
 fn parseTestConfig(gpa: std.mem.Allocator, json: []const u8) !config.Config {
     return config.Config.parse(gpa, json, "/home/me");
 }
@@ -1079,6 +1117,75 @@ test "lifecycle.restartTarget: records a new start marker with the respawn" {
     const marker = respawn.argv[respawn.argv.len - 3 ..];
     try proc_runner.expectCommandArgv(.{ .argv = marker, .cwd = null, .interactive = false }, &.{ "demo:=api", "@zask_started_at", "1700000500" });
     try proc_runner.expectCommandOrder(&recorder, "C-c", "respawn-pane");
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "lifecycle.restartServiceTarget: ignores a group with the same name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|sleep\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    try recorder.enqueue("0||123|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), test_shared_name_json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.restartServiceTarget("api", &writer);
+
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "demo:=api-worker") == null);
+    try proc_runner.expectCommandOrder(&recorder, "C-c", "respawn-pane");
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "lifecycle.stopServiceTarget: ignores a group with the same name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|sleep\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), test_shared_name_json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.stopServiceTarget("api", &writer);
+
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "demo:=api-worker") == null);
+    try proc_runner.expectCommandContaining(&recorder, "C-c");
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "lifecycle.startServiceTarget: ignores a group with the same name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), test_shared_name_json);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startServiceTarget("api", &writer);
+
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "demo:=api-worker") == null);
+    try proc_runner.expectCommandContaining(&recorder, "respawn-pane");
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 

@@ -264,6 +264,48 @@ pub const Runtime = struct {
         try self.lifecycle().restartTarget(target, writer);
     }
 
+    /// Service-only start / stop / restart for callers that already hold a
+    /// service name, such as the monitor: a group, alias, or `docker` sharing
+    /// the name is never picked up.
+    pub fn startService(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
+        try self.lifecycle().startServiceTarget(service, writer);
+    }
+
+    pub fn stopService(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
+        try self.lifecycle().stopServiceTarget(service, writer);
+    }
+
+    pub fn restartService(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
+        try self.lifecycle().restartServiceTarget(service, writer);
+    }
+
+    /// Switches the session to `window` without attaching, so a caller running
+    /// inside the session (the monitor) keeps its own pane. Unlike `logs`, it
+    /// never attaches from outside tmux.
+    pub fn showWindow(self: Runtime, window: []const u8) !void {
+        const tx = self.tmux();
+        switch (tx.observeWindow(window)) {
+            .present => {},
+            .missing => return error.WindowMissing,
+            .unavailable => return error.TmuxUnavailable,
+        }
+        try tx.selectWindow(window);
+    }
+
+    /// Copy whose tmux, Docker, and lifecycle allocations go to `gpa`, so a
+    /// long-running loop can release them with a per-iteration arena instead
+    /// of growing the CLI arena.
+    pub fn withAllocator(self: Runtime, gpa: std.mem.Allocator) Runtime {
+        var copy = self;
+        copy.gpa = gpa;
+        copy.runner_impl.gpa = gpa;
+        copy.tmux_impl.gpa = gpa;
+        copy.tmux_impl.runner = copy.runner_impl;
+        copy.docker_impl.gpa = gpa;
+        copy.docker_impl.runner = copy.runner_impl;
+        return copy;
+    }
+
     fn runner(self: Runtime) proc_runner.Runner {
         return self.runner_impl;
     }
@@ -822,6 +864,39 @@ test "runtime.logs: switches client then selects window inside tmux" {
 
     try proc_runner.expectCommandOrder(&recorder, "switch-client", "select-window");
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "attach-session") == null);
+}
+
+test "runtime.showWindow: selects an existing window without attaching" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("%1\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), test_api_json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+
+    try runtime.showWindow("api");
+
+    const select = proc_runner.findCommandContaining(&recorder, "select-window") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArgv(select, &.{ "tmux", "select-window", "-t", "demo:=api" });
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "attach-session") == null);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "switch-client") == null);
+}
+
+test "runtime.showWindow: reports a missing window without selecting another" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "can't find window: api\n", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), test_api_json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+
+    try std.testing.expectError(error.WindowMissing, runtime.showWindow("api"));
+
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "select-window") == null);
 }
 
 test "runtime.logs: selects window then attaches outside tmux" {
@@ -1623,6 +1698,13 @@ test "runtime.re: detaches client exec inside tmux" {
     try proc_runner.expectCommandArgContains(cmd, 3, " re");
     try proc_runner.expectCommandArgContains(cmd, 3, "--config");
 }
+
+const test_api_json =
+    \\{
+    \\  "project": {"name":"demo","root":"/tmp/demo"},
+    \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+    \\}
+;
 
 fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.Config) Runtime {
     return .{
