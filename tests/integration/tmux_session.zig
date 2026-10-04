@@ -783,7 +783,8 @@ test "monitor: keys move selection, toggle the filter, and quit restores the ter
     const stty_path = try std.fs.path.join(gpa, &.{ project_root, "stty.txt" });
     const stderr_path = try std.fs.path.join(gpa, &.{ project_root, "monitor-stderr.txt" });
     // The tmux server may run without HOME (as in CI), which config loading needs.
-    const command = try std.fmt.allocPrint(gpa, "HOME={s} {s} --config {s} monitor 2> {s}; stty -a > {s}; sleep 60", .{
+    const command = try std.fmt.allocPrint(gpa, "HOME={s} XDG_STATE_HOME={s} {s} --config {s} monitor 2> {s}; stty -a > {s}; sleep 60", .{
+        try zask.shell.quote(gpa, project_root),
         try zask.shell.quote(gpa, project_root),
         try zask.shell.quote(gpa, build_options.zask_path),
         try zask.shell.quote(gpa, config_path),
@@ -976,11 +977,161 @@ test "runtime.watch: restarts running service, skips stopping one, and ends with
     try std.Io.sleep(io, .fromMilliseconds(1500), .awake);
     try waitForPaneState(client, gpa, io, "api", .idle);
 
-    const watch_pid = try panePid(gpa, io, session, zask.session_layout.watch_window);
+    const watch_pid = try watchPanePid(gpa, io, session, zask.session_layout.watch_window);
     try runtime.close(&writer);
 
     try std.testing.expect(!client.hasSession());
     try waitForProcessExit(io, watch_pid);
+}
+
+test "monitor: operation keys act only on the selected service" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-monitor-ops", .{std.c.getpid()});
+    const client = tmuxClient(gpa, io, session);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // The group shares the first service's name, and the second service's
+    // name starts with it, so a loose target would reach the wrong pane.
+    const json = try std.fmt.allocPrint(gpa,
+        \\{{
+        \\  "project": {{"name":"{s}","root":"."}},
+        \\  "groups": [{{"name":"api","services":[
+        \\    {{"name":"api","dir":".","command":"/bin/sleep 60"}},
+        \\    {{"name":"api-worker","dir":".","command":"/bin/sleep 60"}}
+        \\  ]}}]
+        \\}}
+    , .{session});
+    try tmp.dir.writeFile(io, .{ .sub_path = "zask.json", .data = json });
+    const project_root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    const config_path = try std.fs.path.join(gpa, &.{ project_root, "zask.json" });
+    const stderr_path = try std.fs.path.join(gpa, &.{ project_root, "monitor-stderr.txt" });
+    const command = try std.fmt.allocPrint(gpa, "HOME={s} XDG_STATE_HOME={s} {s} --config {s} monitor 2> {s}; sleep 60", .{
+        try zask.shell.quote(gpa, project_root),
+        try zask.shell.quote(gpa, project_root),
+        try zask.shell.quote(gpa, build_options.zask_path),
+        try zask.shell.quote(gpa, config_path),
+        try zask.shell.quote(gpa, stderr_path),
+    });
+    errdefer if (std.Io.Dir.cwd().readFileAlloc(io, stderr_path, gpa, .limited(64 * 1024))) |stderr| {
+        std.debug.print("monitor stderr:\n{s}\n", .{stderr});
+    } else |_| {};
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", project_root, command);
+    defer client.killSession() catch {};
+    try client.newWindowAfter("dashboard", "api", project_root, try zask.zask_command.waitingPlaceholder(gpa, "api"));
+    try client.newWindowAfter("api", "api-worker", project_root, try zask.zask_command.waitingPlaceholder(gpa, "api-worker"));
+    const run_impl: zask.runner.Runner = .{ .gpa = gpa, .io = io };
+    const runtime = zask.runtime.Runtime{
+        .gpa = gpa,
+        .io = io,
+        .cfg = try zask.config.Config.parse(gpa, json, "/tmp"),
+        .config_path = config_path,
+        .zask_path = build_options.zask_path,
+        .command_hint = .{ .config = config_path },
+        .runner_impl = run_impl,
+        .tmux_impl = client,
+        .docker_impl = .{ .gpa = gpa, .runner = run_impl, .dir = project_root, .file = "compose.yaml" },
+        .validate_configured_dirs = false,
+    };
+    var buffer: [2048]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try waitForPaneState(client, gpa, io, "api", .idle);
+    try waitForPaneState(client, gpa, io, "api-worker", .idle);
+    try runtime.startService("api", &writer);
+    try runtime.startService("api-worker", &writer);
+    try waitForPaneState(client, gpa, io, "api", .busy);
+    try waitForPaneState(client, gpa, io, "api-worker", .busy);
+    const target = try std.fmt.allocPrint(gpa, "{s}:=dashboard", .{session});
+    const worker_target = try std.fmt.allocPrint(gpa, "{s}:=api-worker", .{session});
+    const worker_pid = try panePid(gpa, io, worker_target);
+    try waitForSelectedRow(gpa, io, target, "api");
+
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "x" });
+    try waitForPaneText(gpa, io, target, "stopped api");
+    try waitForPaneState(client, gpa, io, "api", .idle);
+
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "s" });
+    try waitForPaneText(gpa, io, target, "started api");
+    try waitForPaneState(client, gpa, io, "api", .busy);
+
+    // The stop key arrives with or right after the restart key, so it is dropped.
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "-l", "rx" });
+    try waitForPaneText(gpa, io, target, "restarted api");
+    try std.Io.sleep(io, .fromMilliseconds(1500), .awake);
+    try waitForPaneText(gpa, io, target, "restarted api");
+    try waitForPaneState(client, gpa, io, "api", .busy);
+
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "Enter" });
+    try waitForPaneText(gpa, io, target, "opened api");
+    try expectActiveWindow(gpa, io, session, "api");
+
+    // With its window gone, restart recreates `api` instead of reaching `api-worker`.
+    const api_target = try std.fmt.allocPrint(gpa, "{s}:=api", .{session});
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "kill-window", "-t", api_target });
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "r" });
+    try waitForPaneText(gpa, io, target, "restarted api");
+    try waitForPaneState(client, gpa, io, "api", .busy);
+
+    try std.testing.expectEqualStrings(worker_pid, try panePid(gpa, io, worker_target));
+    try waitForPaneState(client, gpa, io, "api-worker", .busy);
+}
+
+test "runtime: closed session never reaches a session whose name extends it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-prefix", .{std.c.getpid()});
+    const other = tmuxClient(gpa, io, try std.fmt.allocPrint(gpa, "{s}-other", .{session}));
+
+    other.killSession() catch {};
+    try other.newSession("dashboard", "/tmp", "sleep 60");
+    defer other.killSession() catch {};
+    try other.newWindowAfter("dashboard", "api", "/tmp", "sleep 60");
+    const other_api = try std.fmt.allocPrint(gpa, "{s}:=api", .{other.session});
+    const other_pid = try panePid(gpa, io, other_api);
+    const cfg = try zask.config.Config.parse(gpa, try std.fmt.allocPrint(gpa,
+        \\{{
+        \\  "project": {{"name":"{s}","root":"/tmp"}},
+        \\  "groups": [{{"name":"backend","services":[{{"name":"api","dir":".","command":"sleep 60"}}]}}]
+        \\}}
+    , .{session}), "/tmp");
+    const run_impl: zask.runner.Runner = .{ .gpa = gpa, .io = io };
+    const runtime = zask.runtime.Runtime{
+        .gpa = gpa,
+        .io = io,
+        .cfg = cfg,
+        .config_path = "/tmp/config.json",
+        .zask_path = "zask",
+        .command_hint = .{ .config = "/tmp/config.json" },
+        .runner_impl = run_impl,
+        .tmux_impl = tmuxClient(gpa, io, session),
+        .docker_impl = .{ .gpa = gpa, .runner = run_impl, .dir = "/tmp", .file = "compose.yaml" },
+        .validate_configured_dirs = false,
+    };
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.SessionNotRunning, runtime.stopService("api", &writer));
+    try std.testing.expectError(error.SessionNotRunning, runtime.restartService("api", &writer));
+    try std.testing.expectError(error.WindowMissing, runtime.showWindow("api"));
+
+    try std.testing.expectEqualStrings(other_pid, try panePid(gpa, io, other_api));
+    try waitForPaneState(other, gpa, io, "api", .busy);
+}
+
+fn panePid(gpa: std.mem.Allocator, io: std.Io, target: []const u8) ![]const u8 {
+    const result = try run(gpa, io, &.{ build_options.tmux_path, "list-panes", "-t", target, "-F", "#{pane_pid}" });
+    return std.mem.trim(u8, result.stdout, "\n");
 }
 
 fn tmuxClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) zask.tmux.Client {
@@ -1191,7 +1342,7 @@ fn waitForWatchPaneText(gpa: std.mem.Allocator, io: std.Io, session: []const u8,
     return error.PaneTextTimeout;
 }
 
-fn panePid(gpa: std.mem.Allocator, io: std.Io, session: []const u8, window: []const u8) !std.c.pid_t {
+fn watchPanePid(gpa: std.mem.Allocator, io: std.Io, session: []const u8, window: []const u8) !std.c.pid_t {
     const target = try std.fmt.allocPrint(gpa, "{s}:{s}", .{ session, window });
     defer gpa.free(target);
     const result = try run(gpa, io, &.{ build_options.tmux_path, "list-panes", "-t", target, "-F", "#{pane_pid}" });
