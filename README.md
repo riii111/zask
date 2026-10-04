@@ -150,8 +150,8 @@ sets the port. The entry follows the group's form: an object entry in an array,
 the command string in an object, or a detailed object entry when a port is set.
 The rest of the file is kept as written. zask leaves the file unchanged and
 reports why when a service with the same name exists, the result would fail
-validation or the size zask loads, another `zask add` is editing it, or the file
-changed during the edit. `.jsonc` configs are not
+validation or the size zask loads, or the file changed during the edit.
+Concurrent `zask add` runs on the same config wait for each other. `.jsonc` configs are not
 edited yet; add the service by hand.
 
 ```bash

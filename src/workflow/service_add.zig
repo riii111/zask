@@ -2,7 +2,6 @@ const std = @import("std");
 const config = @import("../model/config.zig");
 const config_edit = @import("../model/config_edit.zig");
 const diagnostics = @import("../model/diagnostics.zig");
-const lock = @import("../platform/lock.zig");
 
 pub const NewService = config_edit.NewService;
 
@@ -12,8 +11,6 @@ pub const Target = struct {
     /// The exact content the selected config was loaded from.
     bytes: []const u8,
     home: []const u8,
-    /// Directory for the lock that serializes edits of the same config.
-    lock_dir: []const u8,
 };
 
 pub const Outcome = union(enum) {
@@ -27,9 +24,34 @@ pub const Outcome = union(enum) {
     too_large,
     /// The file changed after it was loaded.
     changed,
-    /// Another `zask add` is editing the same config.
-    busy,
 };
+
+/// Serializes `zask add` runs on one config. Hold it from loading the config
+/// until `addService` returns, so a concurrent run loads the result of this
+/// one instead of overwriting it. Editors do not take the lock; `addService`
+/// detects their changes instead.
+pub const EditLock = struct {
+    file: std.Io.File,
+
+    /// Closing the file drops the OS lock; the kernel also drops it when the
+    /// process exits, so a crashed run never leaves the config locked. The
+    /// lock file itself stays in the lock directory for reuse.
+    pub fn release(self: EditLock, io: std.Io) void {
+        self.file.close(io);
+    }
+};
+
+/// Waits for the exclusive edit lock of the real file behind `path`, using a
+/// lock file under `lock_dir`.
+pub fn lockConfig(gpa: std.mem.Allocator, io: std.Io, path: []const u8, lock_dir: []const u8) !EditLock {
+    const lock_path = try editLockPath(gpa, io, path, lock_dir);
+    defer gpa.free(lock_path);
+    _ = try std.Io.Dir.cwd().createDirPathStatus(io, lock_dir, @enumFromInt(0o700));
+    const file = try std.Io.Dir.cwd().createFile(io, lock_path, .{ .truncate = false, .permissions = @enumFromInt(0o600) });
+    errdefer file.close(io);
+    try file.lock(io, .exclusive);
+    return .{ .file = file };
+}
 
 /// Comment-preserving edits are not supported yet, so `.jsonc` configs are
 /// left for the user to edit by hand.
@@ -39,8 +61,9 @@ pub fn ensureEditable(path: []const u8) error{CommentedConfigNotEditable}!void {
 
 /// Adds `service` to the config at `target.path`. The file is replaced only
 /// when the edited config passes validation and the file still holds
-/// `target.bytes`; otherwise it is left untouched. Returned slices are
-/// allocated from `gpa`; pass an arena.
+/// `target.bytes`; otherwise it is left untouched. Callers hold `lockConfig`
+/// around loading `target.bytes` and this call. Returned slices are allocated
+/// from `gpa`; pass an arena.
 pub fn addService(gpa: std.mem.Allocator, io: std.Io, target: Target, group: ?[]const u8, service: NewService, diags: *diagnostics.Diagnostics) !Outcome {
     const source = try config.parseJsonBytes(gpa, target.bytes);
     const added = switch (try config_edit.addService(gpa, target.bytes, source, group, service)) {
@@ -54,34 +77,21 @@ pub fn addService(gpa: std.mem.Allocator, io: std.Io, target: Target, group: ?[]
         error.InvalidConfig => return .invalid,
         else => return err,
     };
-    const replaced = replaceIfUnchanged(gpa, io, target, added.bytes) catch |err| switch (err) {
-        error.LockBusy => return .busy,
-        else => return err,
-    };
-    if (!replaced) return .changed;
+    if (!try replaceIfUnchanged(gpa, io, target.path, target.bytes, added.bytes)) return .changed;
     return .{ .added = added };
 }
 
-/// Writes `contents` to a temporary file next to the real file behind
-/// `target.path` and renames it over the original only if the original still
-/// equals `target.bytes`. A failure before the rename leaves the original as
-/// it was and removes the temporary file. The original permissions are kept,
-/// and a symlinked config keeps its link because the rename targets the real
-/// file. A lock keyed by the real path spans the comparison and the rename, so
-/// a concurrent `zask add` either sees this edit or reports error.LockBusy;
-/// editors do not take the lock, which leaves only the short window between
-/// the comparison and the rename.
-fn replaceIfUnchanged(gpa: std.mem.Allocator, io: std.Io, target: Target, contents: []const u8) !bool {
-    const expected = target.bytes;
-    const real_path = std.Io.Dir.cwd().realPathFileAlloc(io, target.path, gpa) catch |err| switch (err) {
+/// Writes `contents` to a temporary file next to the real file behind `path`
+/// and renames it over the original only if the original still equals
+/// `expected`. A failure before the rename leaves the original as it was and
+/// removes the temporary file. The original permissions are kept, and a
+/// symlinked config keeps its link because the rename targets the real file.
+fn replaceIfUnchanged(gpa: std.mem.Allocator, io: std.Io, path: []const u8, expected: []const u8, contents: []const u8) !bool {
+    const real_path = std.Io.Dir.cwd().realPathFileAlloc(io, path, gpa) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
     };
     defer gpa.free(real_path);
-    const lock_name = try editLockName(gpa, real_path);
-    defer gpa.free(lock_name);
-    const held = try lock.Lock.acquire(gpa, io, lock_name, target.lock_dir, .system);
-    defer held.release();
     var dir = try std.Io.Dir.openDirAbsolute(io, std.fs.path.dirname(real_path) orelse "/", .{});
     defer dir.close(io);
     const name = std.fs.path.basename(real_path);
@@ -103,8 +113,17 @@ fn replaceIfUnchanged(gpa: std.mem.Allocator, io: std.Io, target: Target, conten
     return true;
 }
 
-fn editLockName(gpa: std.mem.Allocator, real_path: []const u8) ![]u8 {
-    return std.fmt.allocPrint(gpa, "config-{x:0>16}", .{std.hash.Wyhash.hash(0, real_path)});
+/// Keyed by the real path so every way of selecting the same file, including
+/// symlinks, shares one lock. The returned path is owned by the caller.
+fn editLockPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8, lock_dir: []const u8) ![]u8 {
+    const real_path = std.Io.Dir.cwd().realPathFileAlloc(io, path, gpa) catch |err| switch (err) {
+        error.FileNotFound => return error.ConfigNotFound,
+        else => return err,
+    };
+    defer gpa.free(real_path);
+    const name = try std.fmt.allocPrint(gpa, "config-{x:0>16}.lock", .{std.hash.Wyhash.hash(0, real_path)});
+    defer gpa.free(name);
+    return std.fs.path.join(gpa, &.{ lock_dir, name });
 }
 
 // -----------------------------------------------------------------------------
@@ -125,10 +144,10 @@ const TestFile = struct {
     tmp: std.testing.TmpDir,
     dir_path: []const u8,
     path: []const u8,
-    lock_dir: []const u8,
 
     fn target(self: TestFile, path: []const u8, bytes: []const u8) Target {
-        return .{ .path = path, .bytes = bytes, .home = "/home/me", .lock_dir = self.lock_dir };
+        _ = self;
+        return .{ .path = path, .bytes = bytes, .home = "/home/me" };
     }
 };
 
@@ -141,7 +160,6 @@ fn testWriteConfig(gpa: std.mem.Allocator, io: std.Io, contents: []const u8) !Te
         .tmp = tmp,
         .dir_path = dir_path,
         .path = try std.fs.path.join(gpa, &.{ dir_path, "zask.json" }),
-        .lock_dir = try std.fs.path.join(gpa, &.{ dir_path, "locks" }),
     };
 }
 
@@ -247,7 +265,7 @@ test "service_add.addService: updates the target of a symlinked config" {
     try std.testing.expectEqualStrings(outcome.added.bytes, try testRead(gpa, io, file.path));
 }
 
-test "service_add.addService: reports busy while another edit holds the lock" {
+test "service_add.lockConfig: excludes other holders until released" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
@@ -255,14 +273,23 @@ test "service_add.addService: reports busy while another edit holds the lock" {
     const io = threaded.io();
     var file = try testWriteConfig(gpa, io, test_config);
     defer file.tmp.cleanup();
-    var diags = diagnostics.Diagnostics.init(gpa);
-    const held = try lock.Lock.acquire(gpa, io, try editLockName(gpa, file.path), file.lock_dir, .system);
-    defer held.release();
+    try file.tmp.dir.symLink(io, "zask.json", "link.json", .{});
+    const lock_dir = try std.fs.path.join(gpa, &.{ file.dir_path, "locks" });
+    const link = try std.fs.path.join(gpa, &.{ file.dir_path, "link.json" });
+    const other = try std.Io.Dir.cwd().openFile(io, blk: {
+        const held = try lockConfig(gpa, io, file.path, lock_dir);
+        defer held.release(io);
+        break :blk try editLockPath(gpa, io, link, lock_dir);
+    }, .{});
+    defer other.close(io);
+    const held = try lockConfig(gpa, io, link, lock_dir);
 
-    const outcome = try addService(gpa, io, file.target(file.path, test_config), null, .{ .name = "api", .command = "x" }, &diags);
+    const while_held = try other.tryLock(io, .exclusive);
+    held.release(io);
+    const after_release = try other.tryLock(io, .exclusive);
 
-    try std.testing.expect(outcome == .busy);
-    try std.testing.expectEqualStrings(test_config, try testRead(gpa, io, file.path));
+    try std.testing.expect(!while_held);
+    try std.testing.expect(after_release);
 }
 
 test "service_add.addService: refuses results the loader would reject as too large" {

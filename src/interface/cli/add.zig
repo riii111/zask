@@ -56,16 +56,13 @@ pub fn run(ctx: *Context, opts: Options) !void {
         try writer.writeAll("Add the service to the file by hand.\n");
         return err;
     };
+    const edit_lock = try service_add.lockConfig(gpa, io, path, try paths.runtimeBase(gpa, ctx.base.environ));
+    defer edit_lock.release(io);
     const file = try ctx.loadSelectedConfig(selected);
 
     var diags = diagnostics.Diagnostics.init(gpa);
     defer diags.deinit();
-    const target: service_add.Target = .{
-        .path = path,
-        .bytes = file.bytes,
-        .home = file.cfg.home,
-        .lock_dir = try paths.runtimeBase(gpa, ctx.base.environ),
-    };
+    const target: service_add.Target = .{ .path = path, .bytes = file.bytes, .home = file.cfg.home };
     const service: service_add.NewService = .{ .name = opts.name, .command = opts.command, .port = opts.port };
     const outcome = service_add.addService(gpa, io, target, opts.group, service, &diags) catch |err| switch (err) {
         error.OutOfMemory => return err,
@@ -112,12 +109,6 @@ pub fn run(ctx: *Context, opts: Options) !void {
             try writer.print("Error: adding service '{s}' would make the config too large to load\n", .{opts.name});
             try writeUnchanged(writer, path);
             return error.ServiceNotAdded;
-        },
-        .busy => {
-            try writer.writeAll("Error: another zask add is editing the config\n");
-            try writeUnchanged(writer, path);
-            try writer.writeAll("Run the command again.\n");
-            return error.ConfigBusy;
         },
         .changed => {
             try writer.writeAll("Error: the config changed while zask add was editing it\n");
