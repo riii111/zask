@@ -2,6 +2,7 @@ const std = @import("std");
 const config_value = @import("config_value.zig");
 const validate = @import("validate.zig");
 const diagnostics = @import("diagnostics.zig");
+const watch = @import("watch.zig");
 
 const Value = std.json.Value;
 const max_config_bytes = 10 * 1024 * 1024;
@@ -39,6 +40,13 @@ pub const keys = struct {
     pub const healthcheck = "healthcheck";
     pub const @"type" = "type";
     pub const path = "path";
+    pub const watch = "watch";
+
+    // service watch
+    pub const paths = "paths";
+    pub const include = "include";
+    pub const exclude = "exclude";
+    pub const debounce_ms = "debounce_ms";
 
     // startup_order step
     pub const group = "group";
@@ -63,7 +71,8 @@ pub const object_keys = struct {
     pub const project = [_][]const u8{ keys.name, keys.root };
     pub const docker = [_][]const u8{ keys.compose, keys.wait_timeout_seconds };
     pub const group = [_][]const u8{ keys.name, keys.env_file, keys.services };
-    pub const service = [_][]const u8{ keys.name, keys.dir, keys.runtime, keys.command, keys.external, keys.port, keys.healthcheck, keys.env_file };
+    pub const service = [_][]const u8{ keys.name, keys.dir, keys.runtime, keys.command, keys.external, keys.port, keys.healthcheck, keys.env_file, keys.watch };
+    pub const watch = [_][]const u8{ keys.paths, keys.include, keys.exclude, keys.debounce_ms };
     pub const healthcheck = [_][]const u8{ keys.type, keys.path };
     pub const docker_step = [_][]const u8{ keys.name, keys.docker };
     pub const group_step = [_][]const u8{ keys.name, keys.group, keys.wait_ports, keys.port_wait_timeout_seconds };
@@ -237,6 +246,35 @@ pub const Config = struct {
     pub fn serviceHealthcheckPath(service: Value) []const u8 {
         const healthcheck = serviceHealthcheck(service) orelse return "/health";
         return config_value.optionalObjectString(healthcheck, "path", "/health");
+    }
+
+    /// Returns null when the service has no `watch`. Release the result with
+    /// `Spec.deinit`; its strings borrow from the config.
+    pub fn serviceWatch(gpa: std.mem.Allocator, service: Value) !?watch.Spec {
+        const node = (if (service == .object) service.object.get(keys.watch) else null) orelse return null;
+        if (node != .object) return error.InvalidConfig;
+        const paths = if (node.object.get(keys.paths)) |value|
+            try stringArray(gpa, try arrayItems(value))
+        else
+            try gpa.dupe([]const u8, &watch.default_paths);
+        errdefer gpa.free(paths);
+        const include = try optionalStringArray(gpa, node.object.get(keys.include));
+        errdefer gpa.free(include);
+        const exclude = try optionalStringArray(gpa, node.object.get(keys.exclude));
+        errdefer gpa.free(exclude);
+        const debounce_ms = config_value.optionalObjectInt(node, keys.debounce_ms) orelse watch.default_debounce_ms;
+        if (debounce_ms < 0) return error.InvalidConfig;
+        return .{ .paths = paths, .include = include, .exclude = exclude, .debounce_ms = @intCast(debounce_ms) };
+    }
+
+    /// Resolves a `watch.paths` entry against the service directory. Returns a
+    /// caller-owned path unless the entry is an absolute path or bare `~`
+    /// already borrowed from config/home.
+    pub fn serviceWatchPath(self: Config, gpa: std.mem.Allocator, service: Value, path: []const u8) ![]const u8 {
+        if (std.fs.path.isAbsolute(path) or std.mem.startsWith(u8, path, "~"))
+            return self.expandHome(gpa, path);
+        if (std.mem.eql(u8, path, ".")) return self.serviceDir(gpa, service);
+        return self.resolveServiceDirPath(gpa, service, &.{path});
     }
 
     pub fn serviceDir(self: Config, gpa: std.mem.Allocator, service: Value) ![]const u8 {
@@ -763,12 +801,60 @@ fn validateService(gpa: std.mem.Allocator, service: Value, path: []const u8, dia
     }
     try checkServiceDir(gpa, service, path, diags);
     try checkEnvFileField(gpa, service, path, diags);
+    if (service.object.get(keys.watch)) |value| try validateWatch(gpa, value, try joinPath(gpa, path, keys.watch), diags);
     if (service.object.get(keys.healthcheck)) |healthcheck| {
         const hpath = try joinPath(gpa, path, "healthcheck");
         if (!try expectObject(healthcheck, hpath, diags)) return;
         try checkKeys(gpa, healthcheck, hpath, &object_keys.healthcheck, diags);
         try checkOptionalEnum(gpa, healthcheck, keys.type, hpath, &allowed_values.healthcheck_type, diags);
         try checkOptionalString(gpa, healthcheck, keys.path, hpath, diags);
+    }
+}
+
+fn validateWatch(gpa: std.mem.Allocator, value: Value, path: []const u8, diags: *diagnostics.Diagnostics) !void {
+    if (!try expectObject(value, path, diags)) return;
+    try checkKeys(gpa, value, path, &object_keys.watch, diags);
+    if (value.object.get(keys.paths)) |paths| {
+        const paths_path = try joinPath(gpa, path, keys.paths);
+        if (paths != .array) {
+            try diags.add(paths_path, "must be an array of strings");
+        } else if (paths.array.items.len == 0) {
+            try diags.add(paths_path, "must not be empty");
+        } else for (paths.array.items, 0..) |item, index| {
+            const item_path = try indexedPath(gpa, paths_path, index);
+            if (item != .string) {
+                try diags.add(item_path, "must be a string");
+                continue;
+            }
+            try checkEnvFilePath(item.string, item_path, diags);
+        }
+    }
+    try checkWatchPatterns(gpa, value, keys.include, path, diags);
+    try checkWatchPatterns(gpa, value, keys.exclude, path, diags);
+    if (value.object.get(keys.debounce_ms)) |debounce| {
+        const debounce_path = try joinPath(gpa, path, keys.debounce_ms);
+        if (debounce != .integer) {
+            try diags.add(debounce_path, "must be an integer");
+        } else if (debounce.integer < 0) {
+            try diags.add(debounce_path, "must be >= 0");
+        }
+    }
+}
+
+fn checkWatchPatterns(gpa: std.mem.Allocator, node: Value, key: []const u8, path: []const u8, diags: *diagnostics.Diagnostics) !void {
+    const patterns = node.object.get(key) orelse return;
+    const field_path = try joinPath(gpa, path, key);
+    if (patterns != .array) {
+        try diags.add(field_path, "must be an array of strings");
+        return;
+    }
+    for (patterns.array.items, 0..) |item, index| {
+        const item_path = try indexedPath(gpa, field_path, index);
+        if (item != .string) {
+            try diags.add(item_path, "must be a string");
+            continue;
+        }
+        watch.checkPattern(item.string) catch |err| try diags.add(item_path, watch.patternMessage(err));
     }
 }
 
@@ -1034,6 +1120,16 @@ fn stringArray(gpa: std.mem.Allocator, values: []const Value) ![][]const u8 {
         try list.append(gpa, value.string);
     }
     return list.toOwnedSlice(gpa);
+}
+
+fn optionalStringArray(gpa: std.mem.Allocator, value: ?Value) ![][]const u8 {
+    const node = value orelse return gpa.alloc([]const u8, 0);
+    return stringArray(gpa, try arrayItems(node));
+}
+
+fn arrayItems(value: Value) ![]const Value {
+    if (value != .array) return error.InvalidConfig;
+    return value.array.items;
 }
 
 fn isAllowedRuntime(runtime: []const u8) bool {
@@ -1783,4 +1879,72 @@ test "config.parse: parses receipt lab showcase fixture" {
     try std.testing.expectEqualStrings("testdata/showcase/receipt-lab/infra", try cfg.dockerDir(arena.allocator()));
     try std.testing.expectEqualStrings("compose.yaml", cfg.dockerComposeFile());
     try std.testing.expectEqual(@as(i64, 5), cfg.dockerWaitTimeout());
+}
+
+test "config.serviceWatch: applies defaults and resolves paths from the service dir" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"~/work/demo"},
+        \\  "groups": [{"name":"backend","services":[
+        \\    {"name":"api","dir":"backend","command":"serve","watch":{}},
+        \\    {"name":"worker","dir":"backend","command":"work","watch":{
+        \\      "paths":["src","/opt/shared","~/lib"],"include":["*.rs"],"exclude":["target/"],"debounce_ms":50}},
+        \\    {"name":"web","command":"dev"}
+        \\  ]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try parseTestConfig(&arena, json);
+    const gpa = arena.allocator();
+
+    const defaults = (try Config.serviceWatch(gpa, try cfg.findService("api"))).?;
+    const explicit = (try Config.serviceWatch(gpa, try cfg.findService("worker"))).?;
+    const worker = try cfg.findService("worker");
+
+    try std.testing.expectEqual(@as(usize, 1), defaults.paths.len);
+    try std.testing.expectEqualStrings(".", defaults.paths[0]);
+    try std.testing.expectEqual(@as(usize, 0), defaults.include.len);
+    try std.testing.expectEqual(@as(usize, 0), defaults.exclude.len);
+    try std.testing.expectEqual(watch.default_debounce_ms, defaults.debounce_ms);
+    try std.testing.expectEqualStrings("*.rs", explicit.include[0]);
+    try std.testing.expectEqualStrings("target/", explicit.exclude[0]);
+    try std.testing.expectEqual(@as(u64, 50), explicit.debounce_ms);
+    try std.testing.expectEqualStrings("/home/me/work/demo/backend", try cfg.serviceWatchPath(gpa, try cfg.findService("api"), defaults.paths[0]));
+    try std.testing.expectEqualStrings("/home/me/work/demo/backend/src", try cfg.serviceWatchPath(gpa, worker, explicit.paths[0]));
+    try std.testing.expectEqualStrings("/opt/shared", try cfg.serviceWatchPath(gpa, worker, explicit.paths[1]));
+    try std.testing.expectEqualStrings("/home/me/lib", try cfg.serviceWatchPath(gpa, worker, explicit.paths[2]));
+    try std.testing.expect((try Config.serviceWatch(gpa, try cfg.findService("web"))) == null);
+}
+
+test "config.validateAll: reports watch problems with field paths" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","command":"serve","watch":{
+        \\    "paths":["src","../shared",1],"include":["*.rs","/abs"],"exclude":"target","debounce_ms":-1,"poll":true
+        \\  }}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const value = try parseJsonBytes(arena.allocator(), json);
+    var diags = diagnostics.Diagnostics.init(arena.allocator());
+    defer diags.deinit();
+
+    try validateAll(arena.allocator(), value, &diags);
+
+    const expected = [_]diagnostics.Diagnostic{
+        .{ .path = "groups[0].services[0].watch.poll", .message = "unknown key" },
+        .{ .path = "groups[0].services[0].watch.paths[1]", .message = "must stay within its base directory" },
+        .{ .path = "groups[0].services[0].watch.paths[2]", .message = "must be a string" },
+        .{ .path = "groups[0].services[0].watch.include[1]", .message = "must be relative to the watched path" },
+        .{ .path = "groups[0].services[0].watch.exclude", .message = "must be an array of strings" },
+        .{ .path = "groups[0].services[0].watch.debounce_ms", .message = "must be >= 0" },
+    };
+    try std.testing.expectEqual(expected.len, diags.slice().len);
+    for (expected, diags.slice()) |want, got| {
+        try std.testing.expectEqualStrings(want.path, got.path);
+        try std.testing.expectEqualStrings(want.message, got.message);
+    }
 }
