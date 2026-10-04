@@ -131,6 +131,15 @@ zask ignores the value. References between groups, services, and aliases,
 duplicate names, and paths that leave the project root are checked only when
 zask loads the config.
 
+zask carries the schema of the version you run. `zask init` writes it to
+`~/.config/zask/zask.schema.json` (under `$XDG_CONFIG_HOME` when set) and adds
+`"$schema": "../zask.schema.json"` to the generated config, so the reference
+resolves without network access. Commands that load a named config rewrite that
+file when it differs from the running zask, so upgrading zask also updates what
+the editor checks. For a project-local `zask.json`, point `"$schema"` at that
+file or at a copy of `schema/zask.schema.json`. Configs without `$schema` keep
+working.
+
 ## Requirements
 
 - tmux

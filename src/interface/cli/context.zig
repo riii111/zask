@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const config = @import("../../model/config.zig");
+const config_schema = @import("../../workflow/config_schema.zig");
 const diagnostics = @import("../../model/diagnostics.zig");
 const docker_client = @import("../../platform/docker.zig");
 const env = @import("../../platform/env.zig");
@@ -84,6 +85,13 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
     else
         try config.loadPath(context.gpa, io, resolved.path, home);
     try validateSelectedProjectName(context, resolved, cfg);
+    switch (resolved.source) {
+        // Named configs written by `zask init` reference the shared schema copy.
+        // Refreshing it here keeps editors in step with an upgraded zask; a
+        // read-only config dir must not block the command itself.
+        .named, .inferred_named => config_schema.install(context.gpa, io, context.environ) catch {},
+        .explicit, .discovered => {},
+    }
     const runner: proc_runner.Runner = .{ .gpa = context.gpa, .io = io };
     return .{
         .gpa = context.gpa,

@@ -25,6 +25,7 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption([]const u8, "version", manifest.version);
     zask_mod.addOptions("build_options", options);
+    zask_mod.addAnonymousImport("config_schema", .{ .root_source_file = b.path("schema/zask.schema.json") });
 
     const exe = b.addExecutable(.{
         .name = "zask",

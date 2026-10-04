@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("../../model/config.zig");
+const config_schema = @import("../../workflow/config_schema.zig");
 const env = @import("../../platform/env.zig");
 const init_inference = @import("../../workflow/init_inference.zig");
 const paths = @import("../../platform/paths.zig");
@@ -60,6 +61,9 @@ pub fn run(ctx: *Context, opts: Options) !void {
     defer validation_arena.deinit();
     _ = try config.Config.parse(validation_arena.allocator(), json, try paths.home(ctx.base.environ));
 
+    // The config references the schema copy, so install it first: a failure
+    // then leaves no new config and keeps an existing one under --force.
+    try config_schema.install(ctx.base.gpa, io, ctx.base.environ);
     const config_dir = std.fs.path.dirname(config_path) orelse return error.InvalidPath;
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, config_dir, @enumFromInt(0o755));
     try paths.writeFile(io, config_path, json);
@@ -142,6 +146,8 @@ fn renderConfig(gpa: std.mem.Allocator, project: []const u8, detected: DetectedO
     var json: std.json.Stringify = .{ .writer = writer, .options = .{ .whitespace = .indent_2 } };
 
     try json.beginObject();
+    try json.objectField(config.keys.schema);
+    try json.write(config_schema.named_config_reference);
     try json.objectField(config.keys.project);
     try json.beginObject();
     try json.objectField(config.keys.name);
@@ -226,6 +232,8 @@ fn writeReport(writer: *std.Io.Writer, project: []const u8, detected: DetectedOp
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
+
+const test_config_head = "{\n  \"$schema\": \"" ++ config_schema.named_config_reference ++ "\",\n";
 
 fn testContext(gpa: std.mem.Allocator, io: std.Io, environ: *const env.Map, writer: *std.Io.Writer) Context {
     return .{
@@ -327,8 +335,7 @@ test "init.config: renders minimal config verbatim" {
     const opts = try Options.parse(&.{"demo"});
     const json = try renderConfig(std.testing.allocator, "demo", .{ .opts = opts });
     defer std.testing.allocator.free(json);
-    try std.testing.expectEqualStrings(
-        \\{
+    try std.testing.expectEqualStrings(test_config_head ++
         \\  "project": {
         \\    "name": "demo",
         \\    "root": "."
@@ -344,8 +351,7 @@ test "init.config: renders service and docker config verbatim" {
     defer detected.deinit(std.testing.allocator);
     const json = try renderConfig(std.testing.allocator, "demo", detected);
     defer std.testing.allocator.free(json);
-    try std.testing.expectEqualStrings(
-        \\{
+    try std.testing.expectEqualStrings(test_config_head ++
         \\  "project": {
         \\    "name": "demo",
         \\    "root": "."
@@ -384,8 +390,7 @@ test "init.config: renders service-only config verbatim" {
     defer detected.deinit(std.testing.allocator);
     const json = try renderConfig(std.testing.allocator, "demo", detected);
     defer std.testing.allocator.free(json);
-    try std.testing.expectEqualStrings(
-        \\{
+    try std.testing.expectEqualStrings(test_config_head ++
         \\  "project": {
         \\    "name": "demo",
         \\    "root": "."
@@ -458,8 +463,7 @@ test "init.detect: renders detected default compose file" {
     defer std.testing.allocator.free(json);
 
     try std.testing.expectEqualStrings("docker-compose.yml", detected.compose_file.?);
-    try std.testing.expectEqualStrings(
-        \\{
+    try std.testing.expectEqualStrings(test_config_head ++
         \\  "project": {
         \\    "name": "demo",
         \\    "root": "."
@@ -584,6 +588,32 @@ test "init.run: overwrites existing config with force" {
 
     try std.testing.expectEqualStrings(expected_root, project_root);
     try std.testing.expectEqual(@as(usize, 0), (try cfg.services()).len);
+}
+
+test "init.run: keeps configs untouched when the schema cannot be installed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    const config_home = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}", .{&tmp.sub_path});
+    try environ.put("HOME", "/home/me");
+    try environ.put("XDG_CONFIG_HOME", config_home);
+    try tmp.dir.createDirPath(threaded.io(), "zask/" ++ config_schema.file_name ++ "/blocker");
+    try tmp.dir.createDirPath(threaded.io(), "zask/kept");
+    try tmp.dir.writeFile(threaded.io(), .{ .sub_path = "zask/kept/config.json", .data = "original" });
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var ctx = testContext(arena.allocator(), threaded.io(), &environ, &writer);
+
+    try std.testing.expect(std.meta.isError(run(&ctx, try Options.parse(&.{"fresh"}))));
+    try std.testing.expect(std.meta.isError(run(&ctx, try Options.parse(&.{ "kept", "--force" }))));
+
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(threaded.io(), "zask/fresh/config.json", .{}));
+    const kept = try tmp.dir.readFileAlloc(threaded.io(), "zask/kept/config.json", arena.allocator(), .limited(64));
+    try std.testing.expectEqualStrings("original", kept);
 }
 
 test "init.run: releases temporary allocations on success" {
