@@ -53,7 +53,9 @@ pub const Observer = struct {
     fn probeListen(self: Observer, port: i64) !observations.ProbeObservation {
         const port_text = try std.fmt.allocPrint(self.gpa, "{d}", .{port});
         defer self.gpa.free(port_text);
-        return self.probe(&.{ "nc", "-z", "localhost", port_text });
+        // `-w 1` bounds the probe like curl's `--max-time 1`, so callers with a
+        // deadline (e.g. `wait`) cannot be held by a connect that never returns.
+        return self.probe(&.{ "nc", "-z", "-w", "1", "localhost", port_text });
     }
 
     fn probeHttp(self: Observer, port: i64, path: []const u8) !observations.ProbeObservation {
@@ -170,7 +172,7 @@ test "observer.service: probes the configured http path" {
 
     _ = try observer.observeService(try testService(arena.allocator(), "{\"name\":\"api\",\"dir\":\"api\",\"command\":\"serve\",\"port\":3000,\"healthcheck\":{\"type\":\"http\",\"path\":\"/ready\"}}"));
 
-    try proc_runner.expectCommandArgv(recorder.commands.items[1], &.{ "nc", "-z", "localhost", "3000" });
+    try proc_runner.expectCommandArgv(recorder.commands.items[1], &.{ "nc", "-z", "-w", "1", "localhost", "3000" });
     try proc_runner.expectCommandArgv(recorder.commands.items[2], &.{ "curl", "-sf", "--max-time", "1", "http://localhost:3000/ready" });
 }
 

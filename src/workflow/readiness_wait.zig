@@ -38,6 +38,7 @@ pub fn waitReady(cfg: config.Config, observer: service_observation.Observer, tar
     const gpa = observer.gpa;
     const services = try expandTargets(gpa, cfg, targets, writer);
     defer gpa.free(services);
+    const deadline = observer.runner.nowSeconds() + timeout_seconds;
     switch (observer.tmux.observeSession()) {
         .active => {},
         .missing => {
@@ -57,8 +58,8 @@ pub fn waitReady(cfg: config.Config, observer: service_observation.Observer, tar
 
     // Every round re-observes all targets, so one that became ready and then
     // exited still fails the wait. The deadline is checked before each
-    // observation as well, so a slow round overruns it by at most one probe.
-    const deadline = observer.runner.nowSeconds() + timeout_seconds;
+    // observation as well; since every probe is time-bounded (nc -w 1, curl
+    // --max-time 1), the wait overruns the deadline by at most one probe.
     while (true) {
         var all_ready = true;
         for (services, last, reported) |service, *health, *was_reported| {
@@ -381,6 +382,19 @@ test "readiness_wait.waitReady: does not succeed when observing outlasts the dea
     , h.output());
     try std.testing.expectEqual(@as(usize, 2), h.commandCount("tmux"));
     try proc_runner.expectNoRemainingResponses(&h.recorder);
+}
+
+test "readiness_wait.waitReady: counts the session check against the deadline" {
+    var h: TestHarness = undefined;
+    h.init();
+    defer h.deinit();
+    h.recorder.seconds_per_command = 2;
+    try h.enqueue(test_session_active, 0);
+
+    try std.testing.expectError(error.WaitTimedOut, h.wait(&.{"web"}, 1));
+
+    try std.testing.expectEqualStrings("Timed out after 1s waiting for:\n  web: not checked before the deadline\n", h.output());
+    try std.testing.expectEqual(@as(usize, 1), h.recorder.commands.items.len);
 }
 
 test "readiness_wait.waitReady: times out when the last round ends past the deadline" {

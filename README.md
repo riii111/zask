@@ -92,7 +92,8 @@ arguments still print usage text and exit `2`.
 
 `zask wait api && npm run e2e` runs the next command only after `api` is ready.
 Pass several services or groups to wait for all of them; `--timeout <seconds>`
-(default `180`) bounds the whole wait.
+(default `180`) bounds the whole wait; each check gives up after about a second,
+so a wait ends at most that much past the limit.
 
 - A service with a `port` is ready once the port listens and, with an `http`
   healthcheck, the HTTP check passes.
