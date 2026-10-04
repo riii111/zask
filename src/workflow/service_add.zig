@@ -114,12 +114,19 @@ const Replacement = union(enum) {
 /// exchange fail with error.ExchangeUnsupported before anything is written.
 fn replaceIfUnchanged(gpa: std.mem.Allocator, io: std.Io, path: []const u8, expected: []const u8, contents: []const u8) !Replacement {
     const pending = (try PendingWrite.stage(gpa, io, path, expected, contents)) orelse return .changed;
-    errdefer pending.discard(io);
-    if (!try pending.targetUnchanged(gpa, io)) {
-        pending.discard(io);
-        return .changed;
+    {
+        // Until the exchange, the temporary file holds only this edit.
+        errdefer pending.discard(io);
+        if (!try pending.targetUnchanged(gpa, io)) {
+            pending.discard(io);
+            return .changed;
+        }
+        try pending.swapIn(gpa);
     }
-    if (try pending.swapIn(gpa, io)) return .replaced;
+    if (pending.displacedIsExpected(gpa, io)) {
+        pending.discard(io);
+        return .replaced;
+    }
     return pending.restoreDisplaced(gpa, io);
 }
 
@@ -139,11 +146,14 @@ const PendingWrite = struct {
             else => return err,
         };
         const stat = try std.Io.Dir.cwd().statFile(io, real_path, .{});
-        const temp = try createTempFile(gpa, io, real_path);
+        // Created with the config's mode, which the umask can only narrow,
+        // and widened back to it before any content is written, so a private
+        // config is never readable through the temporary file.
+        const temp = try createTempFile(gpa, io, real_path, stat.permissions);
         errdefer std.Io.Dir.deleteFileAbsolute(io, temp.path) catch {};
         defer temp.file.close(io);
-        try temp.file.writeStreamingAll(io, contents);
         try temp.file.setPermissions(io, stat.permissions);
+        try temp.file.writeStreamingAll(io, contents);
         try temp.file.sync(io);
         return .{ .real_path = real_path, .temp_path = temp.path, .expected = expected, .contents = contents };
     }
@@ -152,23 +162,27 @@ const PendingWrite = struct {
         return fileEquals(gpa, io, self.real_path, self.expected);
     }
 
-    /// Exchanges the new file with the config. Returns true when the
-    /// displaced file is the expected one, which is then deleted; otherwise
-    /// it stays at `temp_path` for `restoreDisplaced`.
-    fn swapIn(self: PendingWrite, gpa: std.mem.Allocator, io: std.Io) !bool {
+    /// Exchanges the new file with the config. On error nothing was
+    /// exchanged. Afterwards the displaced config is at `temp_path` and may
+    /// be the only copy of someone else's save, so it is deleted only after
+    /// `displacedIsExpected` or `restoreDisplaced` confirms it.
+    fn swapIn(self: PendingWrite, gpa: std.mem.Allocator) !void {
         try file_swap.exchange(gpa, self.temp_path, self.real_path);
-        if (!try fileEquals(gpa, io, self.temp_path, self.expected)) return false;
-        self.discard(io);
-        return true;
+    }
+
+    /// A read failure counts as unconfirmed, which keeps the file.
+    fn displacedIsExpected(self: PendingWrite, gpa: std.mem.Allocator, io: std.Io) bool {
+        return fileEquals(gpa, io, self.temp_path, self.expected) catch false;
     }
 
     /// Puts a displaced file that someone else saved back at the config, so
     /// their save wins and this edit is dropped. The temporary file is
     /// deleted only when it is confirmed to hold this edit; otherwise it is
     /// kept and reported, because it may be the only copy of another save.
-    fn restoreDisplaced(self: PendingWrite, gpa: std.mem.Allocator, io: std.Io) !Replacement {
+    fn restoreDisplaced(self: PendingWrite, gpa: std.mem.Allocator, io: std.Io) Replacement {
         file_swap.exchange(gpa, self.temp_path, self.real_path) catch return .{ .conflict = self.temp_path };
-        if (!try fileEquals(gpa, io, self.temp_path, self.contents)) return .{ .conflict = self.temp_path };
+        const holds_this_edit = fileEquals(gpa, io, self.temp_path, self.contents) catch false;
+        if (!holds_this_edit) return .{ .conflict = self.temp_path };
         self.discard(io);
         return .changed;
     }
@@ -182,7 +196,7 @@ const TempFile = struct { file: std.Io.File, path: []const u8 };
 
 /// Creates `.<name>.zask-add-<pid>[-n]` next to `real_path`. The path is
 /// allocated from `gpa`.
-fn createTempFile(gpa: std.mem.Allocator, io: std.Io, real_path: []const u8) !TempFile {
+fn createTempFile(gpa: std.mem.Allocator, io: std.Io, real_path: []const u8, permissions: std.Io.File.Permissions) !TempFile {
     const dir = std.fs.path.dirname(real_path) orelse "/";
     const name = std.fs.path.basename(real_path);
     const pid = std.c.getpid();
@@ -193,7 +207,7 @@ fn createTempFile(gpa: std.mem.Allocator, io: std.Io, real_path: []const u8) !Te
         else
             try std.fmt.allocPrint(gpa, ".{s}.zask-add-{d}-{d}", .{ name, pid, attempt });
         const path = try std.fs.path.join(gpa, &.{ dir, temp_name });
-        const file = std.Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true }) catch |err| switch (err) {
+        const file = std.Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true, .permissions = permissions }) catch |err| switch (err) {
             error.PathAlreadyExists => if (attempt < 100) continue else return err,
             else => return err,
         };
@@ -423,10 +437,11 @@ test "service_add.replaceIfUnchanged: puts back an editor save made before the s
     try std.testing.expect(try pending.targetUnchanged(gpa, io));
 
     try testEditorSave(file, io, "editor\n");
-    const swapped_expected = try pending.swapIn(gpa, io);
-    const result = try pending.restoreDisplaced(gpa, io);
+    try pending.swapIn(gpa);
+    const displaced_expected = pending.displacedIsExpected(gpa, io);
+    const result = pending.restoreDisplaced(gpa, io);
 
-    try std.testing.expect(!swapped_expected);
+    try std.testing.expect(!displaced_expected);
     try std.testing.expect(result == .changed);
     try std.testing.expectEqualStrings("editor\n", try testRead(gpa, io, file.path));
     try testExpectOnlyConfig(file, io);
@@ -443,10 +458,11 @@ test "service_add.replaceIfUnchanged: keeps a save made while putting one back" 
     const pending = (try PendingWrite.stage(gpa, io, file.path, test_config, "ours\n")).?;
     try std.testing.expect(try pending.targetUnchanged(gpa, io));
     try testEditorSave(file, io, "first save\n");
-    try std.testing.expect(!try pending.swapIn(gpa, io));
+    try pending.swapIn(gpa);
+    try std.testing.expect(!pending.displacedIsExpected(gpa, io));
 
     try testEditorSave(file, io, "second save\n");
-    const result = try pending.restoreDisplaced(gpa, io);
+    const result = pending.restoreDisplaced(gpa, io);
 
     try std.testing.expectEqualStrings("first save\n", try testRead(gpa, io, file.path));
     try std.testing.expectEqualStrings("second save\n", try testRead(gpa, io, result.conflict));
@@ -466,6 +482,47 @@ test "service_add.replaceIfUnchanged: deletes the displaced config it expected" 
     try std.testing.expect(result == .replaced);
     try std.testing.expectEqualStrings("ours\n", try testRead(gpa, io, file.path));
     try testExpectOnlyConfig(file, io);
+}
+
+test "service_add.replaceIfUnchanged: puts back a displaced config it cannot read" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var file = try testWriteConfig(gpa, io, test_config);
+    defer file.tmp.cleanup();
+    const pending = (try PendingWrite.stage(gpa, io, file.path, test_config, "ours\n")).?;
+    try std.testing.expect(try pending.targetUnchanged(gpa, io));
+    try testEditorSave(file, io, "editor\n");
+    try pending.swapIn(gpa);
+    try std.Io.Dir.cwd().setFilePermissions(io, pending.temp_path, @enumFromInt(0o000), .{});
+
+    const displaced_expected = pending.displacedIsExpected(gpa, io);
+    const result = pending.restoreDisplaced(gpa, io);
+
+    try std.testing.expect(!displaced_expected);
+    try std.testing.expect(result == .changed);
+    try std.Io.Dir.cwd().setFilePermissions(io, file.path, @enumFromInt(0o644), .{});
+    try std.testing.expectEqualStrings("editor\n", try testRead(gpa, io, file.path));
+    try testExpectOnlyConfig(file, io);
+}
+
+test "service_add.PendingWrite.stage: creates the temporary file with the config's mode" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var file = try testWriteConfig(gpa, io, test_config);
+    defer file.tmp.cleanup();
+    try std.Io.Dir.cwd().setFilePermissions(io, file.path, @enumFromInt(0o600), .{});
+
+    const pending = (try PendingWrite.stage(gpa, io, file.path, test_config, "ours\n")).?;
+    defer pending.discard(io);
+
+    const stat = try std.Io.Dir.cwd().statFile(io, pending.temp_path, .{});
+    try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(@intFromEnum(stat.permissions) & 0o777)));
 }
 
 /// Saves like editors that write a temporary file and rename it over the
