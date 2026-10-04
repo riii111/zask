@@ -182,8 +182,44 @@
         "env_file": {
           "description": "KEY=value files loaded before this service command, relative to the service directory.",
           "$ref": "#/definitions/envFile"
+        },
+        "watch": { "$ref": "#/definitions/watch" }
+      }
+    },
+    "watch": {
+      "description": "Files watched for changes. zask scans them about every 0.5 seconds on macOS and Linux and reports changes once they pause for `debounce_ms`.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "paths": {
+          "description": "Files or directories to watch, relative to the service directory. Absolute and `~/` paths are used as is; relative paths must stay within the service directory.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 },
+          "default": ["."]
+        },
+        "include": {
+          "description": "Only files matching one of these patterns are watched. Watch every file when omitted. Files listed directly in `paths` are watched regardless.",
+          "type": "array",
+          "items": { "$ref": "#/definitions/watchPattern" }
+        },
+        "exclude": {
+          "description": "Files and directories matching these patterns are not watched. `.git`, `.hg`, and `.svn` are always excluded.",
+          "type": "array",
+          "items": { "$ref": "#/definitions/watchPattern" }
+        },
+        "debounce_ms": {
+          "description": "Milliseconds without further changes before changes are reported together.",
+          "type": "integer",
+          "minimum": 0,
+          "default": 300
         }
       }
+    },
+    "watchPattern": {
+      "description": "Glob relative to each watched path. Without `/` it matches a file or directory name at any depth; with `/` it matches the whole relative path. `*` and `?` stay within a name, `**` matches any number of directories, and a trailing `/` is ignored.",
+      "type": "string",
+      "minLength": 1
     },
     "stepName": {
       "description": "Label shown in startup progress.",

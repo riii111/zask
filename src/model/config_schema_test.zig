@@ -1,8 +1,9 @@
 //! Keeps schema/zask.schema.json consistent with the config parser.
 //!
 //! The schema covers structure (keys, types, enums, required fields). References
-//! between groups, services, and aliases, duplicate names, and path escapes are
-//! checked only by the parser; the tests below fix that boundary.
+//! between groups, services, and aliases, duplicate names, path escapes, and
+//! watch pattern rules are checked only by the parser; the tests below fix that
+//! boundary.
 
 const std = @import("std");
 const config = @import("config.zig");
@@ -59,6 +60,10 @@ const TestSchemaChecker = struct {
             if (instance != .string) return true;
             const len = try std.unicode.utf8CountCodepoints(instance.string);
             return len >= @as(usize, @intCast(arg.integer));
+        }
+        if (std.mem.eql(u8, keyword, "minItems")) {
+            if (instance != .array) return true;
+            return instance.array.items.len >= @as(usize, @intCast(arg.integer));
         }
         if (std.mem.eql(u8, keyword, "minimum")) {
             return switch (instance) {
@@ -212,6 +217,7 @@ test "config.schema: object properties match parser keys" {
         .{ .path = &.{ "definitions", "group" }, .keys = &config.object_keys.group },
         .{ .path = &.{ "definitions", "service" }, .keys = &config.object_keys.service },
         .{ .path = &.{ "definitions", "service", "properties", "healthcheck" }, .keys = &config.object_keys.healthcheck },
+        .{ .path = &.{ "definitions", "watch" }, .keys = &config.object_keys.watch },
         .{ .path = &.{ "definitions", "dockerStep" }, .keys = &config.object_keys.docker_step },
         .{ .path = &.{ "definitions", "groupStep" }, .keys = &config.object_keys.group_step },
         .{ .path = &.{ "definitions", "commandStep" }, .keys = &config.object_keys.command_step },
@@ -275,7 +281,8 @@ test "config.schema: accepts every public key with $schema" {
         \\    {"name":"backend","env_file":"backend/.env","services":[
         \\      {"name":"api","dir":"backend","runtime":"cargo","command":"run","port":8080,
         \\       "healthcheck":{"type":"http","path":"/ready"},"env_file":".env.local"},
-        \\      {"name":"tool","dir":"~/tools","external":true,"runtime":"","command":"watch"}
+        \\      {"name":"tool","dir":"~/tools","external":true,"runtime":"","command":"watch",
+        \\       "watch":{"paths":["src","Cargo.toml"],"include":["*.rs"],"exclude":["target/"],"debounce_ms":0}}
         \\    ]}
         \\  ],
         \\  "startup_order": [
@@ -337,6 +344,27 @@ test "config.schema: rejects structural errors the parser rejects" {
         .{ .name = "unknown healthcheck type", .json =
         \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve","healthcheck":{"type":"grpc"}}]}]}
         },
+        .{ .name = "watch not object", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve","watch":["src"]}]}]}
+        },
+        .{ .name = "watch key typo", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve","watch":{"path":["src"]}}]}]}
+        },
+        .{ .name = "empty watch paths", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve","watch":{"paths":[]}}]}]}
+        },
+        .{ .name = "empty watch path", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve","watch":{"paths":[""]}}]}]}
+        },
+        .{ .name = "string exclude", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve","watch":{"exclude":"target"}}]}]}
+        },
+        .{ .name = "empty include pattern", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve","watch":{"include":[""]}}]}]}
+        },
+        .{ .name = "negative debounce", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve","watch":{"debounce_ms":-1}}]}]}
+        },
         .{ .name = "docker step false", .json =
         \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[],"startup_order":[{"docker":false}]}
         },
@@ -389,6 +417,15 @@ test "config.schema: leaves references and paths to the parser" {
         },
         .{ .name = "service dir escapes root", .json =
         \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","dir":"../escape","command":"serve"}]}]}
+        },
+        .{ .name = "watch path escapes service dir", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve","watch":{"paths":["../shared"]}}]}]}
+        },
+        .{ .name = "absolute watch pattern", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve","watch":{"exclude":["/tmp/*.log"]}}]}]}
+        },
+        .{ .name = "parent watch pattern", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve","watch":{"include":["../*.rs"]}}]}]}
         },
         .{ .name = "compose dir escapes root", .json =
         \\{"project":{"name":"demo","root":"/tmp/demo"},"docker":{"compose":"../escape/compose.yaml"},"groups":[]}
