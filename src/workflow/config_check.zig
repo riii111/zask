@@ -23,7 +23,7 @@ pub fn collectPathProblems(gpa: std.mem.Allocator, io: std.Io, cfg: config.Confi
         const label = try std.fmt.allocPrint(gpa, "groups[{s}].services[{s}]", .{ config.Config.serviceGroup(service), name });
         const dir_ok = try checker.check(try joinLabel(gpa, label, "dir"), try cfg.serviceDir(gpa, service), .directory);
         for (try config.Config.serviceEnvFiles(gpa, service)) |env_file| {
-            if (!dir_ok and env_file.base == .service) continue;
+            if (!dir_ok and dependsOnServiceDir(env_file)) continue;
             const env_label = switch (env_file.scope) {
                 .project => "env_file",
                 .group => try std.fmt.allocPrint(gpa, "groups[{s}].env_file", .{config.Config.serviceGroup(service)}),
@@ -57,8 +57,8 @@ const Checker = struct {
     reported: std.StringHashMap(void),
 
     fn check(self: *Checker, label: []const u8, path: []const u8, kind: configured_path.Kind) !bool {
+        const issue = try configured_path.inspect(self.io, path, kind) orelse return true;
         const resolved = try pathing.absoluteForDisplay(self.gpa, self.io, path);
-        const issue = try configured_path.inspect(self.io, resolved, kind) orelse return true;
         const key = try std.fmt.allocPrint(self.gpa, "{s}\x00{s}", .{ label, resolved });
         const entry = try self.reported.getOrPut(key);
         if (entry.found_existing) return false;
@@ -69,6 +69,12 @@ const Checker = struct {
         return false;
     }
 };
+
+// Mirrors Config.serviceEnvFilePath: absolute and `~` entries ignore the service dir.
+fn dependsOnServiceDir(env_file: config.Config.EnvFile) bool {
+    if (env_file.base != .service) return false;
+    return !std.fs.path.isAbsolute(env_file.path) and !std.mem.startsWith(u8, env_file.path, "~");
+}
 
 fn commandPhaseDir(phase: std.json.Value) ?[]const u8 {
     if (phase != .object) return null;
@@ -152,7 +158,7 @@ test "config_check.collectPathProblems: reports every missing path once" {
         \\"env_file":".env",
         \\"docker":{"compose":"notdir/compose.yml"},
         \\"groups":[{"name":"be","env_file":"be.env","services":[
-        \\  {"name":"api","dir":"backend","command":"serve","env_file":".env.local"},
+        \\  {"name":"api","dir":"backend","command":"serve","env_file":[".env.local","/nonexistent/zask-check.env"]},
         \\  {"name":"web","dir":"web","command":"dev","env_file":".env.local"}
         \\]}],
         \\"startup_order":[{"group":"be"},{"command":"setup","dir":"scripts"}]
@@ -166,10 +172,57 @@ test "config_check.collectPathProblems: reports every missing path once" {
         .{ .path = "groups[be].services[api].dir", .message = try std.fmt.allocPrint(gpa, "directory not found: {s}/backend", .{r}) },
         .{ .path = "env_file", .message = try std.fmt.allocPrint(gpa, "file not found: {s}/.env", .{r}) },
         .{ .path = "groups[be].env_file", .message = try std.fmt.allocPrint(gpa, "file not found: {s}/be.env", .{r}) },
+        .{ .path = "groups[be].services[api].env_file", .message = "file not found: /nonexistent/zask-check.env" },
         .{ .path = "groups[be].services[web].env_file", .message = try std.fmt.allocPrint(gpa, "file not found: {s}/web/.env.local", .{r}) },
         .{ .path = "docker.compose", .message = try std.fmt.allocPrint(gpa, "not a directory: {s}/notdir", .{r}) },
         .{ .path = "startup_order[1].dir", .message = try std.fmt.allocPrint(gpa, "directory not found: {s}/scripts", .{r}) },
     }, diags.slice());
+}
+
+test "config_check.collectPathProblems: follows symlinks before parent references" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "real/inner");
+    try tmp.dir.writeFile(io, .{ .sub_path = "real/.env", .data = "" });
+    try tmp.dir.symLink(io, "real/inner", "link", .{ .is_directory = true });
+    const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    const json = try std.fmt.allocPrint(gpa,
+        \\{{"project":{{"name":"demo","root":"{s}/link/.."}},"env_file":".env",
+        \\ "groups":[{{"name":"be","services":[{{"name":"api","command":"serve"}}]}}]}}
+    , .{base});
+    const cfg = try config.Config.parse(gpa, json, "/home/me");
+    var diags = diagnostics.Diagnostics.init(gpa);
+
+    try collectPathProblems(gpa, io, cfg, &diags);
+
+    try std.testing.expect(diags.isEmpty());
+}
+
+test "config_check.collectPathProblems: reports a missing root behind parent references" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    const json = try std.fmt.allocPrint(gpa,
+        \\{{"project":{{"name":"demo","root":"{s}/absent/.."}},
+        \\ "groups":[{{"name":"be","services":[{{"name":"api","command":"serve"}}]}}]}}
+    , .{base});
+    const cfg = try config.Config.parse(gpa, json, "/home/me");
+    var diags = diagnostics.Diagnostics.init(gpa);
+
+    try collectPathProblems(gpa, io, cfg, &diags);
+
+    try std.testing.expectEqual(@as(usize, 1), diags.slice().len);
+    try std.testing.expectEqualStrings("project.root", diags.slice()[0].path);
 }
 
 test "config_check.collectPathProblems: stops at a missing project root" {
