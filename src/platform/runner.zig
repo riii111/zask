@@ -1,13 +1,14 @@
 const std = @import("std");
 
 pub const captured_output_limit = 1024 * 1024;
+const exit_poll_interval_ms = 10;
 
 pub const Runner = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     recorder: ?*Recorder = null,
     /// Wall-clock Unix milliseconds after which a captured run fails with
-    /// error.Timeout; std.process.run kills the child, so none is left behind.
+    /// error.Timeout. The child is killed and reaped, so none is left behind.
     /// Interactive runs ignore it.
     deadline_ms: ?i64 = null,
 
@@ -24,20 +25,20 @@ pub const Runner = struct {
             if (options.check) try checkTerm(term);
             return .{ .term = term };
         }
-        const result = (if (options.cwd) |cwd|
+        const result = (if (self.deadline_ms) |deadline_ms|
+            self.runUntilDeadline(argv, options.cwd, deadline_ms)
+        else if (options.cwd) |cwd|
             std.process.run(self.gpa, self.io, .{
                 .argv = argv,
                 .cwd = .{ .path = cwd },
                 .stdout_limit = .limited(captured_output_limit),
                 .stderr_limit = .limited(captured_output_limit),
-                .timeout = self.timeout(),
             })
         else
             std.process.run(self.gpa, self.io, .{
                 .argv = argv,
                 .stdout_limit = .limited(captured_output_limit),
                 .stderr_limit = .limited(captured_output_limit),
-                .timeout = self.timeout(),
             })) catch |err| switch (err) {
             error.StreamTooLong => return error.OutputTooLarge,
             else => return err,
@@ -73,9 +74,85 @@ pub const Runner = struct {
         return std.Io.Clock.real.now(self.io).toMilliseconds();
     }
 
-    fn timeout(self: Runner) std.Io.Timeout {
-        const deadline_ms = self.deadline_ms orelse return .none;
-        return .{ .deadline = .{ .raw = .{ .nanoseconds = @as(i96, deadline_ms) * std.time.ns_per_ms }, .clock = .real } };
+    /// Like std.process.run, but the deadline also bounds the exit wait:
+    /// std.process.run applies its timeout only while reading, so a child that
+    /// closes its output and keeps running would block it indefinitely.
+    fn runUntilDeadline(self: Runner, argv: []const []const u8, cwd: ?[]const u8, deadline_ms: i64) !std.process.RunResult {
+        var child = try std.process.spawn(self.io, .{
+            .argv = argv,
+            .cwd = if (cwd) |path| .{ .path = path } else .inherit,
+            .stdin = .ignore,
+            .stdout = .pipe,
+            .stderr = .pipe,
+        });
+        // No-op once waitUntilDeadline has reaped the child; otherwise kills
+        // and reaps it.
+        defer child.kill(self.io);
+
+        var output = try self.readUntilDeadline(&child, deadline_ms);
+        errdefer output.deinit(self.gpa);
+        const term = try self.waitUntilDeadline(&child, deadline_ms);
+        return .{ .term = term, .stdout = output.stdout, .stderr = output.stderr };
+    }
+
+    const CapturedOutput = struct {
+        stdout: []u8,
+        stderr: []u8,
+
+        fn deinit(self: CapturedOutput, gpa: std.mem.Allocator) void {
+            gpa.free(self.stdout);
+            gpa.free(self.stderr);
+        }
+    };
+
+    /// Caller owns the returned output.
+    fn readUntilDeadline(self: Runner, child: *std.process.Child, deadline_ms: i64) !CapturedOutput {
+        var buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
+        var multi_reader: std.Io.File.MultiReader = undefined;
+        multi_reader.init(self.gpa, self.io, buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
+        defer multi_reader.deinit();
+
+        const timeout: std.Io.Timeout = .{ .deadline = .{
+            .raw = .{ .nanoseconds = @as(i96, deadline_ms) * std.time.ns_per_ms },
+            .clock = .real,
+        } };
+        while (multi_reader.fill(64, timeout)) |_| {
+            if (multi_reader.reader(0).buffered().len > captured_output_limit) return error.StreamTooLong;
+            if (multi_reader.reader(1).buffered().len > captured_output_limit) return error.StreamTooLong;
+        } else |err| switch (err) {
+            error.EndOfStream => {},
+            else => |e| return e,
+        }
+        try multi_reader.checkAnyError();
+
+        const stdout = try multi_reader.toOwnedSlice(0);
+        errdefer self.gpa.free(stdout);
+        return .{ .stdout = stdout, .stderr = try multi_reader.toOwnedSlice(1) };
+    }
+
+    /// Polls for the exit instead of blocking in Child.wait. On success the
+    /// child is reaped here, and `child` is left as Child.kill expects of a
+    /// reaped child (no id, no open pipes).
+    fn waitUntilDeadline(self: Runner, child: *std.process.Child, deadline_ms: i64) !std.process.Child.Term {
+        const pid = child.id.?;
+        while (true) {
+            var status: c_int = undefined;
+            const reaped = std.c.waitpid(pid, &status, @intCast(std.c.W.NOHANG));
+            if (reaped == pid) {
+                child.id = null;
+                if (child.stdout) |file| file.close(self.io);
+                if (child.stderr) |file| file.close(self.io);
+                child.stdout = null;
+                child.stderr = null;
+                return std.Io.Threaded.statusToTerm(@bitCast(status));
+            }
+            if (reaped < 0) switch (std.posix.errno(reaped)) {
+                .INTR => continue,
+                else => |err| return std.posix.unexpectedErrno(err),
+            };
+            if (self.nowMilliseconds() >= deadline_ms) return error.Timeout;
+            std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(exit_poll_interval_ms), .awake) catch {};
+        }
     }
 
     fn recordedRun(self: Runner, recorder: *Recorder, argv: []const []const u8, options: RunOptions) !RunOutput {
