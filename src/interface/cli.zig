@@ -105,7 +105,7 @@ const command_specs = [_]CommandSpec{
     .{ .command = .list, .names = &.{"list"}, .usage = "list", .description = "List configured services" },
     .{ .command = .status, .names = &.{"status"}, .usage = "status [--json]", .description = "Show service state" },
     .{ .command = .check, .names = &.{"check"}, .usage = "check", .description = "Check config without opening a session" },
-    .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service> [--tail <n>]", .description = "Focus service window, or print its last n lines", .completion = .service },
+    .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service> [--saved] [--tail <n>] | --path", .description = "Focus service window, or print its pane or saved log", .completion = .service },
     .{ .command = .init, .names = &.{"init"}, .usage = "init [project] [--root <path>] [--from <Procfile>] [--force]", .description = "Create project config", .completion = .init_options, .global = true },
     .{ .command = .wait, .names = &.{"wait"}, .usage = "wait <svc|group>... [--timeout <sec>]", .description = "Wait until services are ready" },
     .{ .command = .completion, .names = &.{"completion"}, .usage = "completion [zsh|bash|fish]", .description = "Print shell completion script", .completion = .shell, .global = true },
@@ -190,7 +190,7 @@ fn exitWithTextError(stdout: *std.Io.Writer, err: anyerror, err_ctx: cli_context
             try stdout.flush();
             std.process.exit(2);
         },
-        error.SessionNotRunning, error.TmuxUnavailable, error.ServiceStopIncomplete, error.StartupFailed, error.WindowNotReady, error.ServiceNotFound, error.ServiceWindowMissing, error.LogOutputTooLarge, error.ServiceNotRunning, error.ReadinessUnavailable, error.WaitTimedOut => {
+        error.SessionNotRunning, error.TmuxUnavailable, error.ServiceStopIncomplete, error.StartupFailed, error.WindowNotReady, error.ServiceNotFound, error.ServiceWindowMissing, error.LogOutputTooLarge, error.SavedLogMissing, error.SavedLogUnreadable, error.SavedLogUnavailable, error.ServiceNotRunning, error.ReadinessUnavailable, error.WaitTimedOut => {
             try stdout.flush();
             std.process.exit(1);
         },

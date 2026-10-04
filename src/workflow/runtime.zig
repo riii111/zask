@@ -5,12 +5,14 @@ const docker_client = @import("../platform/docker.zig");
 const env = @import("../platform/env.zig");
 const lifecycle_mod = @import("lifecycle.zig");
 const lock = @import("../platform/lock.zig");
+const log_reader = @import("../platform/log_reader.zig");
 const observations = @import("../model/observations.zig");
 const paths = @import("../platform/paths.zig");
 const pathing = @import("pathing.zig");
 const phases = @import("phases.zig");
 const proc_runner = @import("../platform/runner.zig");
 const progress_mod = @import("progress.zig");
+const service_log = @import("service_log.zig");
 const service_observation = @import("service_observation.zig");
 const session_layout = @import("session_layout.zig");
 const tmux_client = @import("../platform/tmux.zig");
@@ -86,6 +88,7 @@ pub const Runtime = struct {
             .active => {},
             .missing => {
                 try writer.writeAll("Session not running\n");
+                try self.pointToSavedLog(service, writer);
                 try writer.flush();
                 return error.SessionNotRunning;
             },
@@ -103,18 +106,12 @@ pub const Runtime = struct {
     /// window or attaches. Every failure is explained on `diag` and returned as
     /// an error, so an empty `out` on success always means an empty log.
     pub fn logsTail(self: Runtime, service: []const u8, max_lines: u32, out: *std.Io.Writer, diag: *std.Io.Writer) !void {
-        _ = self.cfg.findService(service) catch |err| switch (err) {
-            error.UnknownService => {
-                try diag.print("Unknown service: {s}\n", .{service});
-                try diag.flush();
-                return error.ServiceNotFound;
-            },
-            else => return err,
-        };
+        try self.requireLoggedService(service, diag);
         switch (self.tmux().observeSession()) {
             .active => {},
             .missing => {
                 try diag.writeAll("Session not running\n");
+                try self.pointToSavedLog(service, diag);
                 try diag.flush();
                 return error.SessionNotRunning;
             },
@@ -123,6 +120,7 @@ pub const Runtime = struct {
         const lines = self.tmux().captureRecentLines(service, max_lines) catch |err| switch (err) {
             error.WindowMissing => {
                 try diag.print("Service window not found: {s}\n", .{service});
+                try self.pointToSavedLog(service, diag);
                 try diag.flush();
                 return error.ServiceWindowMissing;
             },
@@ -136,6 +134,41 @@ pub const Runtime = struct {
         };
         defer self.gpa.free(lines);
         try out.writeAll(lines);
+        try out.flush();
+    }
+
+    /// Writes the saved log of the service (see service_log) to `out`, or only
+    /// its last `max_lines` lines. It never touches tmux, so it reads the output
+    /// of earlier runs after `close` as well as while the session runs. Every
+    /// failure, including a service that has not saved output yet, is explained
+    /// on `diag` and returned as an error.
+    pub fn logsSaved(self: Runtime, service: []const u8, max_lines: ?u32, out: *std.Io.Writer, diag: *std.Io.Writer) !void {
+        try self.requireLoggedService(service, diag);
+        const path = try self.savedLogPath(service);
+        defer self.gpa.free(path);
+        log_reader.writeLines(self.io, path, max_lines, out) catch |err| switch (err) {
+            error.FileNotFound => {
+                try diag.print("No saved output for {s} yet; it is written to {s} once the service starts\n", .{ service, path });
+                try diag.flush();
+                return error.SavedLogMissing;
+            },
+            error.WriteFailed => return err,
+            else => {
+                try diag.print("Cannot read saved log {s} ({s})\n", .{ path, @errorName(err) });
+                try diag.flush();
+                return error.SavedLogUnreadable;
+            },
+        };
+        try out.flush();
+    }
+
+    /// Writes only the saved log path of the service to `out`, whether or not
+    /// the log exists yet, so it can be handed to an editor or `grep`.
+    pub fn logsPath(self: Runtime, service: []const u8, out: *std.Io.Writer, diag: *std.Io.Writer) !void {
+        try self.requireLoggedService(service, diag);
+        const path = try self.savedLogPath(service);
+        defer self.gpa.free(path);
+        try out.print("{s}\n", .{path});
         try out.flush();
     }
 
@@ -304,6 +337,37 @@ pub const Runtime = struct {
 
     pub fn restart(self: Runtime, target: []const u8, writer: *std.Io.Writer) !void {
         try self.lifecycle().restartTarget(target, writer);
+    }
+
+    fn requireLoggedService(self: Runtime, service: []const u8, diag: *std.Io.Writer) !void {
+        _ = self.cfg.findService(service) catch |err| switch (err) {
+            error.UnknownService => {
+                try diag.print("Unknown service: {s}\n", .{service});
+                try diag.flush();
+                return error.ServiceNotFound;
+            },
+            else => return err,
+        };
+    }
+
+    /// Caller owns the returned path.
+    fn savedLogPath(self: Runtime, service: []const u8) ![]const u8 {
+        const dir = self.service_log_dir orelse return error.SavedLogUnavailable;
+        return service_log.servicePath(self.gpa, dir, service);
+    }
+
+    /// Points to the saved log when the pane cannot be read but earlier output
+    /// was saved; it writes nothing when there is no saved log to point to.
+    fn pointToSavedLog(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
+        const dir = self.service_log_dir orelse return;
+        const path = try service_log.servicePath(self.gpa, dir, service);
+        defer self.gpa.free(path);
+        if (!log_reader.exists(self.io, path)) return;
+        const args = try std.fmt.allocPrint(self.gpa, "logs {s} --saved", .{service});
+        defer self.gpa.free(args);
+        const command = try zask_command.hint(self.gpa, self.command_hint, args);
+        defer self.gpa.free(command);
+        try writer.print("Saved output: {s}\nRead it with: {s}\n", .{ path, command });
     }
 
     fn runner(self: Runtime) proc_runner.Runner {
@@ -978,6 +1042,123 @@ test "runtime.logsTail: reports failures instead of an empty log" {
         try std.testing.expectEqualStrings(case.expected_diag, diag.buffered());
         try expectNoWindowMovement(&recorder);
     }
+}
+
+test "runtime.logsSaved: reads the saved log without touching tmux" {
+    const cases = [_]struct {
+        name: []const u8,
+        max_lines: ?u32,
+        expected: []const u8,
+    }{
+        .{ .name = "whole log", .max_lines = null, .expected = testSavedLog },
+        .{ .name = "last lines", .max_lines = 2, .expected = "boom\nexit 1\n" },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("case: {s}\n", .{case.name});
+        var fixture = try TestSavedLogFixture.init(std.testing.allocator, testSavedLog);
+        defer fixture.deinit();
+        var out_buffer: [256]u8 = undefined;
+        var out: std.Io.Writer = .fixed(&out_buffer);
+        var diag_buffer: [256]u8 = undefined;
+        var diag: std.Io.Writer = .fixed(&diag_buffer);
+
+        try fixture.runtime.logsSaved("api", case.max_lines, &out, &diag);
+
+        try std.testing.expectEqualStrings(case.expected, out.buffered());
+        try std.testing.expectEqualStrings("", diag.buffered());
+        try std.testing.expectEqual(@as(usize, 0), fixture.recorder.commands.items.len);
+    }
+}
+
+test "runtime.logsSaved: reports a service without saved output" {
+    var fixture = try TestSavedLogFixture.init(std.testing.allocator, null);
+    defer fixture.deinit();
+    var out_buffer: [64]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buffer);
+    var diag_buffer: [512]u8 = undefined;
+    var diag: std.Io.Writer = .fixed(&diag_buffer);
+
+    try std.testing.expectError(error.SavedLogMissing, fixture.runtime.logsSaved("api", 5, &out, &diag));
+
+    const expected = try std.fmt.allocPrint(fixture.arena.allocator(), "No saved output for api yet; it is written to {s} once the service starts\n", .{fixture.log_path});
+    try std.testing.expectEqualStrings("", out.buffered());
+    try std.testing.expectEqualStrings(expected, diag.buffered());
+}
+
+test "runtime.logsSaved: rejects an unknown service before reading a log" {
+    var fixture = try TestSavedLogFixture.init(std.testing.allocator, testSavedLog);
+    defer fixture.deinit();
+    var out_buffer: [64]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buffer);
+    var diag_buffer: [128]u8 = undefined;
+    var diag: std.Io.Writer = .fixed(&diag_buffer);
+
+    try std.testing.expectError(error.ServiceNotFound, fixture.runtime.logsSaved("worker", null, &out, &diag));
+
+    try std.testing.expectEqualStrings("", out.buffered());
+    try std.testing.expectEqualStrings("Unknown service: worker\n", diag.buffered());
+}
+
+test "runtime.logsPath: prints the saved log path before any output is saved" {
+    var fixture = try TestSavedLogFixture.init(std.testing.allocator, null);
+    defer fixture.deinit();
+    var out_buffer: [256]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buffer);
+    var diag_buffer: [64]u8 = undefined;
+    var diag: std.Io.Writer = .fixed(&diag_buffer);
+
+    try fixture.runtime.logsPath("api", &out, &diag);
+
+    const expected = try std.fmt.allocPrint(fixture.arena.allocator(), "{s}\n", .{fixture.log_path});
+    try std.testing.expectEqualStrings(expected, out.buffered());
+    try std.testing.expectEqualStrings("", diag.buffered());
+    try std.testing.expectEqual(@as(usize, 0), fixture.recorder.commands.items.len);
+}
+
+test "runtime.logsTail: missing session points to the saved log" {
+    const cases = [_]struct {
+        name: []const u8,
+        saved: ?[]const u8,
+        expected_hint: bool,
+    }{
+        .{ .name = "saved log", .saved = testSavedLog, .expected_hint = true },
+        .{ .name = "no saved log", .saved = null, .expected_hint = false },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("case: {s}\n", .{case.name});
+        var fixture = try TestSavedLogFixture.init(std.testing.allocator, case.saved);
+        defer fixture.deinit();
+        try fixture.recorder.enqueue("", "can't find session: demo", .{ .exited = 1 });
+        var out_buffer: [64]u8 = undefined;
+        var out: std.Io.Writer = .fixed(&out_buffer);
+        var diag_buffer: [512]u8 = undefined;
+        var diag: std.Io.Writer = .fixed(&diag_buffer);
+
+        try std.testing.expectError(error.SessionNotRunning, fixture.runtime.logsTail("api", 5, &out, &diag));
+
+        const expected = if (case.expected_hint)
+            try std.fmt.allocPrint(fixture.arena.allocator(), "Session not running\nSaved output: {s}\nRead it with: zask --config '/tmp/demo/config.json' logs api --saved\n", .{fixture.log_path})
+        else
+            "Session not running\n";
+        try std.testing.expectEqualStrings("", out.buffered());
+        try std.testing.expectEqualStrings(expected, diag.buffered());
+    }
+}
+
+test "runtime.logs: missing session points to the saved log" {
+    var fixture = try TestSavedLogFixture.init(std.testing.allocator, testSavedLog);
+    defer fixture.deinit();
+    try fixture.recorder.enqueue("", "can't find session: demo", .{ .exited = 1 });
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try std.testing.expectError(error.SessionNotRunning, fixture.runtime.logs("api", &writer));
+
+    const expected = try std.fmt.allocPrint(fixture.arena.allocator(), "Session not running\nSaved output: {s}\nRead it with: zask --config '/tmp/demo/config.json' logs api --saved\n", .{fixture.log_path});
+    try std.testing.expectEqualStrings(expected, writer.buffered());
+    try expectNoWindowMovement(&fixture.recorder);
 }
 
 test "runtime.openSession: creates dashboard service and docker windows" {
@@ -1772,6 +1953,52 @@ fn expectNoWindowMovement(recorder: *const proc_runner.Recorder) !void {
         try std.testing.expect(proc_runner.findCommandContaining(recorder, command) == null);
     }
 }
+
+const testSavedLog = "=== zask: api started at 2026-09-21T14:13:20Z ===\nlistening\nboom\nexit 1\n";
+
+/// A runtime whose service logs live in a temporary directory, holding the
+/// given saved `api.log` (none when null).
+const TestSavedLogFixture = struct {
+    arena: std.heap.ArenaAllocator,
+    threaded: std.Io.Threaded,
+    tmp: std.testing.TmpDir,
+    recorder: proc_runner.Recorder,
+    runtime: Runtime,
+    log_path: []const u8,
+
+    fn init(gpa: std.mem.Allocator, saved: ?[]const u8) !*TestSavedLogFixture {
+        const self = try gpa.create(TestSavedLogFixture);
+        errdefer gpa.destroy(self);
+        self.arena = std.heap.ArenaAllocator.init(gpa);
+        errdefer self.arena.deinit();
+        self.threaded = std.Io.Threaded.init(gpa, .{});
+        errdefer self.threaded.deinit();
+        self.tmp = std.testing.tmpDir(.{});
+        errdefer self.tmp.cleanup();
+        const scratch = self.arena.allocator();
+        const io = self.threaded.io();
+        try self.tmp.dir.createDirPath(io, "logs");
+        if (saved) |data| try self.tmp.dir.writeFile(io, .{ .sub_path = "logs/api.log", .data = data });
+        const root = try self.tmp.dir.realPathFileAlloc(io, ".", scratch);
+        const log_dir = try std.fs.path.join(scratch, &.{ root, "logs" });
+        self.log_path = try std.fs.path.join(scratch, &.{ log_dir, "api.log" });
+        self.recorder = proc_runner.Recorder.init(scratch);
+        const run = proc_runner.Runner{ .gpa = scratch, .io = io, .recorder = &self.recorder };
+        self.runtime = testRuntime(scratch, run, try testLogsConfig(scratch));
+        self.runtime.io = io;
+        self.runtime.service_log_dir = log_dir;
+        return self;
+    }
+
+    fn deinit(self: *TestSavedLogFixture) void {
+        const gpa = self.arena.child_allocator;
+        self.recorder.deinit();
+        self.tmp.cleanup();
+        self.threaded.deinit();
+        self.arena.deinit();
+        gpa.destroy(self);
+    }
+};
 
 fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.Config) Runtime {
     return .{
