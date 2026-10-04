@@ -544,6 +544,17 @@ test "monitor: keys move selection, toggle the filter, and quit restores the ter
         try sendSplitArrow(gpa, io, target, "[A");
         try waitForSelectedRow(gpa, io, target, "api");
     }
+    // The ESC of the next arrow can share a read with the end of the previous one.
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "-H", "1b" });
+    try std.Io.sleep(io, .fromMilliseconds(150), .awake);
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "-H", "5b", "42", "1b" });
+    try std.Io.sleep(io, .fromMilliseconds(150), .awake);
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "-l", "[A" });
+    try waitForSelectedRow(gpa, io, target, "api");
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "j" });
+    try waitForSelectedRow(gpa, io, target, "web");
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "k" });
+    try waitForSelectedRow(gpa, io, target, "api");
 
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "resize-window", "-t", target, "-x", "45", "-y", "10" });
     try waitForPaneText(gpa, io, target, "│ 🚀");

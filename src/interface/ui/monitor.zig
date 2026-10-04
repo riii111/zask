@@ -121,12 +121,16 @@ const Monitor = struct {
         const len = try terminal.read(terminal.stdin, self.input.space());
         if (len == 0) return .quit;
         self.input.commit(len);
+        var decoded_any = false;
         while (self.input.next()) |key| {
+            decoded_any = true;
             if (try self.handleKey(key) == .quit) return .quit;
         }
+        // Once a key was decoded, any bytes still pending start a new sequence
+        // and get a fresh deadline; otherwise the same sequence keeps waiting.
         if (!self.input.pending()) {
             self.pending_since = null;
-        } else if (self.pending_since == null) {
+        } else if (decoded_any or self.pending_since == null) {
             self.pending_since = std.Io.Clock.awake.now(self.io);
         }
         return .keep;
