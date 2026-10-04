@@ -81,6 +81,10 @@ pub const object_keys = struct {
     pub const start_profile = [_][]const u8{ keys.profile, keys.label, keys.group_overrides };
 };
 
+/// Names of windows zask opens for itself. tmux addresses service windows by
+/// service name, so a service with one of these names would collide with them.
+pub const reserved_service_names = [_][]const u8{"zask-watch"};
+
 /// Values accepted for enumerated string keys. The JSON Schema `enum` lists
 /// must match; the schema consistency test compares them.
 pub const allowed_values = struct {
@@ -793,6 +797,7 @@ fn validateService(gpa: std.mem.Allocator, service: Value, path: []const u8, dia
     if (try checkRequiredString(gpa, service, keys.name, path, diags)) |name| {
         const name_path = try joinPath(gpa, path, "name");
         validate.identifier(name) catch try diags.add(name_path, "must be a valid identifier");
+        if (containsString(name, &reserved_service_names)) try diags.addFmt(name_path, "'{s}' is reserved by zask", .{name});
         if (refs.services.contains(name)) {
             try diags.addFmt(name_path, "duplicate service '{s}'", .{name});
         } else try refs.services.put(name, {});
@@ -1965,4 +1970,20 @@ test "config.validateAll: reports watch problems with field paths" {
         try std.testing.expectEqualStrings(want.path, got.path);
         try std.testing.expectEqualStrings(want.message, got.message);
     }
+}
+
+test "config.validateAll: rejects service names reserved for zask windows" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const value = try parseJsonBytes(arena.allocator(),
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"zask-watch","command":"serve"}]}]}
+    );
+    var diags = diagnostics.Diagnostics.init(arena.allocator());
+    defer diags.deinit();
+
+    try validateAll(arena.allocator(), value, &diags);
+
+    try std.testing.expectEqual(@as(usize, 1), diags.slice().len);
+    try std.testing.expectEqualStrings("groups[0].services[0].name", diags.slice()[0].path);
+    try std.testing.expectEqualStrings("'zask-watch' is reserved by zask", diags.slice()[0].message);
 }

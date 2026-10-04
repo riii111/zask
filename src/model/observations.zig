@@ -12,6 +12,14 @@ pub const WindowObservation = enum {
     unavailable,
 };
 
+/// Whether the user asked zask to stop a service. Survives the shutdown window
+/// in which the pane still looks busy.
+pub const StopMarkObservation = enum {
+    stopped,
+    not_stopped,
+    unavailable,
+};
+
 pub const PaneState = enum {
     window_missing,
     idle,

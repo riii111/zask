@@ -10,6 +10,7 @@ const proc_runner = @import("../platform/runner.zig");
 const progress_mod = @import("progress.zig");
 const session_layout = @import("session_layout.zig");
 const shell = @import("../platform/shell.zig");
+const stop_marks_mod = @import("../platform/stop_marks.zig");
 const tmux_client = @import("../platform/tmux.zig");
 const waits = @import("waits.zig");
 const zask_command = @import("zask_command.zig");
@@ -42,6 +43,8 @@ pub const Lifecycle = struct {
     command_hint: zask_command.InvocationHint,
     /// Printed in the service pane before the start command runs.
     launch_notice: ?[]const u8 = null,
+    /// Records user stops for the file watcher. Null skips recording.
+    stop_marks: ?stop_marks_mod.StopMarks = null,
 
     pub fn startAll(self: Lifecycle, profile: []const u8, writer: *std.Io.Writer, mode: StartMode) !void {
         var progress = progress_mod.Line.init(writer);
@@ -167,12 +170,24 @@ pub const Lifecycle = struct {
         }
     }
 
-    /// Same steps as `restart <service>`, with `notice` shown in the service
-    /// pane so its log records why it restarted.
+    /// Restart for a file change, with `notice` shown in the service pane so
+    /// its log records why it restarted. Unlike `restart <service>` it does not
+    /// record a stop, and it leaves the service stopped when the user stops it
+    /// while this restart waits for the old process to exit.
     pub fn restartServiceWithNotice(self: Lifecycle, service: []const u8, notice: []const u8, writer: *std.Io.Writer) !void {
+        try self.ensureServiceStopped(service, writer);
+        if (self.observeStopMark(service) != .not_stopped) {
+            try writeProgress(writer, "  {s} was stopped; not starting it\n", .{service});
+            return;
+        }
         var noticed = self;
         noticed.launch_notice = notice;
-        try noticed.restartService(service, writer);
+        try noticed.startService(service, writer, .observe);
+    }
+
+    pub fn observeStopMark(self: Lifecycle, service: []const u8) observations.StopMarkObservation {
+        const marks = self.stop_marks orelse return .not_stopped;
+        return marks.observe(self.gpa, service);
     }
 
     pub fn startService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer, mode: StartMode) !void {
@@ -206,7 +221,17 @@ pub const Lifecycle = struct {
     }
 
     fn stopService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
+        _ = try self.cfg.findService(service);
+        if (!self.recordStop(service)) try writeProgress(writer, stop_not_recorded, .{service});
         try self.ensureServiceStopped(service, writer);
+    }
+
+    /// Marks before signaling so the watcher sees the stop while the process is
+    /// still exiting. A failure only weakens file watch, so stopping continues.
+    fn recordStop(self: Lifecycle, service: []const u8) bool {
+        const marks = self.stop_marks orelse return true;
+        marks.mark(self.gpa, service) catch return false;
+        return true;
     }
 
     /// A failed signal continues the loop (so the rest still get C-c) but is
@@ -229,6 +254,7 @@ pub const Lifecycle = struct {
         while (i > 0) {
             i -= 1;
             const name = config.Config.serviceName(services[i]) catch continue;
+            if (!self.recordStop(name)) try progress.warn(stop_not_recorded, .{name});
             const pane = self.tmux.observePane(name);
             defer pane.deinit(self.gpa);
             switch (serviceStopDecision(pane.state)) {
@@ -352,6 +378,8 @@ pub const Lifecycle = struct {
         }
         try progress.step("Starting {s}...\n", .{service});
         try progress.command("{s}\n", .{start_command});
+        if (self.stop_marks) |marks| marks.clear(self.gpa, service) catch
+            try progress.warn("Warning: could not clear the stop record for {s}; file watch will not restart it\n", .{service});
         try self.tmux.respawnPane(service, service_dir, try self.withLaunchNotice(launch_command));
     }
 
@@ -625,6 +653,8 @@ fn sessionNotRunning(writer: *std.Io.Writer) !void {
 }
 
 const writeProgress = waits.writeProgress;
+
+const stop_not_recorded = "Warning: could not record that {s} was stopped; file watch may restart it\n";
 
 const ServiceStartDecision = enum {
     no_op,
@@ -1091,6 +1121,74 @@ test "lifecycle.restartServiceWithNotice: prints notice before service command" 
     const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
     try proc_runner.expectCommandArgContains(respawn, 9, "printf '%s\\n' 'zask: it'\\''s src/a.zig'\nserve\n");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting api...") != null);
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+fn testStopMarks(tmp: *std.testing.TmpDir, gpa: std.mem.Allocator) !stop_marks_mod.StopMarks {
+    const base = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+    return stop_marks_mod.StopMarks.init(gpa, std.testing.io, base, "demo");
+}
+
+test "lifecycle.stopTarget: records a stop that the next start clears" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("1|1|123|serve\n", "", .{ .exited = 0 });
+    try recorder.enqueue("1|1|123|serve\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = std.testing.io, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    var lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    lifecycle.stop_marks = try testStopMarks(&tmp, arena.allocator());
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.stopTarget("api", &writer);
+    const after_stop = lifecycle.observeStopMark("api");
+    try lifecycle.startService("api", &writer, .observe);
+    const after_start = lifecycle.observeStopMark("api");
+
+    try std.testing.expectEqual(observations.StopMarkObservation.stopped, after_stop);
+    try std.testing.expectEqual(observations.StopMarkObservation.not_stopped, after_start);
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "lifecycle.restartServiceWithNotice: leaves service stopped when a stop is recorded" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","command":"serve"}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("1|1|123|serve\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = std.testing.io, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), json);
+    var lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    lifecycle.stop_marks = try testStopMarks(&tmp, arena.allocator());
+    try lifecycle.stop_marks.?.mark(arena.allocator(), "api");
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.restartServiceWithNotice("api", "zask: restarting api", &writer);
+
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "respawn-pane") == null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api was stopped; not starting it") != null);
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 

@@ -1,9 +1,9 @@
 //! Keeps schema/zask.schema.json consistent with the config parser.
 //!
 //! The schema covers structure (keys, types, enums, required fields). References
-//! between groups, services, and aliases, duplicate names, path escapes, and
-//! watch pattern rules are checked only by the parser; the tests below fix that
-//! boundary.
+//! between groups, services, and aliases, duplicate names, reserved service
+//! names, path escapes, and watch pattern rules are checked only by the parser;
+//! the tests below fix that boundary.
 
 const std = @import("std");
 const config = @import("config.zig");
@@ -426,6 +426,9 @@ test "config.schema: leaves references and paths to the parser" {
         },
         .{ .name = "parent watch pattern", .json =
         \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve","watch":{"include":["../*.rs"]}}]}]}
+        },
+        .{ .name = "reserved service name", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"zask-watch","command":"serve"}]}]}
         },
         .{ .name = "compose dir escapes root", .json =
         \\{"project":{"name":"demo","root":"/tmp/demo"},"docker":{"compose":"../escape/compose.yaml"},"groups":[]}

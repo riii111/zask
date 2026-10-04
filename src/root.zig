@@ -19,6 +19,7 @@ pub const runner = @import("platform/runner.zig");
 pub const runtime = @import("workflow/runtime.zig");
 pub const session_layout = @import("workflow/session_layout.zig");
 pub const shell = @import("platform/shell.zig");
+pub const stop_marks = @import("platform/stop_marks.zig");
 pub const tmux = @import("platform/tmux.zig");
 pub const tmux_setup = @import("workflow/tmux_setup.zig");
 pub const validate = @import("model/validate.zig");

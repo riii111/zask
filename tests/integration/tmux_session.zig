@@ -417,7 +417,7 @@ test "runtime.start: recreated service windows preserve configured order" {
     try expectWindowOrder(gpa, io, session, &.{ "dashboard", "api", "worker", "web" });
 }
 
-test "runtime.watch: restarts running service, skips stopped one, and ends with close" {
+test "runtime.watch: restarts running service, skips stopping one, and ends with close" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
@@ -432,22 +432,30 @@ test "runtime.watch: restarts running service, skips stopped one, and ends with 
     try tmp.dir.createDirPath(io, "src");
     try tmp.dir.writeFile(io, .{ .sub_path = "src/main.txt", .data = "1" });
     const project_root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    // The service takes 2s to exit after Ctrl-C, so its pane stays busy while
+    // `zask stop` is still waiting.
     const config_json = try std.fmt.allocPrint(gpa,
         \\{{
         \\  "project": {{"name":"{s}","root":"{s}"}},
         \\  "groups": [{{"name":"backend","services":[
-        \\    {{"name":"api","command":"/bin/sleep 60","watch":{{"paths":["src"],"debounce_ms":0}}}}
+        \\    {{"name":"api","command":"sh -c 'trap \"sleep 2; exit 0\" INT; while :; do sleep 1; done'","watch":{{"paths":["src"],"debounce_ms":0}}}}
         \\  ]}}]
         \\}}
     , .{ session, project_root });
     try tmp.dir.writeFile(io, .{ .sub_path = "zask.json", .data = config_json });
     const config_path = try std.fs.path.join(gpa, &.{ project_root, "zask.json" });
     const cfg = try zask.config.Config.parse(gpa, config_json, "/tmp");
-    const runtime_base = try std.fmt.allocPrint(gpa, "/tmp/zask-test-{d}-watch-runtime", .{std.c.getpid()});
-    defer std.Io.Dir.cwd().deleteTree(io, runtime_base) catch {};
+    const runtime_dir = try std.fmt.allocPrint(gpa, "/tmp/zask-test-{d}-watch-runtime", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteTree(io, runtime_dir) catch {};
     var environ = std.process.Environ.Map.init(gpa);
     defer environ.deinit();
-    try environ.put("XDG_RUNTIME_DIR", runtime_base);
+    try environ.put("XDG_RUNTIME_DIR", runtime_dir);
+    try environ.put("HOME", project_root);
+    const parent_path = if (std.c.getenv("PATH")) |path| std.mem.span(path) else "";
+    if (std.fs.path.dirname(build_options.tmux_path)) |tmux_dir|
+        try environ.put("PATH", try std.fmt.allocPrint(gpa, "{s}:{s}", .{ tmux_dir, parent_path }))
+    else
+        try environ.put("PATH", parent_path);
     const run_impl: zask.runner.Runner = .{ .gpa = gpa, .io = io };
     const runtime = zask.runtime.Runtime{
         .gpa = gpa,
@@ -460,15 +468,19 @@ test "runtime.watch: restarts running service, skips stopped one, and ends with 
         .runner_impl = run_impl,
         .tmux_impl = client,
         .docker_impl = .{ .gpa = gpa, .runner = run_impl, .dir = project_root, .file = "compose.yaml" },
+        .stop_marks = try zask.stop_marks.StopMarks.init(gpa, io, try zask.paths.runtimeBase(gpa, &environ), session),
     };
-    var buffer: [2048]u8 = undefined;
+    var buffer: [4096]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
+    // The tmux server's environment is not the test's, so pass the runtime dir
+    // the stop commands below use.
+    const watch_command = try std.fmt.allocPrint(gpa, "XDG_RUNTIME_DIR={s} {s}", .{ runtime_dir, try zask.zask_command.invokeWatch(gpa, build_options.zask_path, config_path) });
 
     client.killSession() catch {};
     try client.newSession("dashboard", project_root, "sleep 60");
     defer client.killSession() catch {};
     try client.newWindowAfter("dashboard", "api", project_root, try zask.zask_command.waitingPlaceholder(gpa, "api"));
-    try client.newWindowAfter("api", zask.session_layout.watch_window, project_root, try zask.zask_command.invokeWatch(gpa, build_options.zask_path, config_path));
+    try client.newWindowAfter("api", zask.session_layout.watch_window, project_root, watch_command);
     try waitForPaneText(gpa, io, session, zask.session_layout.watch_window, "Watching api: src");
     try waitForPaneState(client, gpa, io, "api", .idle);
     try runtime.start("api", &writer);
@@ -480,11 +492,21 @@ test "runtime.watch: restarts running service, skips stopped one, and ends with 
     try waitForPaneText(gpa, io, session, zask.session_layout.watch_window, "Starting api...");
     try waitForPaneState(client, gpa, io, "api", .busy);
 
-    try runtime.stop("api", &writer);
-    try waitForPaneState(client, gpa, io, "api", .idle);
+    var stop = try std.process.spawn(io, .{
+        .argv = &.{ build_options.zask_path, "--config", config_path, "stop", "api" },
+        .environ_map = &environ,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    try waitForStopMark(io, runtime.stop_marks.?, gpa, "api");
+    try std.Io.sleep(io, .fromMilliseconds(300), .awake);
+    try waitForPaneState(client, gpa, io, "api", .busy);
     try tmp.dir.writeFile(io, .{ .sub_path = "src/main.txt", .data = "333" });
 
     try waitForPaneText(gpa, io, session, zask.session_layout.watch_window, "api is stopped; not restarting");
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try stop.wait(io));
+    try waitForPaneState(client, gpa, io, "api", .idle);
+    try std.Io.sleep(io, .fromMilliseconds(1500), .awake);
     try waitForPaneState(client, gpa, io, "api", .idle);
 
     const watch_pid = try panePid(gpa, io, session, zask.session_layout.watch_window);
@@ -631,4 +653,12 @@ fn waitForProcessExit(io: std.Io, pid: std.c.pid_t) !void {
         try std.Io.sleep(io, service_state_interval, .awake);
     }
     return error.ProcessStillRunning;
+}
+
+fn waitForStopMark(io: std.Io, marks: zask.stop_marks.StopMarks, gpa: std.mem.Allocator, service: []const u8) !void {
+    for (0..service_state_attempts) |_| {
+        if (marks.observe(gpa, service) == .stopped) return;
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    return error.StopMarkTimeout;
 }

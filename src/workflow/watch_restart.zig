@@ -13,13 +13,21 @@ pub const RestartDecision = enum {
     restart,
     skip_stopped,
     skip_missing,
+    stop_mark_unavailable,
     tmux_unavailable,
 };
 
-/// An idle pane means the service was stopped (`zask stop`, Ctrl-C) or was not
-/// started by the open profile, so a file change must not start it. A dead pane
-/// exited on its own; restarting it lets a fix bring the service back.
-pub fn restartDecision(state: observations.PaneState) RestartDecision {
+/// A stop mark means the user ran `zask stop` (or `close`), possibly while the
+/// process is still exiting and its pane looks busy. An idle pane means the
+/// service was stopped (including Ctrl-C in the pane) or was not started by the
+/// open profile. Neither may be started by a file change. A dead pane exited
+/// on its own; restarting it lets a fix bring the service back.
+pub fn restartDecision(state: observations.PaneState, mark: observations.StopMarkObservation) RestartDecision {
+    switch (mark) {
+        .not_stopped => {},
+        .stopped => return .skip_stopped,
+        .unavailable => return .stop_mark_unavailable,
+    }
     return switch (state) {
         .busy, .dead => .restart,
         .idle => .skip_stopped,
@@ -28,18 +36,25 @@ pub fn restartDecision(state: observations.PaneState) RestartDecision {
     };
 }
 
-/// A batch this soon after a watch restart most likely came from the restarted
-/// service writing into its own watched files (logs, build output).
-pub const loop_window_ns: i96 = 3 * std.time.ns_per_s;
-/// Restarts in a row, each starting within `loop_window_ns` of the previous
+/// A batch this long after a watch restart, beyond the debounce period, most
+/// likely came from the restarted service writing into its own watched files
+/// (logs, build output).
+pub const loop_settle_ns: i96 = 3 * std.time.ns_per_s;
+/// Restarts in a row, each starting within the loop window of the previous
 /// one finishing, before restarts pause.
 pub const loop_limit: u8 = 3;
+
+/// Batches are reported only after `debounce_ms` without changes, so the loop
+/// window must include it or a long debounce would hide every loop.
+pub fn loopWindowNs(debounce_ms: u64) i96 {
+    return loop_settle_ns + @as(i96, debounce_ms) * std.time.ns_per_ms;
+}
 
 /// Stops restart loops caused by a service changing its own watched files.
 /// Restarts pause after `limit` quick restarts in a row and resume with the
 /// first batch that follows `window_ns` without changes.
 pub const LoopGuard = struct {
-    window_ns: i96 = loop_window_ns,
+    window_ns: i96,
     limit: u8 = loop_limit,
     quick_restarts: u8 = 0,
     last_restart_ns: ?i96 = null,
@@ -90,7 +105,7 @@ pub const Supervisor = struct {
     const Service = struct {
         name: []const u8,
         watcher: file_watch.Watcher,
-        guard: LoopGuard = .{},
+        guard: LoopGuard,
     };
 
     /// Watches every service with a `watch` setting. Call `deinit` on the
@@ -100,7 +115,11 @@ pub const Supervisor = struct {
         errdefer self.deinit();
         for (try cfg.services()) |service| {
             var watcher = (try file_watch.Watcher.init(gpa, io, cfg, service)) orelse continue;
-            self.services.append(gpa, .{ .name = try config.Config.serviceName(service), .watcher = watcher }) catch |err| {
+            self.services.append(gpa, .{
+                .name = try config.Config.serviceName(service),
+                .watcher = watcher,
+                .guard = .{ .window_ns = loopWindowNs(watcher.spec.debounce_ms) },
+            }) catch |err| {
                 watcher.deinit();
                 return err;
             };
@@ -127,9 +146,9 @@ pub const Supervisor = struct {
     }
 
     /// Polls every watcher once and restarts services whose changes are ready.
-    /// `ctx` provides `now() i96` (monotonic ns), `paneState(name)`, and
-    /// `restart(name, notice, writer)`. Restart failures are reported and
-    /// watching continues.
+    /// `ctx` provides `now() i96` (monotonic ns), `paneState(name)`,
+    /// `stopMark(name)`, and `restart(name, notice, writer)`. Restart failures
+    /// are reported and watching continues.
     pub fn tick(self: *Supervisor, ctx: anytype, writer: *std.Io.Writer) !void {
         for (self.services.items) |*service| {
             const now_ns = ctx.now();
@@ -145,10 +164,11 @@ pub const Supervisor = struct {
     fn handleChanges(self: *Supervisor, service: *Service, changes: []const file_watch.Change, now_ns: i96, ctx: anytype, writer: *std.Io.Writer) !void {
         const summary: ChangeSummary = .{ .changes = changes };
         try writer.print("{s}: {f}\n", .{ service.name, summary });
-        switch (restartDecision(ctx.paneState(service.name))) {
+        switch (restartDecision(ctx.paneState(service.name), ctx.stopMark(service.name))) {
             .restart => {},
             .skip_stopped => return writer.print("  {s} is stopped; not restarting\n", .{service.name}),
             .skip_missing => return writer.print("  {s} window is closed; not restarting\n", .{service.name}),
+            .stop_mark_unavailable => return writer.print("  Warning: cannot read whether {s} was stopped; not restarting\n", .{service.name}),
             .tmux_unavailable => return writer.print("  Warning: tmux unavailable; not restarting {s}\n", .{service.name}),
         }
         switch (service.guard.check(now_ns)) {
@@ -196,8 +216,9 @@ fn failureText(reason: file_scan.FailureReason) []const u8 {
     };
 }
 
+/// Rounds up so the printed wait is never shorter than the real one.
 fn secondsText(ns: i96) i96 {
-    return @divFloor(ns, std.time.ns_per_s);
+    return @divFloor(ns + std.time.ns_per_s - 1, std.time.ns_per_s);
 }
 
 // -----------------------------------------------------------------------------
@@ -208,6 +229,7 @@ const TestContext = struct {
     now_ns: i96 = 0,
     restart_ns: i96 = 0,
     state: observations.PaneState = .busy,
+    mark: observations.StopMarkObservation = .not_stopped,
     fail_restart: bool = false,
     restarts: std.ArrayList([]const u8) = .empty,
 
@@ -223,6 +245,11 @@ const TestContext = struct {
     pub fn paneState(self: *TestContext, name: []const u8) observations.PaneState {
         _ = name;
         return self.state;
+    }
+
+    pub fn stopMark(self: *TestContext, name: []const u8) observations.StopMarkObservation {
+        _ = name;
+        return self.mark;
     }
 
     pub fn restart(self: *TestContext, name: []const u8, notice: []const u8, writer: *std.Io.Writer) !void {
@@ -271,9 +298,10 @@ fn testWatchedProject() !TestProject {
     return project;
 }
 
-test "watch_restart.restartDecision: maps pane state to restart decision" {
+test "watch_restart.restartDecision: maps pane state and stop mark to restart decision" {
     const cases = [_]struct {
         state: observations.PaneState,
+        mark: observations.StopMarkObservation = .not_stopped,
         want: RestartDecision,
     }{
         .{ .state = .busy, .want = .restart },
@@ -281,10 +309,13 @@ test "watch_restart.restartDecision: maps pane state to restart decision" {
         .{ .state = .idle, .want = .skip_stopped },
         .{ .state = .window_missing, .want = .skip_missing },
         .{ .state = .tmux_unavailable, .want = .tmux_unavailable },
+        .{ .state = .busy, .mark = .stopped, .want = .skip_stopped },
+        .{ .state = .dead, .mark = .stopped, .want = .skip_stopped },
+        .{ .state = .busy, .mark = .unavailable, .want = .stop_mark_unavailable },
     };
 
     for (cases) |case| {
-        try std.testing.expectEqual(case.want, restartDecision(case.state));
+        try std.testing.expectEqual(case.want, restartDecision(case.state, case.mark));
     }
 }
 
@@ -394,6 +425,25 @@ test "watch_restart.Supervisor: leaves stopped service stopped" {
     try std.testing.expectEqualStrings("api: main.zig modified\n  api is stopped; not restarting\n", writer.buffered());
 }
 
+test "watch_restart.Supervisor: leaves a stopping service stopped while its pane is busy" {
+    var project = try testWatchedProject();
+    defer project.deinit();
+    var supervisor = try Supervisor.init(std.testing.allocator, std.testing.io, project.cfg);
+    defer supervisor.deinit();
+    var ctx: TestContext = .{ .state = .busy, .mark = .stopped };
+    defer ctx.deinit();
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try supervisor.tick(&ctx, &writer);
+
+    try project.write("main.zig", "22");
+    ctx.now_ns += 1;
+    try supervisor.tick(&ctx, &writer);
+
+    try std.testing.expectEqual(@as(usize, 0), ctx.restarts.items.len);
+    try std.testing.expectEqualStrings("api: main.zig modified\n  api is stopped; not restarting\n", writer.buffered());
+}
+
 test "watch_restart.Supervisor: pauses restarts when the service keeps changing its files" {
     var project = try testWatchedProject();
     defer project.deinit();
@@ -452,4 +502,33 @@ test "watch_restart.Supervisor: reports a missing watch path" {
 
     try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "Warning: cannot watch api: path not found: "));
     try std.testing.expectEqual(@as(usize, 0), ctx.restarts.items.len);
+}
+
+test "watch_restart.Supervisor: pauses restart loops behind a long debounce" {
+    var project = try TestProject.init(
+        \\[{"name":"api","command":"serve","watch":{"debounce_ms":3500}}]
+    );
+    defer project.deinit();
+    try project.write("main.zig", "1");
+    var supervisor = try Supervisor.init(std.testing.allocator, std.testing.io, project.cfg);
+    defer supervisor.deinit();
+    var ctx: TestContext = .{ .restart_ns = std.time.ns_per_s };
+    defer ctx.deinit();
+    var buffer: [2048]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try supervisor.tick(&ctx, &writer);
+
+    const growing = "xxxxxxxxxx";
+    for (0..loop_limit + 2) |index| {
+        // The service rewrites its file right after each restart; the batch
+        // is reported once the 3.5s debounce passes.
+        try project.write("main.zig", growing[0 .. index + 2]);
+        ctx.now_ns += std.time.ns_per_ms;
+        try supervisor.tick(&ctx, &writer);
+        ctx.now_ns += 3500 * std.time.ns_per_ms;
+        try supervisor.tick(&ctx, &writer);
+    }
+
+    try std.testing.expectEqual(@as(usize, loop_limit), ctx.restarts.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Restarts pause until changes stop for 7s.") != null);
 }

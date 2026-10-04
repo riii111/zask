@@ -135,7 +135,7 @@
       "additionalProperties": false,
       "properties": {
         "name": {
-          "description": "Service name used by commands such as `zask logs <name>`. Unique across all groups.",
+          "description": "Service name used by commands such as `zask logs <name>`. Unique across all groups. `zask-watch` is reserved for the file watch window.",
           "$ref": "#/definitions/identifier"
         },
         "command": {

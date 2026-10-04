@@ -13,6 +13,7 @@ const phases = @import("phases.zig");
 const proc_runner = @import("../platform/runner.zig");
 const progress_mod = @import("progress.zig");
 const session_layout = @import("session_layout.zig");
+const stop_marks_mod = @import("../platform/stop_marks.zig");
 const tmux_client = @import("../platform/tmux.zig");
 const tmux_setup = @import("tmux_setup.zig");
 const waits = @import("waits.zig");
@@ -36,6 +37,9 @@ pub const Runtime = struct {
     validate_configured_dirs: bool = true,
     emit_env_file_tips: bool = true,
     lock_probe: lock.Probe = .system,
+    /// Shared by stop commands and the `zask-watch` loop so the watcher sees
+    /// user stops. Null disables recording.
+    stop_marks: ?stop_marks_mod.StopMarks = null,
 
     pub fn status(self: Runtime, writer: *std.Io.Writer) !void {
         switch (self.tmux().observeSession()) {
@@ -301,6 +305,7 @@ pub const Runtime = struct {
             .validate_configured_dirs = self.validate_configured_dirs,
             .emit_env_file_tips = self.emit_env_file_tips,
             .command_hint = self.command_hint,
+            .stop_marks = self.stop_marks,
         };
     }
 
@@ -485,6 +490,12 @@ const WatchRestarter = struct {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         return self.runtime.withAllocator(arena.allocator()).tmux().observePane(service).state;
+    }
+
+    pub fn stopMark(self: WatchRestarter, service: []const u8) observations.StopMarkObservation {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        return self.runtime.withAllocator(arena.allocator()).lifecycle().observeStopMark(service);
     }
 
     pub fn restart(self: WatchRestarter, service: []const u8, notice: []const u8, writer: *std.Io.Writer) !void {
