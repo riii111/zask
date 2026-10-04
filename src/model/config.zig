@@ -11,6 +11,7 @@ const max_config_bytes = 10 * 1024 * 1024;
 /// 正規化後の内部キー(services/phases/enabled/compose_file 等)は別語彙なので含めない。
 pub const keys = struct {
     // top-level sections
+    pub const schema = "$schema";
     pub const project = "project";
     pub const docker = "docker";
     pub const groups = "groups";
@@ -53,6 +54,30 @@ pub const keys = struct {
     pub const profile = "profile";
     pub const label = "label";
     pub const group_overrides = "group_overrides";
+};
+
+/// Keys accepted in each authored config object. The JSON Schema must list the
+/// same properties; the schema consistency test compares them.
+pub const object_keys = struct {
+    pub const root = [_][]const u8{ keys.schema, keys.project, keys.docker, keys.env_file, keys.startup_order, keys.prechecks, keys.start_profiles, keys.group_aliases, keys.groups };
+    pub const project = [_][]const u8{ keys.name, keys.root };
+    pub const docker = [_][]const u8{ keys.compose, keys.wait_timeout_seconds };
+    pub const group = [_][]const u8{ keys.name, keys.env_file, keys.services };
+    pub const service = [_][]const u8{ keys.name, keys.dir, keys.runtime, keys.command, keys.external, keys.port, keys.healthcheck, keys.env_file };
+    pub const healthcheck = [_][]const u8{ keys.type, keys.path };
+    pub const docker_step = [_][]const u8{ keys.name, keys.docker };
+    pub const group_step = [_][]const u8{ keys.name, keys.group, keys.wait_ports, keys.port_wait_timeout_seconds };
+    pub const command_step = [_][]const u8{ keys.name, keys.command, keys.dir, keys.on_fail, keys.commands };
+    pub const precheck = [_][]const u8{ keys.name, keys.command, keys.on_fail, keys.hint, keys.dir };
+    pub const start_profile = [_][]const u8{ keys.profile, keys.label, keys.group_overrides };
+};
+
+/// Values accepted for enumerated string keys. The JSON Schema `enum` lists
+/// must match; the schema consistency test compares them.
+pub const allowed_values = struct {
+    pub const runtime = [_][]const u8{ "npm", "yarn", "pnpm", "bun", "cargo", "bacon" };
+    pub const healthcheck_type = [_][]const u8{ "tcp", "http" };
+    pub const on_fail = [_][]const u8{ "warn", "abort" };
 };
 
 pub const Config = struct {
@@ -595,7 +620,8 @@ pub fn validateAll(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Di
     var refs = ValidationIndex.init(gpa);
     defer refs.deinit();
 
-    try checkKeys(gpa, source, "", &.{ keys.project, keys.docker, keys.env_file, keys.startup_order, keys.prechecks, keys.start_profiles, keys.group_aliases, keys.groups }, diags);
+    try checkKeys(gpa, source, "", &object_keys.root, diags);
+    try checkOptionalString(gpa, source, keys.schema, "", diags);
     try validateProject(gpa, source, diags);
     try validateDocker(gpa, source, diags);
     try checkEnvFileField(gpa, source, "", diags);
@@ -651,7 +677,7 @@ fn validateProject(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Di
         return;
     };
     if (!try expectObject(project, "project", diags)) return;
-    try checkKeys(gpa, project, "project", &.{ keys.name, keys.root }, diags);
+    try checkKeys(gpa, project, "project", &object_keys.project, diags);
     try checkIdentifier(gpa, project, keys.name, "project", diags);
     _ = try checkRequiredString(gpa, project, keys.root, "project", diags);
 }
@@ -659,7 +685,7 @@ fn validateProject(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Di
 fn validateDocker(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics) !void {
     const docker = source.object.get(keys.docker) orelse return;
     if (!try expectObject(docker, "docker", diags)) return;
-    try checkKeys(gpa, docker, "docker", &.{ keys.compose, keys.wait_timeout_seconds }, diags);
+    try checkKeys(gpa, docker, "docker", &object_keys.docker, diags);
     if (docker.object.get(keys.compose)) |compose| {
         if (compose != .string) {
             try diags.add("docker.compose", "must be a string");
@@ -688,7 +714,7 @@ fn validateGroups(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Dia
     for (groups.array.items, 0..) |group, gi| {
         const gpath = try indexedPath(gpa, "groups", gi);
         if (!try expectObject(group, gpath, diags)) continue;
-        try checkKeys(gpa, group, gpath, &.{ keys.name, keys.env_file, keys.services }, diags);
+        try checkKeys(gpa, group, gpath, &object_keys.group, diags);
         try checkEnvFileField(gpa, group, gpath, diags);
         var group_name: ?[]const u8 = null;
         if (try checkRequiredString(gpa, group, keys.name, gpath, diags)) |name| {
@@ -718,7 +744,7 @@ fn validateGroups(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Dia
 
 fn validateService(gpa: std.mem.Allocator, service: Value, path: []const u8, diags: *diagnostics.Diagnostics, refs: *ValidationIndex) !void {
     if (!try expectObject(service, path, diags)) return;
-    try checkKeys(gpa, service, path, &.{ keys.name, keys.dir, keys.runtime, keys.command, keys.external, keys.port, keys.healthcheck, keys.env_file }, diags);
+    try checkKeys(gpa, service, path, &object_keys.service, diags);
     if (try checkRequiredString(gpa, service, keys.name, path, diags)) |name| {
         const name_path = try joinPath(gpa, path, "name");
         validate.identifier(name) catch try diags.add(name_path, "must be a valid identifier");
@@ -740,8 +766,8 @@ fn validateService(gpa: std.mem.Allocator, service: Value, path: []const u8, dia
     if (service.object.get(keys.healthcheck)) |healthcheck| {
         const hpath = try joinPath(gpa, path, "healthcheck");
         if (!try expectObject(healthcheck, hpath, diags)) return;
-        try checkKeys(gpa, healthcheck, hpath, &.{ keys.type, keys.path }, diags);
-        try checkOptionalString(gpa, healthcheck, keys.type, hpath, diags);
+        try checkKeys(gpa, healthcheck, hpath, &object_keys.healthcheck, diags);
+        try checkOptionalEnum(gpa, healthcheck, keys.type, hpath, &allowed_values.healthcheck_type, diags);
         try checkOptionalString(gpa, healthcheck, keys.path, hpath, diags);
     }
 }
@@ -777,13 +803,13 @@ fn validateStartupStep(gpa: std.mem.Allocator, step: Value, path: []const u8, di
         return;
     }
     if (has_docker) {
-        try checkKeys(gpa, step, path, &.{ keys.name, keys.docker }, diags);
+        try checkKeys(gpa, step, path, &object_keys.docker_step, diags);
         const docker = step.object.get(keys.docker).?;
         if (docker != .bool or !docker.bool) try diags.add(try joinPath(gpa, path, "docker"), "must be true");
         return;
     }
     if (has_group) {
-        try checkKeys(gpa, step, path, &.{ keys.name, keys.group, keys.wait_ports, keys.port_wait_timeout_seconds }, diags);
+        try checkKeys(gpa, step, path, &object_keys.group_step, diags);
         const group_path = try joinPath(gpa, path, "group");
         const group = step.object.get(keys.group).?;
         if (group != .string) {
@@ -809,10 +835,10 @@ fn validateStartupStep(gpa: std.mem.Allocator, step: Value, path: []const u8, di
         }
         return;
     }
-    try checkKeys(gpa, step, path, &.{ keys.name, keys.command, keys.dir, keys.on_fail, keys.commands }, diags);
+    try checkKeys(gpa, step, path, &object_keys.command_step, diags);
     if (step.object.get(keys.command).? != .string) try diags.add(try joinPath(gpa, path, "command"), "must be a string");
     try checkOptionalString(gpa, step, keys.dir, path, diags);
-    try checkOptionalString(gpa, step, keys.on_fail, path, diags);
+    try checkOptionalEnum(gpa, step, keys.on_fail, path, &allowed_values.on_fail, diags);
     if (step.object.get(keys.commands)) |commands| try checkStringObject(gpa, commands, try joinPath(gpa, path, "commands"), diags);
 }
 
@@ -825,10 +851,10 @@ fn validatePrechecks(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.
     for (prechecks.array.items, 0..) |check, i| {
         const path = try indexedPath(gpa, "prechecks", i);
         if (!try expectObject(check, path, diags)) continue;
-        try checkKeys(gpa, check, path, &.{ keys.name, keys.command, keys.on_fail, keys.hint, keys.dir }, diags);
+        try checkKeys(gpa, check, path, &object_keys.precheck, diags);
         _ = try checkRequiredString(gpa, check, keys.command, path, diags);
         try checkOptionalString(gpa, check, keys.name, path, diags);
-        try checkOptionalString(gpa, check, keys.on_fail, path, diags);
+        try checkOptionalEnum(gpa, check, keys.on_fail, path, &allowed_values.on_fail, diags);
         try checkOptionalString(gpa, check, keys.hint, path, diags);
         try checkOptionalString(gpa, check, keys.dir, path, diags);
     }
@@ -842,7 +868,7 @@ fn validateStartProfiles(gpa: std.mem.Allocator, source: Value, diags: *diagnost
         const path = try joinPath(gpa, "start_profiles", entry.key_ptr.*);
         const profile = entry.value_ptr.*;
         if (!try expectObject(profile, path, diags)) continue;
-        try checkKeys(gpa, profile, path, &.{ keys.profile, keys.label, keys.group_overrides }, diags);
+        try checkKeys(gpa, profile, path, &object_keys.start_profile, diags);
         _ = try checkRequiredString(gpa, profile, keys.profile, path, diags);
         try checkOptionalString(gpa, profile, keys.label, path, diags);
         if (profile.object.get(keys.group_overrides)) |overrides|
@@ -947,6 +973,16 @@ fn checkOptionalString(gpa: std.mem.Allocator, node: Value, key: []const u8, pat
     }
 }
 
+fn checkOptionalEnum(gpa: std.mem.Allocator, node: Value, key: []const u8, path: []const u8, allowed: []const []const u8, diags: *diagnostics.Diagnostics) !void {
+    const value = node.object.get(key) orelse return;
+    const field_path = try joinPath(gpa, path, key);
+    if (value != .string) {
+        try diags.add(field_path, "must be a string");
+        return;
+    }
+    if (!containsString(value.string, allowed)) try diags.addFmt(field_path, "unknown value '{s}'", .{value.string});
+}
+
 fn checkOptionalRuntime(gpa: std.mem.Allocator, node: Value, path: []const u8, diags: *diagnostics.Diagnostics) !void {
     const value = node.object.get(keys.runtime) orelse return;
     if (value != .string) {
@@ -960,7 +996,7 @@ fn checkOptionalRuntime(gpa: std.mem.Allocator, node: Value, path: []const u8, d
 fn checkKeys(gpa: std.mem.Allocator, node: Value, path: []const u8, allowed: []const []const u8, diags: *diagnostics.Diagnostics) !void {
     var it = node.object.iterator();
     while (it.next()) |entry| {
-        if (!isAllowedKey(entry.key_ptr.*, allowed)) try diags.add(try joinPath(gpa, path, entry.key_ptr.*), "unknown key");
+        if (!containsString(entry.key_ptr.*, allowed)) try diags.add(try joinPath(gpa, path, entry.key_ptr.*), "unknown key");
     }
 }
 
@@ -979,9 +1015,9 @@ fn indexedPath(gpa: std.mem.Allocator, parent: []const u8, index: usize) ![]cons
     return std.fmt.allocPrint(gpa, "{s}[{d}]", .{ parent, index });
 }
 
-fn isAllowedKey(key: []const u8, allowed: []const []const u8) bool {
+fn containsString(value: []const u8, allowed: []const []const u8) bool {
     for (allowed) |item| {
-        if (std.mem.eql(u8, key, item)) return true;
+        if (std.mem.eql(u8, value, item)) return true;
     }
     return false;
 }
@@ -1001,11 +1037,7 @@ fn stringArray(gpa: std.mem.Allocator, values: []const Value) ![][]const u8 {
 }
 
 fn isAllowedRuntime(runtime: []const u8) bool {
-    const allowed = [_][]const u8{ "npm", "yarn", "pnpm", "bun", "cargo", "bacon" };
-    for (allowed) |item| {
-        if (std.mem.eql(u8, item, runtime)) return true;
-    }
-    return false;
+    return containsString(runtime, &allowed_values.runtime);
 }
 
 // -----------------------------------------------------------------------------
@@ -1014,6 +1046,10 @@ fn isAllowedRuntime(runtime: []const u8) bool {
 
 fn parseTestConfig(arena: *std.heap.ArenaAllocator, json: []const u8) !Config {
     return Config.parse(arena.allocator(), json, "/home/me");
+}
+
+test {
+    _ = @import("config_schema_test.zig");
 }
 
 test "config.parse: loads defaults and resolves paths" {
@@ -1504,6 +1540,51 @@ test "config.parse: rejects unknown public schema fields" {
 
     for (cases) |json| {
         try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
+    }
+}
+
+test "config.parse: accepts $schema reference" {
+    const json =
+        \\{
+        \\  "$schema": "https://example.com/zask.schema.json",
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try parseTestConfig(&arena, json);
+
+    try std.testing.expectEqualStrings("demo", try cfg.projectName());
+    try std.testing.expect(cfg.value.object.get(keys.schema) == null);
+}
+
+test "config.validateAll: rejects unknown enumerated values" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"be","services":[{"name":"api","command":"serve","healthcheck":{"type":"grpc"}}]}],
+        \\  "startup_order": [{"command":"setup","on_fail":"ignore"}],
+        \\  "prechecks": [{"command":"check","on_fail":"Abort"}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const value = try parseJsonBytes(arena.allocator(), json);
+    var diags = diagnostics.Diagnostics.init(arena.allocator());
+    defer diags.deinit();
+
+    try validateAll(arena.allocator(), value, &diags);
+
+    const want = [_]diagnostics.Diagnostic{
+        .{ .path = "groups[0].services[0].healthcheck.type", .message = "unknown value 'grpc'" },
+        .{ .path = "startup_order[0].on_fail", .message = "unknown value 'ignore'" },
+        .{ .path = "prechecks[0].on_fail", .message = "unknown value 'Abort'" },
+    };
+    try std.testing.expectEqual(want.len, diags.slice().len);
+    for (want, diags.slice()) |expected, actual| {
+        try std.testing.expectEqualStrings(expected.path, actual.path);
+        try std.testing.expectEqualStrings(expected.message, actual.message);
     }
 }
 

@@ -1,0 +1,300 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "zask config",
+  "description": "Project config for zask. The schema checks structure only; zask also checks references between groups, services, and aliases, duplicate names, and whether paths stay within the project root when it loads the config.",
+  "type": "object",
+  "required": ["project", "groups"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "description": "JSON Schema reference for editor completion and validation. zask ignores this value.",
+      "type": "string"
+    },
+    "project": {
+      "description": "Project identity and root directory.",
+      "type": "object",
+      "required": ["name", "root"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Project name used for the tmux session and named configs. `zask <name> open` loads the config whose project.name matches.",
+          "$ref": "#/definitions/identifier"
+        },
+        "root": {
+          "description": "Project root directory. `~` and `~/` expand to the home directory.",
+          "type": "string"
+        }
+      }
+    },
+    "docker": {
+      "description": "Docker Compose services started by a `{\"docker\": true}` startup step.",
+      "type": "object",
+      "required": ["compose"],
+      "additionalProperties": false,
+      "properties": {
+        "compose": {
+          "description": "Compose file path relative to the project root. Its directory must stay within the project root.",
+          "type": "string",
+          "minLength": 1
+        },
+        "wait_timeout_seconds": {
+          "description": "Seconds to wait for Compose services to become ready.",
+          "type": "integer",
+          "default": 60
+        }
+      }
+    },
+    "env_file": {
+      "description": "KEY=value files loaded before every service command, relative to the project root.",
+      "$ref": "#/definitions/envFile"
+    },
+    "groups": {
+      "description": "Named sets of services.",
+      "type": "array",
+      "items": { "$ref": "#/definitions/group" }
+    },
+    "startup_order": {
+      "description": "Steps run in order by `zask open` and `zask start`. Each step has exactly one of `docker`, `group`, or `command`.",
+      "type": "array",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/definitions/dockerStep" },
+          { "$ref": "#/definitions/groupStep" },
+          { "$ref": "#/definitions/commandStep" }
+        ]
+      }
+    },
+    "prechecks": {
+      "description": "Commands run before startup to check the environment.",
+      "type": "array",
+      "items": { "$ref": "#/definitions/precheck" }
+    },
+    "start_profiles": {
+      "description": "Start profiles selected with `zask open --<key>`.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/startProfile" }
+    },
+    "group_aliases": {
+      "description": "Named lists of services that can be used wherever a group name is accepted.",
+      "type": "object",
+      "additionalProperties": {
+        "description": "Service names in this alias.",
+        "type": "array",
+        "items": { "type": "string" }
+      }
+    }
+  },
+  "definitions": {
+    "identifier": {
+      "description": "Letters, digits, `_`, and `-`. Must not start with `-`.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+    },
+    "envFile": {
+      "oneOf": [
+        { "$ref": "#/definitions/envFilePath" },
+        {
+          "type": "array",
+          "items": { "$ref": "#/definitions/envFilePath" }
+        }
+      ]
+    },
+    "envFilePath": {
+      "description": "Path to a KEY=value file. Absolute and `~/` paths are used as is; relative paths must stay within their base directory.",
+      "type": "string",
+      "minLength": 1
+    },
+    "onFail": {
+      "description": "`abort` stops startup when the command fails; `warn` prints the failure and continues.",
+      "type": "string",
+      "enum": ["warn", "abort"]
+    },
+    "group": {
+      "type": "object",
+      "required": ["name", "services"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Group name referenced by `startup_order`, `start_profiles`, and commands that take a group.",
+          "$ref": "#/definitions/identifier"
+        },
+        "env_file": {
+          "description": "KEY=value files loaded before each service command in this group, relative to the project root.",
+          "$ref": "#/definitions/envFile"
+        },
+        "services": {
+          "description": "Services in this group.",
+          "type": "array",
+          "items": { "$ref": "#/definitions/service" }
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "required": ["name", "command"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Service name used by commands such as `zask logs <name>`. Unique across all groups.",
+          "$ref": "#/definitions/identifier"
+        },
+        "command": {
+          "description": "Command run with `sh -lc` in the service pane. Prefixed with `runtime` when set.",
+          "type": "string"
+        },
+        "dir": {
+          "description": "Working directory relative to the project root. Absolute and `~/` paths are allowed; other paths must stay within the project root unless `external` is true.",
+          "type": "string",
+          "default": "."
+        },
+        "runtime": {
+          "description": "Command prefix such as `npm`, so `command: \"run dev\"` runs `npm run dev`. An empty string means no prefix.",
+          "type": "string",
+          "enum": ["npm", "yarn", "pnpm", "bun", "cargo", "bacon", ""]
+        },
+        "external": {
+          "description": "Allow `dir` to point outside the project root.",
+          "type": "boolean",
+          "default": false
+        },
+        "port": {
+          "description": "Port the service listens on. The monitor health check requires it.",
+          "type": "integer"
+        },
+        "healthcheck": {
+          "description": "How the monitor checks that the service is ready.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "description": "`tcp` checks that `port` accepts connections; `http` also requests `path` on that port.",
+              "type": "string",
+              "enum": ["tcp", "http"],
+              "default": "tcp"
+            },
+            "path": {
+              "description": "HTTP path requested when `type` is `http`.",
+              "type": "string",
+              "default": "/health"
+            }
+          }
+        },
+        "env_file": {
+          "description": "KEY=value files loaded before this service command, relative to the service directory.",
+          "$ref": "#/definitions/envFile"
+        }
+      }
+    },
+    "stepName": {
+      "description": "Label shown in startup progress.",
+      "type": "string"
+    },
+    "dockerStep": {
+      "type": "object",
+      "required": ["docker"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/definitions/stepName" },
+        "docker": {
+          "description": "Start the services in `docker.compose`.",
+          "const": true
+        }
+      }
+    },
+    "groupStep": {
+      "type": "object",
+      "required": ["group"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/definitions/stepName" },
+        "group": {
+          "description": "Group or group alias to start.",
+          "type": "string"
+        },
+        "wait_ports": {
+          "description": "Ports to wait for before the next step.",
+          "type": "array",
+          "items": { "type": "integer" }
+        },
+        "port_wait_timeout_seconds": {
+          "description": "Seconds to wait for each port in `wait_ports`.",
+          "type": "integer",
+          "minimum": 0,
+          "default": 180
+        }
+      }
+    },
+    "commandStep": {
+      "type": "object",
+      "required": ["command"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/definitions/stepName" },
+        "command": {
+          "description": "Command run with `bash -c` before the next step.",
+          "type": "string"
+        },
+        "dir": {
+          "description": "Working directory relative to the project root.",
+          "type": "string"
+        },
+        "on_fail": {
+          "$ref": "#/definitions/onFail",
+          "default": "abort"
+        },
+        "commands": {
+          "description": "Commands that replace `command` when the matching start profile is selected, keyed by profile.",
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "precheck": {
+      "type": "object",
+      "required": ["command"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Label shown in precheck progress.",
+          "type": "string"
+        },
+        "command": {
+          "description": "Command run with `bash -c`. A non-zero exit counts as a failure.",
+          "type": "string"
+        },
+        "on_fail": {
+          "$ref": "#/definitions/onFail",
+          "default": "warn"
+        },
+        "hint": {
+          "description": "Message shown when the precheck fails.",
+          "type": "string"
+        },
+        "dir": {
+          "description": "Working directory relative to the project root.",
+          "type": "string"
+        }
+      }
+    },
+    "startProfile": {
+      "type": "object",
+      "required": ["profile"],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "description": "Profile name that selects entries in command step `commands`.",
+          "type": "string"
+        },
+        "label": {
+          "description": "Label shown when this profile starts.",
+          "type": "string"
+        },
+        "group_overrides": {
+          "description": "Groups replaced while this profile starts, mapping a startup group to the group or alias used instead.",
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    }
+  }
+}
