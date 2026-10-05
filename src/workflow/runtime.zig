@@ -219,9 +219,7 @@ pub const Runtime = struct {
         try self.openWithProgress(profile, &progress);
     }
 
-    /// The project lock covers setup and startup only; it is released before
-    /// attaching because attach-session blocks while the client stays attached,
-    /// and `close` / `re` run from inside the session need the lock meanwhile.
+    /// Releases the project lock before attaching, since attach-session blocks while attached.
     pub fn openWithProgress(self: Runtime, profile: []const u8, progress: anytype) !void {
         {
             const guard = self.acquireLock() catch |err| switch (err) {
@@ -238,8 +236,6 @@ pub const Runtime = struct {
         try self.attachOpenedWithProgress(progress);
     }
 
-    /// Sets up and starts the workspace without attaching; callers attach with
-    /// attachOpenedWithProgress after releasing the project lock.
     pub fn openUnlockedWithProgress(self: Runtime, profile: []const u8, progress: anytype) !void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
@@ -313,8 +309,6 @@ pub const Runtime = struct {
         try self.reWithProgress(&progress);
     }
 
-    /// Close and reopen run under one project lock; like openWithProgress, the
-    /// lock is released before the blocking attach.
     pub fn reWithProgress(self: Runtime, progress: anytype) !void {
         if (try self.inTmux()) {
             const tx = self.tmux();

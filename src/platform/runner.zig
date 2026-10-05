@@ -226,8 +226,6 @@ pub const Recorder = struct {
     seconds_per_command: i64 = 0,
     before_record: ?BeforeRecord = null,
 
-    /// Called with each argv before it is recorded, so a test can observe
-    /// state that only exists while a command runs (e.g. a held lock).
     pub const BeforeRecord = struct {
         context: *anyopaque,
         call: *const fn (context: *anyopaque, argv: []const []const u8) void,
