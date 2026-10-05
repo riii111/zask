@@ -227,7 +227,7 @@
       "additionalProperties": false,
       "properties": {
         "max_retries": {
-          "description": "Restarts in a row before zask gives up and leaves the service stopped. A run that lasts 30 seconds, or a start by anything other than this restart, starts the count over.",
+          "description": "Restarts in a row before zask gives up and leaves the service stopped. A failure 30 seconds or more after the last restart, or of a run started by anything other than this restart, starts the count over.",
           "type": "integer",
           "minimum": 1,
           "default": 3

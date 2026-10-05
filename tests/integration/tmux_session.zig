@@ -845,15 +845,17 @@ test "runtime.watch: restarts failed services up to the limit and leaves stopped
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const project_root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-    // api always fails, job exits cleanly, and worker fails once `crash`
-    // appears. Each run appends to a file so the test counts starts.
+    // api always fails, job exits cleanly, worker fails once `crash` appears,
+    // and web replaces the wrapper with `exec`, so Ctrl-C kills its pane
+    // process. Each run appends to a file so the test counts starts.
     const config_json = try std.fmt.allocPrint(gpa,
         \\{{
         \\  "project": {{"name":"{s}","root":"{s}"}},
         \\  "groups": [{{"name":"backend","services":[
         \\    {{"name":"api","command":"sh -c 'echo run >> api.runs; sleep 0.3; exit 3'","restart_on_failure":{{"max_retries":2,"delay_ms":0}}}},
         \\    {{"name":"job","command":"sh -c 'echo run >> job.runs; exit 0'","restart_on_failure":{{"delay_ms":0}}}},
-        \\    {{"name":"worker","command":"sh -c 'echo run >> worker.runs; while [ ! -e crash ]; do sleep 0.1; done; rm crash; exit 1'","restart_on_failure":{{"delay_ms":0}}}}
+        \\    {{"name":"worker","command":"sh -c 'echo run >> worker.runs; while [ ! -e crash ]; do sleep 0.1; done; rm crash; exit 1'","restart_on_failure":{{"delay_ms":0}}}},
+        \\    {{"name":"web","command":"echo run >> web.runs; exec sleep 60","restart_on_failure":{{"delay_ms":0}}}}
         \\  ]}}]
         \\}}
     , .{ session, project_root });
@@ -887,7 +889,7 @@ test "runtime.watch: restarts failed services up to the limit and leaves stopped
     try client.newSession("dashboard", project_root, "sleep 60");
     defer client.killSession() catch {};
     var previous: []const u8 = "dashboard";
-    for ([_][]const u8{ "api", "job", "worker" }) |name| {
+    for ([_][]const u8{ "api", "job", "worker", "web" }) |name| {
         try client.newWindowAfter(previous, name, project_root, try zask.zask_command.waitingPlaceholder(gpa, name));
         try client.setWindowOption(name, "remain-on-exit", "on");
         try waitForPaneState(client, gpa, io, name, .idle);
@@ -913,10 +915,17 @@ test "runtime.watch: restarts failed services up to the limit and leaves stopped
     try waitForWatchPaneText(gpa, io, session, window, "worker exited with status 1; restarting in 0s (1/3)");
     try waitForPaneState(client, gpa, io, "worker", .busy);
 
+    try runtime.start("web", &writer);
+    try waitForPaneState(client, gpa, io, "web", .busy);
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", try std.fmt.allocPrint(gpa, "{s}:web", .{session}), "C-c" });
+
     try runtime.stop("worker", &writer);
     try waitForPaneState(client, gpa, io, "worker", .idle);
+    try waitForPaneState(client, gpa, io, "web", .dead);
     try std.Io.sleep(io, .fromMilliseconds(1500), .awake);
     try waitForPaneState(client, gpa, io, "worker", .idle);
+    try waitForPaneState(client, gpa, io, "web", .dead);
+    try std.testing.expectEqualStrings("run\n", try tmp.dir.readFileAlloc(io, "web.runs", gpa, .limited(4096)));
 
     try std.testing.expectEqualStrings("run\nrun\nrun\n", try tmp.dir.readFileAlloc(io, "api.runs", gpa, .limited(4096)));
     try std.testing.expectEqualStrings("run\n", try tmp.dir.readFileAlloc(io, "job.runs", gpa, .limited(4096)));

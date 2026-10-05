@@ -8,8 +8,8 @@ const std = @import("std");
 const config = @import("../model/config.zig");
 const observations = @import("../model/observations.zig");
 
-/// A run lasting this long was not a crash loop, so its failure starts the
-/// retry count over.
+/// A failure this long after the last restart was not a crash loop, so it
+/// starts the retry count over.
 pub const stable_run_seconds: i64 = 30;
 
 /// What the service pane shows, combined with the stop record.
@@ -53,24 +53,32 @@ pub const Run = struct {
     exit: observations.PaneExit = .clean,
     /// Tells one run of the pane from the next.
     pid: ?i64 = null,
-    started_at: ?i64 = null,
 };
 
 pub const Supervisor = struct {
     gpa: std.mem.Allocator,
     services: std.ArrayList(Service),
 
+    /// A failure waiting `delay_ms` before its restart.
+    const Pending = struct {
+        pid: ?i64,
+        failed_at_ns: i96,
+    };
+
     const Service = struct {
         name: []const u8,
         policy: config.RestartOnFailure,
         /// Restarts made for the current series of failures.
         restarts: u32 = 0,
-        /// Pid of the run this supervisor last started. A failure of any other
-        /// run (a manual or file-change start) starts the count over.
+        /// Pid the pane had right after this supervisor's last restart: the new
+        /// run, or the failed one when the restart did not start anything. A
+        /// failure of any other run (a manual or file-change start) starts the
+        /// count over.
         restarted_pid: ?i64 = null,
-        /// When the pending failure was first seen; the restart waits
-        /// `delay_ms` from here. Null when no restart is pending.
-        failed_at_ns: ?i96 = null,
+        /// Unix seconds of the last restart; the series ends once a failure
+        /// comes `stable_run_seconds` after it.
+        restarted_at: i64 = 0,
+        pending: ?Pending = null,
         /// Pid of the dead run already reported as final (clean exit, retries
         /// used up), so a pane that stays dead is reported once.
         reported_pid: ?i64 = null,
@@ -119,13 +127,13 @@ pub const Supervisor = struct {
         const run: Run = ctx.observeRun(service.name);
         const mark: observations.StopMarkObservation = if (run.state == .dead) ctx.stopMark(service.name) else .not_stopped;
         switch (observed(run.state, run.exit, mark)) {
-            .running, .tmux_unavailable => service.failed_at_ns = null,
-            .stopped => if (service.failed_at_ns != null) {
-                service.failed_at_ns = null;
+            .running, .tmux_unavailable => service.pending = null,
+            .stopped => if (service.pending != null) {
+                service.pending = null;
                 try writer.print("  {s} was stopped; not restarting\n", .{service.name});
             },
-            .window_closed => if (service.failed_at_ns != null) {
-                service.failed_at_ns = null;
+            .window_closed => if (service.pending != null) {
+                service.pending = null;
                 try writer.print("  {s} window is closed; not restarting\n", .{service.name});
             },
             .exited_cleanly => if (!reported(service, run.pid)) {
@@ -134,7 +142,7 @@ pub const Supervisor = struct {
             },
             .stop_mark_unavailable => if (!reported(service, run.pid)) {
                 service.reported_pid = run.pid;
-                service.failed_at_ns = null;
+                service.pending = null;
                 try writer.print("Warning: cannot read whether {s} was stopped; not restarting\n", .{service.name});
             },
             .failed => try self.handleFailure(service, run, ctx, writer),
@@ -144,8 +152,13 @@ pub const Supervisor = struct {
     fn handleFailure(self: *Supervisor, service: *Service, run: Run, ctx: anytype, writer: *std.Io.Writer) !void {
         if (reported(service, run.pid)) return;
         const now_ns = ctx.now();
-        const failed_at = service.failed_at_ns orelse first: {
-            if (!continuesSeries(service.*, run, ctx.nowSeconds())) service.restarts = 0;
+        // Another run (a manual or file-change start) failed before this tick
+        // saw it running; it gets its own delay and series.
+        if (service.pending) |pending| {
+            if (pending.pid != run.pid) service.pending = null;
+        }
+        const failed_at = if (service.pending) |pending| pending.failed_at_ns else first: {
+            if (!continuesSeries(service.*, run.pid, ctx.nowSeconds())) service.restarts = 0;
             const exit_text: ExitText = .{ .exit = run.exit };
             if (service.restarts >= service.policy.max_retries) {
                 service.reported_pid = run.pid;
@@ -153,13 +166,14 @@ pub const Supervisor = struct {
                 return;
             }
             try writer.print("{s} {f}; restarting in {f} ({d}/{d})\n", .{ service.name, exit_text, DelayText{ .ms = service.policy.delay_ms }, service.restarts + 1, service.policy.max_retries });
-            service.failed_at_ns = now_ns;
+            service.pending = .{ .pid = run.pid, .failed_at_ns = now_ns };
             break :first now_ns;
         };
         if (now_ns - failed_at < @as(i96, service.policy.delay_ms) * std.time.ns_per_ms) return;
 
-        service.failed_at_ns = null;
+        service.pending = null;
         service.restarts += 1;
+        service.restarted_at = ctx.nowSeconds();
         const notice = try std.fmt.allocPrint(self.gpa, "zask: restarting {s} after it {f} ({d}/{d})", .{ service.name, ExitText{ .exit = run.exit }, service.restarts, service.policy.max_retries });
         defer self.gpa.free(notice);
         ctx.recover(service.name, notice, writer) catch |err| switch (err) {
@@ -170,14 +184,14 @@ pub const Supervisor = struct {
     }
 };
 
-/// A failure continues the series only when this supervisor started the run
-/// and it ended before `stable_run_seconds`. A run with an unknown start
-/// counts as short, so the limit still holds.
-fn continuesSeries(service: Supervisor.Service, run: Run, now_seconds: i64) bool {
-    const pid = run.pid orelse return false;
-    if (service.restarted_pid != pid) return false;
-    const started_at = run.started_at orelse return true;
-    return now_seconds - started_at < stable_run_seconds;
+/// A failure continues the series when the pane still holds the run this
+/// supervisor left there and it failed within `stable_run_seconds` of that
+/// restart. Measuring from the restart rather than the run start keeps a
+/// restart that started nothing in the series. An unknown pid counts as the
+/// same run, so the limit still holds.
+fn continuesSeries(service: Supervisor.Service, pid: ?i64, now_seconds: i64) bool {
+    if (pid != null and service.restarted_pid != pid) return false;
+    return now_seconds - service.restarted_at < stable_run_seconds;
 }
 
 fn reported(service: *const Supervisor.Service, pid: ?i64) bool {
@@ -213,7 +227,7 @@ const DelayText = struct {
 const TestContext = struct {
     now_ns: i96 = 0,
     now_s: i64 = 1_000,
-    run: Run = .{ .state = .busy, .pid = 100, .started_at = 1_000 },
+    run: Run = .{ .state = .busy, .pid = 100 },
     mark: observations.StopMarkObservation = .not_stopped,
     fail_recover: bool = false,
     next_pid: i64 = 200,
@@ -247,13 +261,13 @@ const TestContext = struct {
         _ = writer;
         if (self.fail_recover) return error.CommandFailed;
         try self.recovers.append(std.testing.allocator, try std.testing.allocator.dupe(u8, notice));
-        self.run = .{ .state = .busy, .pid = self.next_pid, .started_at = self.now_s };
+        self.run = .{ .state = .busy, .pid = self.next_pid };
         self.next_pid += 1;
     }
 
-    /// The current run dies `after_s` seconds after it started.
+    /// The current run dies `after_s` seconds from now.
     fn crash(self: *TestContext, after_s: i64, exit: observations.PaneExit) void {
-        self.now_s = (self.run.started_at orelse self.now_s) + after_s;
+        self.now_s += after_s;
         self.run.state = .dead;
         self.run.exit = exit;
     }
@@ -401,7 +415,7 @@ test "failure_restart.tick: a start by someone else starts the retry count over"
     try project.tick(&ctx);
     const given_up = ctx.recovers.items.len;
 
-    ctx.run = .{ .state = .busy, .pid = 900, .started_at = ctx.now_s };
+    ctx.run = .{ .state = .busy, .pid = 900 };
     try project.tick(&ctx);
     ctx.crash(1, .{ .failed = 1 });
     try project.tick(&ctx);
@@ -478,6 +492,44 @@ test "failure_restart.tick: a failed restart counts toward the limit" {
 
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, project.written(), "Warning: could not restart api: CommandFailed"));
     try std.testing.expect(std.mem.endsWith(u8, project.written(), "after 2 restarts in a row; not restarting. Fix it and start it again.\n"));
+}
+
+test "failure_restart.tick: failed restarts after a long run still hit the limit" {
+    var project = try testApi(0, 2);
+    defer project.deinit();
+    var ctx: TestContext = .{ .fail_recover = true };
+    defer ctx.deinit();
+    ctx.crash(stable_run_seconds * 10, .{ .failed = 1 });
+
+    for (0..6) |_| {
+        ctx.now_s += 1;
+        try project.tick(&ctx);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, project.written(), "Warning: could not restart api"));
+    try std.testing.expect(std.mem.endsWith(u8, project.written(), "after 2 restarts in a row; not restarting. Fix it and start it again.\n"));
+}
+
+test "failure_restart.tick: another run failing during the delay waits its own delay" {
+    var project = try testApi(1000, 3);
+    defer project.deinit();
+    var ctx: TestContext = .{};
+    defer ctx.deinit();
+    ctx.crash(1, .{ .failed = 1 });
+    try project.tick(&ctx);
+
+    ctx.now_ns += 900 * std.time.ns_per_ms;
+    ctx.run = .{ .state = .dead, .exit = .{ .failed = 2 }, .pid = 900 };
+    try project.tick(&ctx);
+    ctx.now_ns += 900 * std.time.ns_per_ms;
+    try project.tick(&ctx);
+    const before_own_delay = ctx.recovers.items.len;
+    ctx.now_ns += 100 * std.time.ns_per_ms;
+    try project.tick(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 0), before_own_delay);
+    try std.testing.expectEqual(@as(usize, 1), ctx.recovers.items.len);
+    try std.testing.expectEqualStrings("zask: restarting api after it exited with status 2 (1/3)", ctx.recovers.items[0]);
 }
 
 test "failure_restart.writeSupervised: lists policy per service" {

@@ -33,6 +33,8 @@ pub const PaneObservation = struct {
     exit_code: []const u8 = "",
     pid: []const u8 = "",
     command: []const u8 = "",
+    /// How the pane process ended. Meaningful only for `dead` panes.
+    exit: PaneExit = .clean,
     /// Unix seconds recorded when zask last spawned the pane process. null means
     /// the start is unknown (e.g. a session opened by an older zask), not "never".
     started_at: ?i64 = null,
@@ -63,16 +65,6 @@ pub const PaneObservation = struct {
         return self.state == .busy;
     }
 
-    /// How the pane process ended. Meaningful only for `dead` panes.
-    pub fn exit(self: PaneObservation) PaneExit {
-        const status = std.fmt.parseInt(u32, self.exit_code, 10) catch return .killed;
-        return switch (status) {
-            0 => .clean,
-            interrupted_status => .interrupted,
-            else => .{ .failed = status },
-        };
-    }
-
     /// The pane process id; tmux keeps reporting it after the process exits,
     /// so it tells one run of a pane from the next. Null when unparseable.
     pub fn processId(self: PaneObservation) ?i64 {
@@ -94,19 +86,33 @@ pub const PaneObservation = struct {
     }
 };
 
-/// 128 + SIGINT. A service started with `exec` replaces the wrapper that
-/// turns Ctrl-C into an idle shell, so its pane dies with this status instead.
+/// 128 + SIGINT, as a shell reports a child stopped by Ctrl-C.
 const interrupted_status = 130;
+
+/// Classifies tmux's `pane_dead_status` and `pane_dead_signal` (a lowercase
+/// name such as `int`). A service started with `exec` replaces the wrapper
+/// that turns Ctrl-C into an idle shell, so Ctrl-C kills the pane process
+/// itself and only the signal tells it apart from a crash.
+pub fn paneExit(status: []const u8, signal: []const u8) PaneExit {
+    const code = std.fmt.parseInt(u32, status, 10) catch
+        return if (std.ascii.eqlIgnoreCase(signal, "int")) .interrupted else .killed;
+    return switch (code) {
+        0 => .clean,
+        interrupted_status => .interrupted,
+        else => .{ .failed = code },
+    };
+}
 
 pub const PaneExit = union(enum) {
     /// Exit status 0.
     clean,
-    /// Exit status 130: Ctrl-C.
+    /// Ctrl-C: exit status 130 or SIGINT.
     interrupted,
     /// Non-zero exit status. The service wrapper exits with 128+N when the
     /// service dies from signal N.
     failed: u32,
-    /// No exit status: the pane process itself died from a signal.
+    /// The pane process itself died from a signal other than SIGINT, or
+    /// tmux did not report how it ended.
     killed,
 };
 
@@ -303,22 +309,24 @@ test "observations.serviceHealth: maps pane state and probes to health" {
     }
 }
 
-test "observations.pane.exit: maps dead status to exit kind" {
+test "observations.paneExit: maps dead status and signal to exit kind" {
     const cases = [_]struct {
         status: []const u8,
+        signal: []const u8 = "",
         want: PaneExit,
     }{
         .{ .status = "0", .want = .clean },
         .{ .status = "1", .want = .{ .failed = 1 } },
         .{ .status = "130", .want = .interrupted },
         .{ .status = "137", .want = .{ .failed = 137 } },
+        .{ .status = "", .signal = "int", .want = .interrupted },
+        .{ .status = "", .signal = "term", .want = .killed },
         .{ .status = "", .want = .killed },
         .{ .status = "x", .want = .killed },
     };
 
     for (cases) |case| {
-        const pane: PaneObservation = .{ .state = .dead, .exit_code = case.status };
-        try std.testing.expectEqual(case.want, pane.exit());
+        try std.testing.expectEqual(case.want, paneExit(case.status, case.signal));
     }
 }
 

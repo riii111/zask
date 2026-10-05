@@ -194,15 +194,16 @@ pub const Client = struct {
     pub fn paneInfo(self: Client, window: []const u8) !PaneInfo {
         const pane_target = try self.target(window);
         defer self.gpa.free(pane_target);
-        const result = runner.captured(self.runner.run(&.{ self.tmux_path, "list-panes", "-t", pane_target, "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}|#{" ++ tmux_options.started_at ++ "}" }, .{}) catch return error.TmuxUnavailable);
+        const result = runner.captured(self.runner.run(&.{ self.tmux_path, "list-panes", "-t", pane_target, "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}|#{" ++ tmux_options.started_at ++ "}|#{pane_dead_signal}" }, .{}) catch return error.TmuxUnavailable);
         defer self.gpa.free(result.stdout);
         defer self.gpa.free(result.stderr);
         if (result.term != .exited) return error.TmuxUnavailable;
         if (result.term.exited != 0) return if (serverUnavailable(result.stderr)) error.TmuxUnavailable else error.WindowMissing;
 
         // Lenient parse (intentional, unlike listWindowSizes): this query fixes
-        // its own five-field format, and pane_dead_status is legitimately empty
-        // for live panes ("0||pid|cmd|"). observePane runs on a hot path, so a
+        // its own six-field format, and pane_dead_status is legitimately empty
+        // for live panes ("0||pid|cmd||"). tmux before 3.3 has no
+        // pane_dead_signal and leaves it empty. observePane runs on a hot path, so a
         // truncated or unexpected line degrades to defaults rather than aborting
         // the surrounding lifecycle. Extra pane lines from split windows are
         // ignored; only the first pane is observed. The start marker is empty
@@ -216,7 +217,10 @@ pub const Client = struct {
         const pid = fields.next() orelse "0";
         const command = fields.next() orelse "";
         const started_at = std.fmt.parseInt(i64, fields.next() orelse "", 10) catch null;
-        return PaneInfo.init(self.gpa, std.mem.eql(u8, dead, "1"), exit_code, pid, command, started_at);
+        const exit = observations.paneExit(exit_code, fields.next() orelse "");
+        var info = try PaneInfo.init(self.gpa, std.mem.eql(u8, dead, "1"), exit_code, pid, command, started_at);
+        info.exit = exit;
+        return info;
     }
 
     /// Caller owns the returned slice. When the pane cannot be captured an empty
@@ -521,6 +525,7 @@ pub const PaneInfo = struct {
     pid: []const u8,
     command: []const u8,
     started_at: ?i64,
+    exit: observations.PaneExit = .clean,
 
     fn init(gpa: std.mem.Allocator, dead: bool, exit_code: []const u8, pid: []const u8, command: []const u8, started_at: ?i64) !PaneInfo {
         const owned_exit_code = try gpa.dupe(u8, exit_code);
@@ -546,7 +551,9 @@ pub const PaneInfo = struct {
     /// Transfers ownership of pane field slices into the returned observation.
     /// The original PaneInfo must not be deinit'd afterwards.
     fn consumeIntoObservation(self: PaneInfo, state: observations.PaneState) observations.PaneObservation {
-        return observations.PaneObservation.fromOwned(state, self.exit_code, self.pid, self.command, self.started_at);
+        var observation = observations.PaneObservation.fromOwned(state, self.exit_code, self.pid, self.command, self.started_at);
+        observation.exit = self.exit;
+        return observation;
     }
 };
 
@@ -1192,7 +1199,31 @@ test "tmux.paneInfo: queries the start marker option" {
     const info = try client.paneInfo("api");
     defer info.deinit(std.testing.allocator);
 
-    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "list-panes", "-t", "demo:api", "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}|#{@zask_started_at}" });
+    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "list-panes", "-t", "demo:api", "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_pid}|#{pane_current_command}|#{@zask_started_at}|#{pane_dead_signal}" });
+}
+
+test "tmux.observePane: classifies a dead pane from status and signal" {
+    const cases = [_]struct {
+        line: []const u8,
+        want: observations.PaneExit,
+    }{
+        .{ .line = "1|3|12345|sh|1700000000|\n", .want = .{ .failed = 3 } },
+        .{ .line = "1||12345|sleep|1700000000|int\n", .want = .interrupted },
+        .{ .line = "1||12345|sleep|1700000000|kill\n", .want = .killed },
+    };
+
+    for (cases) |case| {
+        var recorder = runner.Recorder.init(std.testing.allocator);
+        defer recorder.deinit();
+        try recorder.enqueue(case.line, "", .{ .exited = 0 });
+        const client = testClient(&recorder);
+
+        const observation = client.observePane("api");
+        defer observation.deinit(std.testing.allocator);
+
+        try std.testing.expectEqual(observations.PaneState.dead, observation.state);
+        try std.testing.expectEqual(case.want, observation.exit);
+    }
 }
 
 test "tmux.observePane: carries start marker into the observation" {

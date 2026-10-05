@@ -567,7 +567,7 @@ const WatchRestarter = struct {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const pane = self.runtime.withAllocator(arena.allocator()).tmux().observePane(service);
-        return .{ .state = pane.state, .exit = pane.exit(), .pid = pane.processId(), .started_at = pane.started_at };
+        return .{ .state = pane.state, .exit = pane.exit, .pid = pane.processId() };
     }
 
     pub fn recover(self: WatchRestarter, service: []const u8, notice: []const u8, writer: *std.Io.Writer) !void {

@@ -249,8 +249,9 @@ Both keys are optional; `{}` uses the values above. The same `zask-watch`
 window waits `delay_ms` after each failure, prints the exit status and attempt,
 and restarts the service; the service window prints the reason before the
 command starts again. After `max_retries` restarts in a row, zask leaves the
-service stopped and says so. A run that lasts 30 seconds, or a start by `zask
-start`, `zask restart`, or a file change, starts the count over. A service that
+service stopped and says so. A failure 30 seconds or more after the last
+restart, or of a run started by `zask start`, `zask restart`, or a file change,
+starts the count over. A service that
 exits with status 0 or is stopped with `zask stop`, Ctrl-C in its window, or
 `zask close` is not restarted.
 

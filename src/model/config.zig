@@ -105,8 +105,8 @@ pub const allowed_values = struct {
 
 /// A service's `restart_on_failure` setting.
 pub const RestartOnFailure = struct {
-    /// Restarts in a row before zask gives up; a run that lasts long enough
-    /// starts the count over.
+    /// Restarts in a row before zask gives up; a failure long enough after
+    /// the last restart starts the count over.
     max_retries: u32,
     /// Wait after the exit before each restart.
     delay_ms: u64,
