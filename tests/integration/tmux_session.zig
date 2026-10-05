@@ -13,7 +13,7 @@ const pane_text_interval = std.Io.Duration.fromMilliseconds(50);
 test "tmux.newSession: direct construction keeps dashboard selected" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(arena.allocator(), "zask-test-{d}", .{std.c.getpid()});
@@ -38,7 +38,7 @@ test "tmux.newSession: direct construction keeps dashboard selected" {
 test "zask_command.waitingPlaceholder: keeps placeholder windows alive for later commands" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(arena.allocator(), "zask-test-{d}-placeholder", .{std.c.getpid()});
@@ -55,7 +55,7 @@ test "zask_command.waitingPlaceholder: keeps placeholder windows alive for later
 test "runtime.previewList: resizes stale detached windows before tree mode" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(arena.allocator(), "zask-test-{d}-preview", .{std.c.getpid()});
@@ -101,7 +101,7 @@ test "runtime.previewList: resizes stale detached windows before tree mode" {
 test "tmux_setup.bindControlKeys: refreshes stale list binding in existing session" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(arena.allocator(), "zask-test-{d}-binding", .{std.c.getpid()});
@@ -138,7 +138,7 @@ test "cli.start: recreates missing service window" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-window-not-ready", .{std.c.getpid()});
@@ -168,6 +168,7 @@ test "cli.start: recreates missing service window" {
         try env_map.put("PATH", try std.fmt.allocPrint(gpa, "{s}:{s}", .{ tmux_dir, parent_path }))
     else
         try env_map.put("PATH", parent_path);
+    try putTmuxTmpdir(&env_map);
 
     client.killSession() catch {};
     try client.newSession("dashboard", project_root, "sleep 60");
@@ -200,7 +201,7 @@ test "cli.logs: tail prints recent pane lines without moving windows" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-logs-tail", .{std.c.getpid()});
@@ -228,7 +229,7 @@ test "cli.logs: tail returns whole lines that wrap in a narrow pane" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-logs-wrap", .{std.c.getpid()});
@@ -261,7 +262,7 @@ test "cli.logs: tail reports missing service window on stderr" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-logs-missing", .{std.c.getpid()});
@@ -285,7 +286,7 @@ test "cli.logs: saved output stays readable after the session closes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-logs-saved", .{std.c.getpid()});
@@ -328,7 +329,7 @@ test "cli.logs: saved output stays readable after the session closes" {
 test "tmux_setup.applySessionOptions: keeps global attach hook while refreshing size hook" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(arena.allocator(), "zask-test-{d}-hooks", .{std.c.getpid()});
@@ -371,7 +372,7 @@ test "runtime: open, status, close build, report, then remove workspace" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(a, "zask-test-{d}-workspace", .{std.c.getpid()});
@@ -448,7 +449,7 @@ test "runtime: start, logs, stop, restart move service pane through its lifecycl
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-lifecycle", .{std.c.getpid()});
@@ -507,7 +508,7 @@ test "runtime.start: recreated service windows preserve configured order" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-window-order", .{std.c.getpid()});
@@ -562,7 +563,7 @@ test "runtime.observer: start marker follows start and restart" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-observer", .{std.c.getpid()});
@@ -630,7 +631,7 @@ test "runtime.start: service log keeps output past the pane history across resta
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-service-log", .{std.c.getpid()});
@@ -701,7 +702,7 @@ test "cli.start: concurrent starts rotate once and keep the new output connected
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-parallel-start", .{std.c.getpid()});
@@ -783,6 +784,7 @@ fn writeServiceProject(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sess
         try env_map.put("PATH", try std.fmt.allocPrint(gpa, "{s}:{s}", .{ tmux_dir, parent_path }))
     else
         try env_map.put("PATH", parent_path);
+    try putTmuxTmpdir(&env_map);
     return .{ .root = root, .env_map = env_map };
 }
 
@@ -803,7 +805,7 @@ test "monitor: keys move selection, toggle the filter, and quit restores the ter
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-monitor", .{std.c.getpid()});
@@ -884,7 +886,7 @@ test "monitor: keys move selection, toggle the filter, and quit restores the ter
     try waitForPaneText(gpa, io, target, "│ 🚀");
     try expectWideLogClipped(gpa, io, target);
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "resize-window", "-t", target, "-x", "45", "-y", "4" });
-    try waitForPaneText(gpa, io, target, "j/k");
+    try waitForPaneText(gpa, io, target, "C-n/p");
     try waitForSelectedRow(gpa, io, target, "api");
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "resize-window", "-t", target, "-x", "80", "-y", "24" });
 
@@ -911,7 +913,7 @@ test "monitor: l pages recent logs in a popup and returns to the monitor" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-log-popup", .{std.c.getpid()});
@@ -935,7 +937,20 @@ test "monitor: l pages recent logs in a popup and returns to the monitor" {
     const config_path = try std.fs.path.join(gpa, &.{ project_root, "zask.json" });
     const runtime_dir = try std.fs.path.join(gpa, &.{ project_root, "run" });
     const scratch_dir = try std.fs.path.join(gpa, &.{ runtime_dir, "zask" });
-    const command = try std.fmt.allocPrint(gpa, "HOME={s} XDG_RUNTIME_DIR={s} {s} --config {s} monitor; sleep 60", .{
+    // Only the monitor's PATH has this less, which logs its arguments and runs
+    // the real one; the popup's shell starts with the tmux server's PATH.
+    const real_less = try zask.executable.find(gpa, io, .spawn, if (std.c.getenv("PATH")) |path| std.mem.span(path) else null, ".", "less") orelse return error.LessMissing;
+    const less_log = try std.fs.path.join(gpa, &.{ project_root, "less-calls.txt" });
+    try tmp.dir.createDirPath(io, "pager");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "pager/less",
+        .data = try std.fmt.allocPrint(gpa, "#!/bin/sh\necho \"$*\" >> {s}\nexec {s} \"$@\"\n", .{ try zask.shell.quote(gpa, less_log), try zask.shell.quote(gpa, real_less) }),
+        .flags = .{ .permissions = @enumFromInt(0o755) },
+    });
+    // The monitor runs from a subdirectory with a relative PATH entry that
+    // does not resolve from the popup's working directory.
+    try tmp.dir.createDirPath(io, "sub");
+    const command = try std.fmt.allocPrint(gpa, "cd sub && HOME={s} XDG_RUNTIME_DIR={s} PATH=../pager:\"$PATH\" {s} --config {s} monitor; sleep 60", .{
         try zask.shell.quote(gpa, project_root),
         try zask.shell.quote(gpa, runtime_dir),
         try zask.shell.quote(gpa, build_options.zask_path),
@@ -945,7 +960,8 @@ test "monitor: l pages recent logs in a popup and returns to the monitor" {
     client.killSession() catch {};
     try client.newSession("dashboard", project_root, command);
     defer client.killSession() catch {};
-    try client.newWindowAfter("dashboard", "api", project_root, "printf 'booting\\npanic: boom\\n'; exec sleep 60");
+    // More lines than the popup captures (the last 200) or shows at once.
+    try client.newWindowAfter("dashboard", "api", project_root, "seq -f 'line-%03g' 1 300; exec sleep 60");
     const target = try std.fmt.allocPrint(gpa, "{s}:dashboard", .{session});
     try waitForSelectedRow(gpa, io, target, "api");
 
@@ -953,15 +969,33 @@ test "monitor: l pages recent logs in a popup and returns to the monitor" {
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "l" });
     try waitForPaneText(gpa, io, target, "log popup unavailable");
 
-    var attached = try attachClient(gpa, io, session);
-    defer attached.kill(io);
-    const client_name = try waitForClient(gpa, io, session);
+    var terminal = try Terminal.open(gpa, io, session);
+    defer terminal.close(gpa, io);
+    _ = try waitForClient(gpa, io, session);
 
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "l" });
-    _ = try waitForScratchFile(gpa, io, scratch_dir, "booting\npanic: boom\n");
+    _ = try waitForScratchFile(gpa, io, scratch_dir, "line-300\n");
     try expectPopupOpen(gpa, io, target);
+    // The popup runs the less whose keys the monitor checked.
+    _ = try waitForFileText(gpa, io, std.Io.Dir.cwd(), less_log, "+G");
 
-    try runDiscard(gpa, io, &.{ build_options.tmux_path, "display-popup", "-C", "-c", client_name });
+    // The popup opens at the end; each Emacs move shifts the first line shown.
+    const end_top = try waitForPopupTop(gpa, io, terminal, null);
+    try terminal.press(gpa, io, &.{"10"});
+    _ = try waitForPopupTop(gpa, io, terminal, end_top - 1);
+    try terminal.press(gpa, io, &.{ "1b", "76" });
+    const paged_up = try waitForPopupTopBelow(gpa, io, terminal, end_top - 2);
+    try terminal.press(gpa, io, &.{ "1b", "3c" });
+    _ = try waitForPopupTop(gpa, io, terminal, 101);
+    try terminal.press(gpa, io, &.{"16"});
+    const paged_down = try waitForPopupTopAbove(gpa, io, terminal, 102);
+    try terminal.press(gpa, io, &.{"0e"});
+    _ = try waitForPopupTop(gpa, io, terminal, paged_down + 1);
+    try terminal.press(gpa, io, &.{ "1b", "3e" });
+    _ = try waitForPopupTop(gpa, io, terminal, end_top);
+    try std.testing.expect(paged_up < end_top - 2);
+    // Ctrl+G closes the popup and returns to the monitor.
+    try terminal.press(gpa, io, &.{"07"});
     try waitForScratchDirEmpty(io, scratch_dir);
     // The notice clears on the redraw after the monitor drops the keys typed
     // while it waited, so later keys are acted on again.
@@ -971,18 +1005,254 @@ test "monitor: l pages recent logs in a popup and returns to the monitor" {
     try expectPaneAlive(gpa, io, target);
 }
 
-/// Attaches a real terminal client through `script`, so tmux has a client to
-/// draw popups on. The returned child must be killed by the caller.
-fn attachClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) !std.process.Child {
-    // Unset TMUX so attaching also works when the tests run inside tmux, and
-    // set TERM since the test runner may have none.
-    const attach = try std.fmt.allocPrint(gpa, "unset TMUX; export TERM=xterm-256color; exec {s} attach-session -t {s}", .{ try zask.shell.quote(gpa, build_options.tmux_path), try zask.shell.quote(gpa, session) });
-    const argv: []const []const u8 = switch (builtin.os.tag) {
-        .linux => &.{ "script", "-qfec", attach, "/dev/null" },
-        else => &.{ "script", "-q", "/dev/null", "sh", "-c", attach },
-    };
-    // A pipe that is never written keeps script's stdin open without input.
-    return std.process.spawn(io, .{ .argv = argv, .stdin = .pipe, .stdout = .ignore, .stderr = .ignore });
+test "monitor: Emacs keys move by line, page, and to either end" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-monitor-emacs", .{std.c.getpid()});
+    const client = tmuxClient(gpa, io, session);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var services: std.ArrayList(u8) = .empty;
+    for (0..12) |i| {
+        if (i > 0) try services.appendSlice(gpa, ",");
+        try services.print(gpa, "{{\"name\":\"svc-{d:0>2}\",\"dir\":\".\",\"command\":\"/bin/sleep 60\"}}", .{i});
+    }
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "zask.json",
+        .data = try std.fmt.allocPrint(gpa, "{{\"project\":{{\"name\":\"{s}\",\"root\":\".\"}},\"groups\":[{{\"name\":\"backend\",\"services\":[{s}]}}]}}", .{ session, services.items }),
+    });
+    const project_root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    const config_path = try std.fs.path.join(gpa, &.{ project_root, "zask.json" });
+    const command = try std.fmt.allocPrint(gpa, "HOME={s} XDG_STATE_HOME={s} {s} --config {s} monitor; sleep 60", .{
+        try zask.shell.quote(gpa, project_root),
+        try zask.shell.quote(gpa, project_root),
+        try zask.shell.quote(gpa, build_options.zask_path),
+        try zask.shell.quote(gpa, config_path),
+    });
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", project_root, command);
+    defer client.killSession() catch {};
+    const target = try std.fmt.allocPrint(gpa, "{s}:dashboard", .{session});
+    try waitForSelectedRow(gpa, io, target, "svc-00");
+    try waitForPaneText(gpa, io, target, "C-n/p C-v/M-v M-</> move");
+
+    try sendKeys(gpa, io, target, &.{"C-n"});
+    try waitForSelectedRow(gpa, io, target, "svc-01");
+    try sendKeys(gpa, io, target, &.{"C-p"});
+    try waitForSelectedRow(gpa, io, target, "svc-00");
+    // Several keys in one read each move once.
+    try sendKeys(gpa, io, target, &.{ "-H", "0e", "0e", "0e" });
+    try waitForSelectedRow(gpa, io, target, "svc-03");
+    try sendKeys(gpa, io, target, &.{"M-<"});
+    try waitForSelectedRow(gpa, io, target, "svc-00");
+
+    // 10 rows leave room for 3 service rows, so a page is 3 rows.
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "resize-window", "-t", target, "-x", "80", "-y", "10" });
+    try sendKeys(gpa, io, target, &.{"C-v"});
+    try waitForSelectedRow(gpa, io, target, "svc-03");
+    try sendKeys(gpa, io, target, &.{"C-v"});
+    try waitForSelectedRow(gpa, io, target, "svc-06");
+    try sendKeys(gpa, io, target, &.{"M-v"});
+    try waitForSelectedRow(gpa, io, target, "svc-03");
+    // An Alt key whose ESC and character reach the monitor in two reads.
+    try sendKeys(gpa, io, target, &.{ "-H", "1b" });
+    try std.Io.sleep(io, .fromMilliseconds(150), .awake);
+    try sendKeys(gpa, io, target, &.{ "-l", "v" });
+    try waitForSelectedRow(gpa, io, target, "svc-00");
+    try sendKeys(gpa, io, target, &.{"M->"});
+    try waitForSelectedRow(gpa, io, target, "svc-11");
+    try sendKeys(gpa, io, target, &.{"C-v"});
+    try std.Io.sleep(io, .fromMilliseconds(300), .awake);
+    try waitForSelectedRow(gpa, io, target, "svc-11");
+
+    // A taller pane shows every row, so one page reaches the end.
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "resize-window", "-t", target, "-x", "80", "-y", "24" });
+    try sendKeys(gpa, io, target, &.{ "M-<", "C-v" });
+    try waitForSelectedRow(gpa, io, target, "svc-11");
+
+    // Ctrl+G dismisses a notice and leaves the monitor running.
+    try sendKeys(gpa, io, target, &.{"l"});
+    try waitForPaneText(gpa, io, target, "window not found");
+    try sendKeys(gpa, io, target, &.{"C-g"});
+    try waitForPaneTextGone(gpa, io, target, "window not found");
+    try expectPaneFlags(gpa, io, target, "1|0");
+    try sendKeys(gpa, io, target, &.{"C-p"});
+    try waitForSelectedRow(gpa, io, target, "svc-10");
+}
+
+test "window list: Emacs keys page and jump only in zask sessions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-tree-emacs", .{std.c.getpid()});
+    const other = try std.fmt.allocPrint(gpa, "zask-test-{d}-tree-other", .{std.c.getpid()});
+    const client = tmuxClient(gpa, io, session);
+    const other_client = tmuxClient(gpa, io, other);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    const keys_path = try std.fs.path.join(gpa, &.{ root, "other-keys.txt" });
+
+    client.killSession() catch {};
+    other_client.killSession() catch {};
+    try client.newSession("dashboard", root, "sleep 60");
+    defer client.killSession() catch {};
+    var previous: []const u8 = "dashboard";
+    for (1..31) |i| {
+        const name = try std.fmt.allocPrint(gpa, "w{d:0>2}", .{i});
+        try client.newWindowAfter(previous, name, root, "sleep 60");
+        previous = name;
+    }
+    try client.selectWindow("dashboard");
+    try zask.tmux_setup.applySessionOptions(gpa, client, .{ .project = session, .zask_path = build_options.zask_path, .config_path = "/nonexistent/zask.json" });
+    try zask.tmux_setup.bindControlKeys(gpa, client);
+
+    var terminal = try Terminal.open(gpa, io, session);
+    defer terminal.close(gpa, io);
+    _ = try waitForClient(gpa, io, session);
+
+    // Keys reach tmux as a terminal sends them: Alt as ESC and the key.
+    try openWindowList(gpa, io, session);
+    try terminal.press(gpa, io, &.{ "16", "0d" });
+    const paged = try waitForListClosed(gpa, io, session);
+    try std.testing.expect(paged > 1);
+
+    try openWindowList(gpa, io, session);
+    try terminal.press(gpa, io, &.{ "1b", "76", "0d" });
+    try std.testing.expect(try waitForListClosed(gpa, io, session) < paged);
+
+    try openWindowList(gpa, io, session);
+    try terminal.press(gpa, io, &.{ "1b", "3e", "0d" });
+    try std.testing.expectEqual(@as(usize, 30), try waitForListClosed(gpa, io, session));
+
+    // Alt+< goes to the session row at the top; Ctrl+N then reaches window 0.
+    try openWindowList(gpa, io, session);
+    try terminal.press(gpa, io, &.{ "1b", "3c", "0e", "0d" });
+    try std.testing.expectEqual(@as(usize, 0), try waitForListClosed(gpa, io, session));
+
+    try openWindowList(gpa, io, session);
+    try terminal.press(gpa, io, &.{ "0e", "0e", "0e", "0d" });
+    try std.testing.expectEqual(@as(usize, 3), try waitForListClosed(gpa, io, session));
+
+    // Ctrl+G closes the list without switching windows.
+    try openWindowList(gpa, io, session);
+    try terminal.press(gpa, io, &.{ "16", "07" });
+    try std.testing.expectEqual(@as(usize, 3), try waitForListClosed(gpa, io, session));
+
+    // Another session on the same server gets the raw bytes unchanged.
+    try other_client.newSession("main", root, try std.fmt.allocPrint(gpa, "stty raw -echo; dd bs=1 count=3 2>/dev/null | od -An -tx1 > {s}; sleep 60", .{try zask.shell.quote(gpa, keys_path)}));
+    defer other_client.killSession() catch {};
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "switch-client", "-t", other });
+    try std.Io.sleep(io, .fromMilliseconds(300), .awake);
+    try terminal.press(gpa, io, &.{ "16", "1b", "76" });
+    const received = try waitForFileText(gpa, io, std.Io.Dir.cwd(), keys_path, "76");
+    // od pads its columns differently on macOS and Linux.
+    var bytes = std.mem.tokenizeAny(u8, received, " \t\r\n");
+    for ([_][]const u8{ "16", "1b", "76" }) |want| try std.testing.expectEqualStrings(want, bytes.next() orelse return error.MissingByte);
+    try std.testing.expectEqual(@as(?[]const u8, null), bytes.next());
+}
+
+fn sendKeys(gpa: std.mem.Allocator, io: std.Io, target: []const u8, keys: []const []const u8) !void {
+    const argv = try std.mem.concat(gpa, []const u8, &.{ &.{ build_options.tmux_path, "send-keys", "-t", target }, keys });
+    try runDiscard(gpa, io, argv);
+}
+
+/// The lowest `line-NNN` the terminal shows, which is the popup's first line.
+fn popupTop(gpa: std.mem.Allocator, io: std.Io, terminal: Terminal) !?u32 {
+    const screen = try run(gpa, io, &.{ build_options.tmux_path, "-L", terminal.socket, "capture-pane", "-p", "-t", "term" });
+    var lowest: ?u32 = null;
+    var rest = screen.stdout;
+    while (std.mem.indexOf(u8, rest, "line-")) |at| {
+        rest = rest[at + "line-".len ..];
+        if (rest.len < 3) break;
+        const number = std.fmt.parseInt(u32, rest[0..3], 10) catch continue;
+        lowest = if (lowest) |current| @min(current, number) else number;
+    }
+    return lowest;
+}
+
+/// Waits until the popup's first line is `expected`, or any line when null.
+fn waitForPopupTop(gpa: std.mem.Allocator, io: std.Io, terminal: Terminal, expected: ?u32) !u32 {
+    for (0..service_state_attempts) |_| {
+        if (try popupTop(gpa, io, terminal)) |top| {
+            if (expected == null or expected.? == top) return top;
+        }
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    return error.PopupTopTimeout;
+}
+
+fn waitForPopupTopBelow(gpa: std.mem.Allocator, io: std.Io, terminal: Terminal, limit: u32) !u32 {
+    for (0..service_state_attempts) |_| {
+        if (try popupTop(gpa, io, terminal)) |top| if (top < limit) return top;
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    return error.PopupTopTimeout;
+}
+
+fn waitForPopupTopAbove(gpa: std.mem.Allocator, io: std.Io, terminal: Terminal, limit: u32) !u32 {
+    for (0..service_state_attempts) |_| {
+        if (try popupTop(gpa, io, terminal)) |top| if (top > limit) return top;
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    return error.PopupTopTimeout;
+}
+
+/// A terminal for a real client: a pane of a separate tmux server runs
+/// `attach-session`, and `press` writes bytes to that pane in one write, as a
+/// terminal emulator sends a key press (Alt as ESC and the key). `script`
+/// cannot stand in here: on macOS it delivers ESC < as two key presses.
+const Terminal = struct {
+    socket: []const u8,
+
+    fn open(gpa: std.mem.Allocator, io: std.Io, session: []const u8) !Terminal {
+        const socket = try std.fmt.allocPrint(gpa, "zask-term-{d}", .{std.c.getpid()});
+        const attach = try std.fmt.allocPrint(gpa, "unset TMUX; export TERM=xterm-256color; exec {s} attach-session -t {s}", .{ try zask.shell.quote(gpa, build_options.tmux_path), try zask.shell.quote(gpa, session) });
+        try runDiscard(gpa, io, &.{ build_options.tmux_path, "-L", socket, "-f", "/dev/null", "new-session", "-d", "-s", "term", "-x", "100", "-y", "30", attach });
+        return .{ .socket = socket };
+    }
+
+    fn close(self: Terminal, gpa: std.mem.Allocator, io: std.Io) void {
+        runDiscard(gpa, io, &.{ build_options.tmux_path, "-L", self.socket, "kill-server" }) catch {};
+    }
+
+    fn press(self: Terminal, gpa: std.mem.Allocator, io: std.Io, hex: []const []const u8) !void {
+        const argv = try std.mem.concat(gpa, []const u8, &.{ &.{ build_options.tmux_path, "-L", self.socket, "send-keys", "-t", "term", "-H" }, hex });
+        try runDiscard(gpa, io, argv);
+    }
+};
+
+/// Lists only `session`, so moves to the ends stay within it while other
+/// tests' sessions share the server.
+fn openWindowList(gpa: std.mem.Allocator, io: std.Io, session: []const u8) !void {
+    const only = try std.fmt.allocPrint(gpa, "#{{==:#{{session_name}},{s}}}", .{session});
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "choose-tree", "-Zw", "-f", only, "-t", session });
+    try waitForPaneMode(gpa, io, session, "tree-mode");
+}
+
+/// Returns the active window index once the window list has closed.
+fn waitForListClosed(gpa: std.mem.Allocator, io: std.Io, session: []const u8) !usize {
+    try waitForPaneMode(gpa, io, session, "");
+    const result = try run(gpa, io, &.{ build_options.tmux_path, "display-message", "-p", "-t", session, "#{window_index}" });
+    return std.fmt.parseInt(usize, std.mem.trim(u8, result.stdout, " \t\r\n"), 10);
+}
+
+fn waitForPaneMode(gpa: std.mem.Allocator, io: std.Io, target: []const u8, mode: []const u8) !void {
+    for (0..service_state_attempts) |_| {
+        const result = try run(gpa, io, &.{ build_options.tmux_path, "display-message", "-p", "-t", target, "#{pane_mode}" });
+        if (std.mem.eql(u8, std.mem.trim(u8, result.stdout, " \t\r\n"), mode)) return;
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    return error.PaneModeTimeout;
 }
 
 fn waitForClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) ![]const u8 {
@@ -1003,7 +1273,7 @@ fn waitForScratchFile(gpa: std.mem.Allocator, io: std.Io, dir_path: []const u8, 
             var dir = opened;
             defer dir.close(io);
             var entries = dir.iterate();
-            if (try entries.next(io)) |entry| {
+            while (try entries.next(io)) |entry| {
                 const contents = dir.readFileAlloc(io, entry.name, gpa, .limited(64 * 1024)) catch |err| switch (err) {
                     error.FileNotFound => "",
                     else => return err,
@@ -1056,7 +1326,7 @@ test "runtime.watch: restarts running service, skips stopping one, and ends with
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-watch", .{std.c.getpid()});
@@ -1092,6 +1362,7 @@ test "runtime.watch: restarts running service, skips stopping one, and ends with
         try environ.put("PATH", try std.fmt.allocPrint(gpa, "{s}:{s}", .{ tmux_dir, parent_path }))
     else
         try environ.put("PATH", parent_path);
+    try putTmuxTmpdir(&environ);
     const run_impl: zask.runner.Runner = .{ .gpa = gpa, .io = io };
     const runtime = zask.runtime.Runtime{
         .gpa = gpa,
@@ -1164,7 +1435,7 @@ test "monitor: operation keys act only on the selected service" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-monitor-ops", .{std.c.getpid()});
@@ -1263,7 +1534,7 @@ test "runtime: closed session never reaches a session whose name extends it" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-prefix", .{std.c.getpid()});
@@ -1314,7 +1585,7 @@ test "runtime.watch: restarts failed services up to the limit and leaves stopped
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-recover", .{std.c.getpid()});
@@ -1422,7 +1693,7 @@ test "runtime.watch: leaves recovery results for the monitor and the saved log" 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-recover-result", .{std.c.getpid()});
@@ -1508,7 +1779,7 @@ test "lifecycle.recordFailedRun: a delayed output relay saves final bytes before
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     var tmp = std.testing.tmpDir(.{});
@@ -1562,7 +1833,7 @@ test "lifecycle.startService: retries after Ctrl-C interrupts spawn preparation"
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .environ = std.testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
     var tmp = std.testing.tmpDir(.{});
@@ -1619,7 +1890,14 @@ test "lifecycle.startService: retries after Ctrl-C interrupts spawn preparation"
     try std.testing.expectEqualStrings("run\n", try tmp.dir.readFileAlloc(io, "api.runs", gpa, .limited(4096)));
 }
 
+/// Keeps tmux started from an explicit environment on the isolated server
+/// build.zig chose; without it tmux falls back to the user's own server.
+fn putTmuxTmpdir(map: *std.process.Environ.Map) !void {
+    if (std.c.getenv("TMUX_TMPDIR")) |dir| try map.put("TMUX_TMPDIR", std.mem.span(dir));
+}
+
 fn tmuxClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) zask.tmux.Client {
+    requireIsolatedTmux();
     return .{
         .gpa = gpa,
         .runner = .{ .gpa = gpa, .io = io },
@@ -1673,7 +1951,19 @@ fn expectWindowOrder(gpa: std.mem.Allocator, io: std.Io, session: []const u8, ex
     try std.testing.expect(lines.next() == null);
 }
 
+/// These tests create sessions and bind server-wide keys. Anywhere but the
+/// directory `zig build test-tmux` creates for them, tmux could reach the
+/// user's own server (through $TMUX, the default socket, or a shared
+/// TMUX_TMPDIR), so the tests stop instead.
+fn requireIsolatedTmux() void {
+    if (std.c.getenv("TMUX") != null) @panic("tmux tests must not run with TMUX set; run them with zig build test-tmux");
+    const dir = std.mem.span(std.c.getenv("TMUX_TMPDIR") orelse @panic("tmux tests need TMUX_TMPDIR; run them with zig build test-tmux"));
+    if (!std.mem.startsWith(u8, dir, "/tmp/zask-tmux-test-")) @panic("tmux tests need the TMUX_TMPDIR that zig build test-tmux creates");
+    if (std.c.access(dir, 0) != 0) @panic("tmux tests need TMUX_TMPDIR to name an existing directory");
+}
+
 fn run(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8) !std.process.RunResult {
+    requireIsolatedTmux();
     const result = try std.process.run(gpa, io, .{
         .argv = argv,
         .stdout_limit = .limited(1024 * 1024),

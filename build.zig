@@ -81,6 +81,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_tmux_integration_tests = b.addRunArtifact(tmux_integration_tests);
     run_tmux_integration_tests.step.dependOn(b.getInstallStep());
+    // The tests start sessions and bind server-wide keys, so they get a tmux
+    // server of their own instead of the one in $TMUX or the default socket.
+    // A path under /tmp keeps the socket within the macOS length limit; the
+    // checkout hash keeps runs from separate worktrees apart.
+    // An inherited TMUX_TMPDIR (even /tmp) may lead back to the user's server,
+    // so it is always replaced. tmux silently uses the default socket when
+    // TMUX_TMPDIR does not exist, so the directory is created first.
+    const tmux_tmpdir = b.fmt("/tmp/zask-tmux-test-{x}", .{std.hash.Wyhash.hash(0, b.build_root.path orelse "")});
+    const make_tmux_tmpdir = b.addSystemCommand(&.{ "mkdir", "-p", tmux_tmpdir });
+    run_tmux_integration_tests.step.dependOn(&make_tmux_tmpdir.step);
+    run_tmux_integration_tests.removeEnvironmentVariable("TMUX");
+    run_tmux_integration_tests.setEnvironmentVariable("TMUX_TMPDIR", tmux_tmpdir);
     tmux_integration_step.dependOn(&run_tmux_integration_tests.step);
 
     const e2e_options = b.addOptions();

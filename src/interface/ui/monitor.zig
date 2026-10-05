@@ -23,11 +23,13 @@ const monitor_status_width = 8;
 const monitor_recovery_width = 11;
 const monitor_log_width = 35;
 const refresh_interval_ms = 1000;
-// How long a lone ESC waits for the rest of an arrow-key sequence. Only a
-// bare ESC is delayed by this, and the monitor binds no action to it.
+// How long a lone ESC waits for the rest of an arrow-key sequence or an Alt
+// key, which terminals send as ESC and the key. Only a bare ESC is delayed by
+// this, and the monitor binds no action to it.
 const escape_timeout_ms = 250;
 const action_guide = "⏎ go  s start  x stop  r restart  l logs";
-const key_guide = "j/k ↑↓ select  f filter  q quit";
+// Line, page, and first/last moves; short enough for a 45-column pane.
+const key_guide = "C-n/p C-v/M-v M-</> move  f filter  q quit";
 
 /// Runs until `q` / Ctrl+C or the terminal closes. Leaving restores the
 /// terminal mode and screen; services change only through the operation keys,
@@ -59,7 +61,12 @@ const Control = enum { keep, quit };
 const Action = union(enum) {
     none,
     quit,
-    select: selection_state.Direction,
+    select: selection_state.Motion,
+    /// A page is as many rows as the screen shows, known only when drawing.
+    page: enum { up, down },
+    /// Ctrl+G: dismisses the notice. The monitor stays open, like Emacs
+    /// keyboard-quit; `q` leaves it.
+    cancel,
     toggle_filter,
     show_logs,
     operate: Operation,
@@ -105,7 +112,20 @@ fn actionForKey(key: keys.Key) Action {
         .up => .{ .select = .up },
         .down => .{ .select = .down },
         .enter => .{ .operate = .show },
-        .ctrl_c => .quit,
+        .ctrl => |char| switch (char) {
+            'n' => .{ .select = .down },
+            'p' => .{ .select = .up },
+            'v' => .{ .page = .down },
+            'g' => .cancel,
+            'c' => .quit,
+            else => .none,
+        },
+        .alt => |char| switch (char) {
+            'v' => .{ .page = .up },
+            '<' => .{ .select = .first },
+            '>' => .{ .select = .last },
+            else => .none,
+        },
         .char => |char| switch (char) {
             'k' => .{ .select = .up },
             'j' => .{ .select = .down },
@@ -212,17 +232,27 @@ const Monitor = struct {
         switch (actionForKey(key)) {
             .none => {},
             .quit => return .quit,
-            .select => |direction| {
-                const names = try visibleNames(self.gpa, self.snapshot);
-                defer self.gpa.free(names);
-                try self.selection.move(self.gpa, names, direction);
-                self.notice = null;
+            .select => |motion| try self.moveSelection(motion),
+            .page => |direction| {
+                const rows = pageRows(if (terminal.size(terminal.stdout)) |size| size.rows else null);
+                try self.moveSelection(switch (direction) {
+                    .up => .{ .page_up = rows },
+                    .down => .{ .page_down = rows },
+                });
             },
+            .cancel => self.notice = null,
             .toggle_filter => self.toggleFilter(),
             .operate => |operation| try self.operate(writer, operation),
             .show_logs => try self.showLogs(),
         }
         return .keep;
+    }
+
+    fn moveSelection(self: *Monitor, motion: selection_state.Motion) !void {
+        const names = try visibleNames(self.gpa, self.snapshot);
+        defer self.gpa.free(names);
+        try self.selection.move(self.gpa, names, motion);
+        self.notice = null;
     }
 
     /// Runs `operation` on the selected row while the screen shows it in
@@ -291,6 +321,7 @@ const Monitor = struct {
             .window_missing => self.setNotice("logs {s}: window not found", .{target.name}),
             .tmux_unavailable => self.notice = "log popup failed: tmux unavailable",
             .popup_unavailable => self.notice = "log popup unavailable: needs tmux 3.3+",
+            .pager_unavailable => self.notice = "log popup unavailable: needs less 582+ or lesskey",
         }
 
         terminal.discardInput(terminal.stdin);
@@ -639,6 +670,12 @@ const Layout = struct {
         return layout;
     }
 };
+
+/// Rows one page moves: the rows that fit once the move clears the notice.
+/// Without a known height every row is shown, so a page reaches the end.
+fn pageRows(height: ?u16) usize {
+    return Layout.fit(height, false).row_capacity;
+}
 
 const RowRange = struct { start: usize, end: usize };
 
@@ -1119,7 +1156,15 @@ test "monitor.actionForKey: maps keys to monitor actions" {
         .{ .key = .{ .char = 'l' }, .expected = .show_logs },
         .{ .key = .{ .char = 'f' }, .expected = .toggle_filter },
         .{ .key = .{ .char = 'q' }, .expected = .quit },
-        .{ .key = .ctrl_c, .expected = .quit },
+        .{ .key = .{ .ctrl = 'c' }, .expected = .quit },
+        .{ .key = .{ .ctrl = 'n' }, .expected = .{ .select = .down } },
+        .{ .key = .{ .ctrl = 'p' }, .expected = .{ .select = .up } },
+        .{ .key = .{ .ctrl = 'v' }, .expected = .{ .page = .down } },
+        .{ .key = .{ .alt = 'v' }, .expected = .{ .page = .up } },
+        .{ .key = .{ .alt = '<' }, .expected = .{ .select = .first } },
+        .{ .key = .{ .alt = '>' }, .expected = .{ .select = .last } },
+        .{ .key = .{ .ctrl = 'g' }, .expected = .cancel },
+        .{ .key = .{ .alt = 'x' }, .expected = .none },
         .{ .key = .escape, .expected = .none },
         .{ .key = .{ .char = 'z' }, .expected = .none },
     };
@@ -1401,6 +1446,32 @@ test "monitor.render: adds the recovery column only when a service has restart_o
     try std.testing.expect(std.mem.indexOf(u8, shown, "↻ 3/3 limit") != null);
     try std.testing.expect(std.mem.indexOf(u8, shown, "panic: boom") != null);
     try std.testing.expect(std.mem.indexOf(u8, hidden, "↻") == null);
+}
+
+test "monitor.pageRows: a page brings the next screen of rows into view" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var rows: [20]MonitorRow = undefined;
+    var names: [20][]const u8 = undefined;
+    for (&rows, &names, 0..) |*row, *name, i| {
+        name.* = try std.fmt.allocPrint(gpa, "svc-{d:0>2}", .{i});
+        row.* = testRow(name.*, .live);
+    }
+    const size: terminal.Size = .{ .cols = 80, .rows = 9 };
+    var selection: Selection = .{};
+    defer selection.deinit(gpa);
+    try selection.track(gpa, &names);
+
+    try selection.move(gpa, &names, .{ .page_down = pageRows(size.rows) });
+    const body = try testRender(gpa, .{ .rows = &rows }, .{ .selected = selection.name, .size = size });
+
+    const page = pageRows(size.rows);
+    try std.testing.expect(page > 1);
+    try std.testing.expectEqualStrings(names[page], selection.name.?);
+    try std.testing.expect(std.mem.indexOf(u8, testSelectedLine(body) orelse return error.MissingSelectedRow, names[page]) != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, names[0]) == null);
+    try std.testing.expectEqual(@as(usize, std.math.maxInt(usize)), pageRows(null));
 }
 
 test "monitor.Layout.fit: drops fixed lines before the selected row" {
