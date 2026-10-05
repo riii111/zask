@@ -103,27 +103,21 @@ pub const ExitText = struct {
 // Tests
 // -----------------------------------------------------------------------------
 
-test "recovery.Record: encode round-trips through parse" {
-    const cases = [_]Record{
-        .{ .kind = .waiting, .pid = 123, .attempt = 1, .max_retries = 3, .exit = .{ .failed = 2 } },
-        .{ .kind = .restarted, .attempt = 2, .max_retries = 3, .exit = .killed },
-        .{ .kind = .gave_up, .pid = 9, .attempt = 3, .max_retries = 3, .exit = .{ .failed = 137 } },
-        .{ .kind = .unconfirmed, .pid = 9, .attempt = 0, .max_retries = 3, .exit = .{ .failed = 1 } },
+test "recovery.Record: encode writes the option value parse reads back" {
+    const cases = [_]struct { record: Record, encoded: []const u8 }{
+        .{ .record = .{ .kind = .waiting, .pid = 123, .attempt = 1, .max_retries = 3, .exit = .{ .failed = 2 } }, .encoded = "waiting,123,1,3,2" },
+        .{ .record = .{ .kind = .restarted, .attempt = 2, .max_retries = 3, .exit = .killed }, .encoded = "restarted,,2,3,killed" },
+        .{ .record = .{ .kind = .gave_up, .pid = 9, .attempt = 3, .max_retries = 3, .exit = .{ .failed = 137 } }, .encoded = "gave_up,9,3,3,137" },
+        .{ .record = .{ .kind = .unconfirmed, .pid = 9, .attempt = 0, .max_retries = 3, .exit = .{ .failed = 1 } }, .encoded = "unconfirmed,9,0,3,1" },
     };
 
     for (cases) |case| {
-        const encoded = try case.encode(std.testing.allocator);
+        const encoded = try case.record.encode(std.testing.allocator);
         defer std.testing.allocator.free(encoded);
 
-        try std.testing.expectEqualDeep(RecordObservation{ .record = case }, parse(encoded));
+        try std.testing.expectEqualStrings(case.encoded, encoded);
+        try std.testing.expectEqualDeep(RecordObservation{ .record = case.record }, parse(encoded));
     }
-}
-
-test "recovery.Record.encode: writes the option value" {
-    const encoded = try (Record{ .kind = .waiting, .pid = 123, .attempt = 1, .max_retries = 3, .exit = .{ .failed = 2 } }).encode(std.testing.allocator);
-    defer std.testing.allocator.free(encoded);
-
-    try std.testing.expectEqualStrings("waiting,123,1,3,2", encoded);
 }
 
 test "recovery.parse: rejects values zask does not write" {

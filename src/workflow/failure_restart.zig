@@ -371,6 +371,7 @@ test "failure_restart.tick: restarts a failed service after the delay" {
 
     try project.tick(&ctx);
     const before_delay = ctx.recovers.items.len;
+    const waiting = ctx.record;
     ctx.now_ns += 999 * std.time.ns_per_ms;
     try project.tick(&ctx);
     const just_before = ctx.recovers.items.len;
@@ -382,6 +383,8 @@ test "failure_restart.tick: restarts a failed service after the delay" {
     try std.testing.expectEqual(@as(usize, 1), ctx.recovers.items.len);
     try std.testing.expectEqualStrings("zask: restarting api after it exited with status 1 (1/3)", ctx.recovers.items[0]);
     try std.testing.expectEqualStrings("api exited with status 1; restarting in 1s (1/3)\n", project.written());
+    try std.testing.expectEqualDeep(@as(?recovery.Record, .{ .kind = .waiting, .pid = 100, .attempt = 1, .max_retries = 3, .exit = .{ .failed = 1 } }), waiting);
+    try std.testing.expectEqualDeep(@as(?recovery.Record, .{ .kind = .restarted, .attempt = 1, .max_retries = 3, .exit = .{ .failed = 1 } }), ctx.recovered_records.items[0]);
 }
 
 test "failure_restart.tick: gives up after max_retries quick failures in a row" {
@@ -400,6 +403,9 @@ test "failure_restart.tick: gives up after max_retries quick failures in a row" 
     try std.testing.expectEqualStrings("zask: restarting api after it was killed (2/2)", ctx.recovers.items[1]);
     try std.testing.expect(std.mem.endsWith(u8, project.written(), "api was killed after 2 restarts in a row; not restarting. Fix it and start it again.\n"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, project.written(), "not restarting"));
+    try std.testing.expectEqualDeep(@as(?recovery.Record, .{ .kind = .gave_up, .pid = 201, .attempt = 2, .max_retries = 2, .exit = .killed }), ctx.record);
+    try std.testing.expectEqual(@as(usize, 1), ctx.notes.items.len);
+    try std.testing.expectEqualStrings("zask: api was killed after 2 restarts in a row; not restarting it", ctx.notes.items[0]);
 }
 
 test "failure_restart.tick: a long run starts the retry count over" {
@@ -457,12 +463,15 @@ test "failure_restart.tick: a stop during the delay cancels the restart" {
     defer ctx.deinit();
     ctx.crash(1, .{ .failed = 2 });
     try project.tick(&ctx);
+    const waiting = ctx.record;
 
     ctx.mark = .stopped;
     ctx.now_ns += 2 * std.time.ns_per_s;
     try project.tick(&ctx);
     try project.tick(&ctx);
 
+    try std.testing.expect(waiting != null);
+    try std.testing.expectEqual(@as(?recovery.Record, null), ctx.record);
     try std.testing.expectEqual(@as(usize, 0), ctx.recovers.items.len);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, project.written(), "api was stopped; not restarting"));
 }
@@ -560,55 +569,6 @@ test "failure_restart.tick: a manual start winning the lock gets a fresh series"
 
     try std.testing.expectEqual(@as(usize, 2), ctx.recovers.items.len);
     try std.testing.expectEqualStrings("zask: restarting api after it exited with status 1 (1/3)", ctx.recovers.items[1]);
-}
-
-test "failure_restart.tick: records the wait and the restart for the monitor" {
-    var project = try testApi(1000, 3);
-    defer project.deinit();
-    var ctx: TestContext = .{};
-    defer ctx.deinit();
-    ctx.crash(60, .{ .failed = 1 });
-
-    try project.tick(&ctx);
-    const waiting = ctx.record;
-    ctx.now_ns += 1000 * std.time.ns_per_ms;
-    try project.tick(&ctx);
-
-    try std.testing.expectEqualDeep(@as(?recovery.Record, .{ .kind = .waiting, .pid = 100, .attempt = 1, .max_retries = 3, .exit = .{ .failed = 1 } }), waiting);
-    try std.testing.expectEqualDeep(@as(?recovery.Record, .{ .kind = .restarted, .attempt = 1, .max_retries = 3, .exit = .{ .failed = 1 } }), ctx.recovered_records.items[0]);
-}
-
-test "failure_restart.tick: records and logs giving up at the limit" {
-    var project = try testApi(0, 1);
-    defer project.deinit();
-    var ctx: TestContext = .{};
-    defer ctx.deinit();
-    ctx.crash(1, .{ .failed = 1 });
-    try project.tick(&ctx);
-
-    ctx.crash(1, .killed);
-    try project.tick(&ctx);
-    try project.tick(&ctx);
-
-    try std.testing.expectEqualDeep(@as(?recovery.Record, .{ .kind = .gave_up, .pid = 200, .attempt = 1, .max_retries = 1, .exit = .killed }), ctx.record);
-    try std.testing.expectEqual(@as(usize, 1), ctx.notes.items.len);
-    try std.testing.expectEqualStrings("zask: api was killed after 1 restarts in a row; not restarting it", ctx.notes.items[0]);
-}
-
-test "failure_restart.tick: a stop during the delay clears the wait record" {
-    var project = try testApi(1000, 3);
-    defer project.deinit();
-    var ctx: TestContext = .{};
-    defer ctx.deinit();
-    ctx.crash(1, .{ .failed = 2 });
-    try project.tick(&ctx);
-    const waiting = ctx.record;
-
-    ctx.mark = .stopped;
-    try project.tick(&ctx);
-
-    try std.testing.expect(waiting != null);
-    try std.testing.expectEqual(@as(?recovery.Record, null), ctx.record);
 }
 
 test "failure_restart.tick: records an unreadable stop as unconfirmed" {

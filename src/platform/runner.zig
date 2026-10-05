@@ -425,11 +425,12 @@ test "runner.recorder: captures commands without spawning processes" {
     try std.testing.expectEqual(@as(usize, 2), recorder.sleeps.items[0].commands_before);
 }
 
-test "runner.recorder: returns queued responses in order" {
+test "runner.recorder: returns queued responses in order, then queued errors" {
     var recorder = Recorder.init(std.testing.allocator);
     defer recorder.deinit();
     try recorder.enqueue("first", "", .{ .exited = 0 });
     try recorder.enqueue("second", "warn", .{ .exited = 1 });
+    try recorder.enqueueError(error.FileNotFound);
     const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
 
     const first = captured(try run.run(&.{"one"}, .{}));
@@ -443,22 +444,8 @@ test "runner.recorder: returns queued responses in order" {
     try std.testing.expectEqualStrings("second", second.stdout);
     try std.testing.expectEqualStrings("warn", second.stderr);
     try std.testing.expectEqual(@as(u8, 1), second.term.exited);
-}
-
-test "runner.recorder: returns queued responses before queued errors" {
-    var recorder = Recorder.init(std.testing.allocator);
-    defer recorder.deinit();
-    try recorder.enqueue("first", "", .{ .exited = 0 });
-    try recorder.enqueueError(error.FileNotFound);
-    const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
-
-    const first = captured(try run.run(&.{"one"}, .{}));
-    defer std.testing.allocator.free(first.stdout);
-    defer std.testing.allocator.free(first.stderr);
-
-    try std.testing.expectEqualStrings("first", first.stdout);
-    try std.testing.expectError(error.FileNotFound, run.run(&.{"two"}, .{}));
-    try std.testing.expectEqual(@as(usize, 2), recorder.commands.items.len);
+    try std.testing.expectError(error.FileNotFound, run.run(&.{"three"}, .{}));
+    try std.testing.expectEqual(@as(usize, 3), recorder.commands.items.len);
     try expectNoRemainingResponses(&recorder);
 }
 
@@ -477,16 +464,6 @@ test "runner.run: kills a child that outlives its timeout" {
     const run = Runner{ .gpa = std.testing.allocator, .io = threaded.io() };
 
     try std.testing.expectError(error.Timeout, run.run(&.{ "sleep", "5" }, .{ .timeout = .fromMilliseconds(50) }));
-}
-
-test "runner.recorder: records the requested timeout" {
-    var recorder = Recorder.init(std.testing.allocator);
-    defer recorder.deinit();
-    const run = Runner{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
-
-    _ = try run.run(&.{"probe"}, .{ .discard = true, .timeout = .fromSeconds(3) });
-
-    try std.testing.expectEqual(@as(?std.Io.Duration, .fromSeconds(3)), recorder.commands.items[0].timeout);
 }
 
 test "runner.recorder: falls back to the runner timeout" {

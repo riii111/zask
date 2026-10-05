@@ -702,6 +702,34 @@ fn testOpenUnlocked(runtime: Runtime, writer: *std.Io.Writer) !void {
     try runtime.attachOpenedWithProgress(&progress);
 }
 
+fn testOpenRecorded(gpa: std.mem.Allocator, recorder: *proc_runner.Recorder, json: []const u8) !void {
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var environ = env.Map.init(gpa);
+    defer environ.deinit();
+    try environ.put("XDG_RUNTIME_DIR", try tmp.dir.realPathFileAlloc(io, ".", gpa));
+    const run = proc_runner.Runner{ .gpa = gpa, .io = io, .recorder = recorder };
+    var runtime = testRuntime(gpa, run, try config.Config.parse(gpa, json, "/home/me"));
+    runtime.io = io;
+    runtime.environ = &environ;
+    var output: std.Io.Writer.Allocating = .init(gpa);
+    defer output.deinit();
+
+    try runtime.open("all", &output.writer);
+}
+
+fn testCommandIndex(recorder: *const proc_runner.Recorder, subcommand: []const u8, arg: []const u8) !usize {
+    for (recorder.commands.items, 0..) |command, index| {
+        if (command.argv.len < 2 or !std.mem.eql(u8, command.argv[1], subcommand)) continue;
+        for (command.argv[2..]) |value| {
+            if (std.mem.eql(u8, value, arg)) return index;
+        }
+    }
+    return error.CommandNotFound;
+}
+
 fn testCloseUnlocked(runtime: Runtime, writer: *std.Io.Writer) !void {
     var progress = progress_mod.Line.init(writer);
     try runtime.closeUnlockedWithProgress(&progress);
@@ -1362,7 +1390,7 @@ test "runtime.logs: missing session points to the saved log" {
     try expectNoWindowMovement(&fixture.recorder);
 }
 
-test "runtime.openSession: creates dashboard service and docker windows" {
+test "runtime.open: places service and docker windows after the dashboard" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo"},
@@ -1374,34 +1402,27 @@ test "runtime.openSession: creates dashboard service and docker windows" {
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
-    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    var runtime = testRuntime(arena.allocator(), run, cfg);
+    try recorder.enqueue("", "", .{ .exited = 1 });
 
-    try runtime.openSessionWithDashboardWindow(arena.allocator());
-    try runtime.installSessionOptions(arena.allocator());
-    try runtime.configureDashboardWindow(arena.allocator());
-    try runtime.appendServiceAndDockerWindows(arena.allocator());
-    try runtime.focusDashboard();
+    try testOpenRecorded(arena.allocator(), &recorder, json);
 
-    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "tmuxp") == null);
-    try proc_runner.expectCommandContaining(&recorder, "new-session");
-    try proc_runner.expectCommandContaining(&recorder, "split-window");
+    const api = try testCommandIndex(&recorder, "new-window", "api");
+    const docker = try testCommandIndex(&recorder, "new-window", "docker");
+    const focus = try testCommandIndex(&recorder, "select-window", "=demo:=dashboard");
+    try proc_runner.expectCommandArgvStartsWith(recorder.commands.items[api], &.{ "tmux", "new-window", "-d", "-a", "-t", "=demo:=dashboard", "-n", "api", "-c", "/tmp/demo/backend" });
+    try proc_runner.expectCommandArgvStartsWith(recorder.commands.items[docker], &.{ "tmux", "new-window", "-d", "-a", "-t", "=demo:=api", "-n", "docker", "-c", "/tmp/demo/infra" });
+    try std.testing.expect(try testCommandIndex(&recorder, "set-option", "remain-on-exit") < api);
+    try std.testing.expect(docker < focus);
+    try std.testing.expect(focus < try testCommandIndex(&recorder, "attach-session", "=demo:"));
     try proc_runner.expectCommandContaining(&recorder, "main-pane-width");
     try proc_runner.expectCommandContaining(&recorder, "main-vertical");
-    try proc_runner.expectCommandContaining(&recorder, "new-window");
-    try proc_runner.expectCommandContaining(&recorder, "=demo:=dashboard");
-    try proc_runner.expectCommandContaining(&recorder, "=demo:=api");
-    try proc_runner.expectCommandContaining(&recorder, "/tmp/demo/backend");
-    try proc_runner.expectCommandContaining(&recorder, "/tmp/demo/infra");
-    try proc_runner.expectCommandOrder(&recorder, "remain-on-exit", "api");
-    try proc_runner.expectCommandOrder(&recorder, "docker", "select-window");
     try proc_runner.expectCommandContaining(&recorder, "@zask_dash_mode");
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "tmuxp") == null);
     try proc_runner.expectNoTmuxSizingCommands(&recorder);
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
-test "runtime.openSession: places docker after dashboard" {
+test "runtime.open: places docker right after the dashboard without services" {
     const json =
         \\{
         \\  "project": {"name":"demo","root":"/tmp/demo"},
@@ -1413,19 +1434,15 @@ test "runtime.openSession: places docker after dashboard" {
     defer arena.deinit();
     var recorder = proc_runner.Recorder.init(arena.allocator());
     defer recorder.deinit();
-    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    var runtime = testRuntime(arena.allocator(), run, cfg);
+    try recorder.enqueue("", "", .{ .exited = 1 });
 
-    try runtime.openSessionWithDashboardWindow(arena.allocator());
-    try runtime.installSessionOptions(arena.allocator());
-    try runtime.configureDashboardWindow(arena.allocator());
-    try runtime.appendServiceAndDockerWindows(arena.allocator());
-    try runtime.focusDashboard();
+    try testOpenRecorded(arena.allocator(), &recorder, json);
 
-    try proc_runner.expectCommandContaining(&recorder, "=demo:=dashboard");
-    try proc_runner.expectCommandContaining(&recorder, "/tmp/demo/infra");
-    try proc_runner.expectCommandOrder(&recorder, "docker", "select-window");
+    const docker = try testCommandIndex(&recorder, "new-window", "docker");
+    const focus = try testCommandIndex(&recorder, "select-window", "=demo:=dashboard");
+    try proc_runner.expectCommandArgvStartsWith(recorder.commands.items[docker], &.{ "tmux", "new-window", "-d", "-a", "-t", "=demo:=dashboard", "-n", "docker", "-c", "/tmp/demo/infra" });
+    try std.testing.expect(docker < focus);
+    try std.testing.expect(focus < try testCommandIndex(&recorder, "attach-session", "=demo:"));
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
