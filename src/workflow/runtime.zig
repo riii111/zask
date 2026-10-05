@@ -219,24 +219,27 @@ pub const Runtime = struct {
         try self.openWithProgress(profile, &progress);
     }
 
+    /// The project lock covers setup and startup only; it is released before
+    /// attaching because attach-session blocks while the client stays attached,
+    /// and `close` / `re` run from inside the session need the lock meanwhile.
     pub fn openWithProgress(self: Runtime, profile: []const u8, progress: anytype) !void {
-        const guard = self.acquireLock() catch |err| switch (err) {
-            error.LockBusy => switch (self.tmux().observeSession()) {
-                .active => return self.attachExistingWithRefreshedHooks(),
-                .missing => return err,
-                .unavailable => return waits.reportTmuxUnavailable(progress.raw()),
-            },
-            else => return err,
-        };
-        defer guard.release();
-        try self.openUnlockedWithProgress(profile, progress);
+        {
+            const guard = self.acquireLock() catch |err| switch (err) {
+                error.LockBusy => switch (self.tmux().observeSession()) {
+                    .active => return self.attachExistingWithRefreshedHooks(),
+                    .missing => return err,
+                    .unavailable => return waits.reportTmuxUnavailable(progress.raw()),
+                },
+                else => return err,
+            };
+            defer guard.release();
+            try self.openUnlockedWithProgress(profile, progress);
+        }
+        try self.attachOpenedWithProgress(progress);
     }
 
-    pub fn openUnlocked(self: Runtime, profile: []const u8, writer: *std.Io.Writer) !void {
-        var progress = progress_mod.Line.init(writer);
-        try self.openUnlockedWithProgress(profile, &progress);
-    }
-
+    /// Sets up and starts the workspace without attaching; callers attach with
+    /// attachOpenedWithProgress after releasing the project lock.
     pub fn openUnlockedWithProgress(self: Runtime, profile: []const u8, progress: anytype) !void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
@@ -249,9 +252,6 @@ pub const Runtime = struct {
                 try self.ensureWatchWindow(scratch);
                 try self.warnServicesWithoutPort(profile, progress);
                 try self.lifecycle().startAllWithProgress(profile, progress, .observe);
-                try progress.step("Attaching to workspace...\n", .{});
-                try progress.beforeInteractive();
-                try self.attachExisting();
                 return;
             },
             .missing => {},
@@ -269,9 +269,6 @@ pub const Runtime = struct {
         try tmux_setup.bindControlKeys(scratch, tx);
         try self.warnServicesWithoutPort(profile, progress);
         try self.lifecycle().startAllWithProgress(profile, progress, .prime);
-        try progress.step("Attaching to workspace...\n", .{});
-        try progress.beforeInteractive();
-        try self.attachExisting();
     }
 
     pub fn close(self: Runtime, writer: *std.Io.Writer) !void {
@@ -316,6 +313,8 @@ pub const Runtime = struct {
         try self.reWithProgress(&progress);
     }
 
+    /// Close and reopen run under one project lock; like openWithProgress, the
+    /// lock is released before the blocking attach.
     pub fn reWithProgress(self: Runtime, progress: anytype) !void {
         if (try self.inTmux()) {
             const tx = self.tmux();
@@ -324,17 +323,20 @@ pub const Runtime = struct {
             try tx.detachClientExec(command);
             return;
         }
-        const guard = self.acquireLock() catch |err| switch (err) {
-            error.LockBusy => switch (self.tmux().observeSession()) {
-                .active => return self.detachSingleClientForRe(),
-                .missing => return err,
-                .unavailable => return waits.reportTmuxUnavailable(progress.raw()),
-            },
-            else => return err,
-        };
-        defer guard.release();
-        try self.closeUnlockedWithProgress(progress);
-        try self.openUnlockedWithProgress("all", progress);
+        {
+            const guard = self.acquireLock() catch |err| switch (err) {
+                error.LockBusy => switch (self.tmux().observeSession()) {
+                    .active => return self.detachSingleClientForRe(),
+                    .missing => return err,
+                    .unavailable => return waits.reportTmuxUnavailable(progress.raw()),
+                },
+                else => return err,
+            };
+            defer guard.release();
+            try self.closeUnlockedWithProgress(progress);
+            try self.openUnlockedWithProgress("all", progress);
+        }
+        try self.attachOpenedWithProgress(progress);
     }
 
     pub fn start(self: Runtime, target: []const u8, writer: *std.Io.Writer) !void {
@@ -586,6 +588,12 @@ pub const Runtime = struct {
         try self.tmux().selectWindow(session_layout.dashboard_window);
     }
 
+    fn attachOpenedWithProgress(self: Runtime, progress: anytype) !void {
+        try progress.step("Attaching to workspace...\n", .{});
+        try progress.beforeInteractive();
+        try self.attachExisting();
+    }
+
     fn attachExistingWithRefreshedHooks(self: Runtime) !void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
@@ -694,10 +702,32 @@ fn composeStatusText(state: observations.ComposeState) []const u8 {
 // Tests
 // -----------------------------------------------------------------------------
 
+fn testOpenUnlocked(runtime: Runtime, writer: *std.Io.Writer) !void {
+    var progress = progress_mod.Line.init(writer);
+    try runtime.openUnlockedWithProgress("all", &progress);
+    try runtime.attachOpenedWithProgress(&progress);
+}
+
 fn testCloseUnlocked(runtime: Runtime, writer: *std.Io.Writer) !void {
     var progress = progress_mod.Line.init(writer);
     try runtime.closeUnlockedWithProgress(&progress);
 }
+
+const TestLockAtAttach = struct {
+    io: std.Io,
+    lock_dir: []const u8,
+    held: ?bool = null,
+
+    fn hook(self: *TestLockAtAttach) proc_runner.Recorder.BeforeRecord {
+        return .{ .context = self, .call = observe };
+    }
+
+    fn observe(context: *anyopaque, argv: []const []const u8) void {
+        const self: *TestLockAtAttach = @ptrCast(@alignCast(context));
+        if (argv.len < 2 or !std.mem.eql(u8, argv[1], "attach-session")) return;
+        self.held = if (std.Io.Dir.cwd().access(self.io, self.lock_dir, .{})) |_| true else |_| false;
+    }
+};
 
 test "runtime.status: maps observations to text" {
     try std.testing.expectEqualStrings("running", paneStatusText(.busy));
@@ -1491,11 +1521,11 @@ test "runtime.open: kills partial session on setup failure" {
     try recorder.enqueue("", "set-option failed", .{ .exited = 1 });
     const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    var runtime = testRuntime(arena.allocator(), run, cfg);
+    const runtime = testRuntime(arena.allocator(), run, cfg);
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectError(error.CommandFailed, runtime.openUnlocked("all", &writer));
+    try std.testing.expectError(error.CommandFailed, testOpenUnlocked(runtime, &writer));
 
     try proc_runner.expectCommandOrder(&recorder, "new-session", "kill-session");
     try proc_runner.expectCommandContaining(&recorder, "set-option");
@@ -1529,7 +1559,7 @@ test "runtime.open: creates session without tmuxp" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.openUnlocked("all", &writer);
+    try testOpenUnlocked(runtime, &writer);
 
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "tmuxp") == null);
     try proc_runner.expectCommandContaining(&recorder, "new-session");
@@ -1624,6 +1654,7 @@ test "runtime.open: clears progress before attaching" {
     var progress = ProgressSpy{ .writer = &writer, .recorder = &recorder };
 
     try runtime.openUnlockedWithProgress("all", &progress);
+    try runtime.attachOpenedWithProgress(&progress);
 
     try std.testing.expectEqual(@as(usize, 1), progress.before_interactive_count);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Attaching to workspace") != null);
@@ -1718,7 +1749,7 @@ test "runtime.open: refreshes bindings for existing session" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try runtime.openUnlocked("all", &writer);
+    try testOpenUnlocked(runtime, &writer);
 
     try proc_runner.expectCommandArg(recorder.commands.items[0], 1, "has-session");
     try proc_runner.expectCommandContaining(&recorder, "set-option");
@@ -2113,6 +2144,77 @@ test "runtime.re: detaches client exec inside tmux" {
     try proc_runner.expectCommandArg(cmd, 2, "-E");
     try proc_runner.expectCommandArgContains(cmd, 3, " re");
     try proc_runner.expectCommandArgContains(cmd, 3, "--config");
+}
+
+test "runtime.open: releases lock before attach-session" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    const base = try std.fmt.allocPrint(arena.allocator(), "/tmp/zask-test-runtime-open-attach-{d}", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var lock_at_attach: TestLockAtAttach = .{ .io = io, .lock_dir = try std.fs.path.join(arena.allocator(), &.{ base, "zask", "demo.lock" }) };
+
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    try environ.put("XDG_RUNTIME_DIR", base);
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    recorder.before_record = lock_at_attach.hook();
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    var runtime = testRuntime(arena.allocator(), run, cfg);
+    runtime.io = io;
+    runtime.environ = &environ;
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.open("all", &writer);
+
+    try proc_runner.expectCommandOrder(&recorder, "new-session", "attach-session");
+    try std.testing.expectEqual(@as(?bool, false), lock_at_attach.held);
+}
+
+test "runtime.re: releases lock before attach-session" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": []
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    const base = try std.fmt.allocPrint(arena.allocator(), "/tmp/zask-test-runtime-re-attach-{d}", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var lock_at_attach: TestLockAtAttach = .{ .io = io, .lock_dir = try std.fs.path.join(arena.allocator(), &.{ base, "zask", "demo.lock" }) };
+
+    var environ = env.Map.init(arena.allocator());
+    defer environ.deinit();
+    try environ.put("XDG_RUNTIME_DIR", base);
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    recorder.before_record = lock_at_attach.hook();
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = io, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    var runtime = testRuntime(arena.allocator(), run, cfg);
+    runtime.io = io;
+    runtime.environ = &environ;
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try runtime.re(&writer);
+
+    try proc_runner.expectCommandOrder(&recorder, "kill-session", "attach-session");
+    try std.testing.expectEqual(@as(?bool, false), lock_at_attach.held);
 }
 
 fn testLogsConfig(gpa: std.mem.Allocator) !config.Config {
