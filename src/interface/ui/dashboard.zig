@@ -498,7 +498,7 @@ test "dashboard.waitForAttachedClient: polls until a client attaches" {
     waitForAttachedClient(.{ .gpa = std.testing.allocator, .runner = run, .session = "demo" }, run);
 
     try std.testing.expectEqual(@as(usize, 2), recorder.commands.items.len);
-    try proc_runner.expectCommandArgvStartsWith(recorder.commands.items[1], &.{ "tmux", "list-clients", "-t", "demo" });
+    try proc_runner.expectCommandArgvStartsWith(recorder.commands.items[1], &.{ "tmux", "list-clients", "-t", "=demo:" });
     try std.testing.expectEqual(@as(usize, 1), recorder.sleeps.items.len);
     try proc_runner.expectNoRemainingResponses(&recorder);
 }

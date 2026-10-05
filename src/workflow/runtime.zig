@@ -22,6 +22,8 @@ const zask_command = @import("zask_command.zig");
 const close_kill_settle = std.Io.Duration.fromSeconds(1);
 const tmux_status_bar_height = 1;
 
+pub const Outcome = lifecycle_mod.Outcome;
+
 pub const Runtime = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -317,6 +319,44 @@ pub const Runtime = struct {
 
     pub fn restart(self: Runtime, target: []const u8, writer: *std.Io.Writer) !void {
         try self.lifecycle().restartTarget(target, writer);
+    }
+
+    /// Service-only start / stop / restart for callers that already hold a
+    /// service name, such as the monitor: a group, alias, or `docker` sharing
+    /// the name is never picked up.
+    pub fn startService(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
+        try self.lifecycle().startServiceTarget(service, writer);
+    }
+
+    pub fn stopService(self: Runtime, service: []const u8, writer: *std.Io.Writer) !Outcome {
+        return self.lifecycle().stopServiceTarget(service, writer);
+    }
+
+    pub fn restartService(self: Runtime, service: []const u8, writer: *std.Io.Writer) !Outcome {
+        return self.lifecycle().restartServiceTarget(service, writer);
+    }
+
+    /// `stop docker` / `restart docker` that also report whether the stop
+    /// finished, which the CLI only prints as a warning.
+    pub fn stopDocker(self: Runtime, writer: *std.Io.Writer) !Outcome {
+        return self.lifecycle().stopDockerTarget(writer);
+    }
+
+    pub fn restartDocker(self: Runtime, writer: *std.Io.Writer) !Outcome {
+        return self.lifecycle().restartDockerTarget(writer);
+    }
+
+    /// Switches the session to `window` without attaching, so a caller running
+    /// inside the session (the monitor) keeps its own pane. Unlike `logs`, it
+    /// never attaches from outside tmux.
+    pub fn showWindow(self: Runtime, window: []const u8) !void {
+        const tx = self.tmux();
+        switch (tx.observeWindow(window)) {
+            .present => {},
+            .missing => return error.WindowMissing,
+            .unavailable => return error.TmuxUnavailable,
+        }
+        try tx.selectWindow(window);
     }
 
     /// Copy whose tmux, Docker, and lifecycle allocations go to `gpa`, so a
@@ -666,7 +706,7 @@ test "runtime.close: kills session after signaling services" {
 
     try proc_runner.expectCommandOrder(&recorder, "C-c", "kill-session");
     const kill = recorder.commands.items[recorder.commands.items.len - 1];
-    try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "demo" });
+    try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "=demo:" });
 }
 
 test "runtime.close: kills session after resource stop" {
@@ -755,7 +795,7 @@ test "runtime.close: kills session even when a service signal fails" {
     try testCloseUnlocked(runtime, &writer);
 
     const kill = recorder.commands.items[recorder.commands.items.len - 1];
-    try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "demo" });
+    try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "=demo:" });
 }
 
 test "runtime.close: kills session even when send-keys fails" {
@@ -782,7 +822,7 @@ test "runtime.close: kills session even when send-keys fails" {
 
     try proc_runner.expectCommandContaining(&recorder, "C-c");
     const kill = recorder.commands.items[recorder.commands.items.len - 1];
-    try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "demo" });
+    try proc_runner.expectCommandArgv(kill, &.{ "tmux", "kill-session", "-t", "=demo:" });
 }
 
 test "runtime.attach: refreshes size hooks before switching client" {
@@ -891,6 +931,39 @@ test "runtime.logs: switches client then selects window inside tmux" {
 
     try proc_runner.expectCommandOrder(&recorder, "switch-client", "select-window");
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "attach-session") == null);
+}
+
+test "runtime.showWindow: selects an existing window without attaching" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("%1\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), test_api_json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+
+    try runtime.showWindow("api");
+
+    const select = proc_runner.findCommandContaining(&recorder, "select-window") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArgv(select, &.{ "tmux", "select-window", "-t", "=demo:=api" });
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "attach-session") == null);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "switch-client") == null);
+}
+
+test "runtime.showWindow: reports a missing window without selecting another" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "can't find window: api\n", .{ .exited = 1 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), test_api_json, "/home/me");
+    const runtime = testRuntime(arena.allocator(), run, cfg);
+
+    try std.testing.expectError(error.WindowMissing, runtime.showWindow("api"));
+
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "select-window") == null);
 }
 
 test "runtime.logs: selects window then attaches outside tmux" {
@@ -1034,8 +1107,8 @@ test "runtime.openSession: creates dashboard service and docker windows" {
     try proc_runner.expectCommandContaining(&recorder, "main-pane-width");
     try proc_runner.expectCommandContaining(&recorder, "main-vertical");
     try proc_runner.expectCommandContaining(&recorder, "new-window");
-    try proc_runner.expectCommandContaining(&recorder, "demo:dashboard");
-    try proc_runner.expectCommandContaining(&recorder, "demo:api");
+    try proc_runner.expectCommandContaining(&recorder, "=demo:=dashboard");
+    try proc_runner.expectCommandContaining(&recorder, "=demo:=api");
     try proc_runner.expectCommandContaining(&recorder, "/tmp/demo/backend");
     try proc_runner.expectCommandContaining(&recorder, "/tmp/demo/infra");
     try proc_runner.expectCommandOrder(&recorder, "remain-on-exit", "api");
@@ -1067,7 +1140,7 @@ test "runtime.openSession: places docker after dashboard" {
     try runtime.appendServiceAndDockerWindows(arena.allocator());
     try runtime.focusDashboard();
 
-    try proc_runner.expectCommandContaining(&recorder, "demo:dashboard");
+    try proc_runner.expectCommandContaining(&recorder, "=demo:=dashboard");
     try proc_runner.expectCommandContaining(&recorder, "/tmp/demo/infra");
     try proc_runner.expectCommandOrder(&recorder, "docker", "select-window");
     try proc_runner.expectNoRemainingResponses(&recorder);
@@ -1798,6 +1871,13 @@ fn expectNoWindowMovement(recorder: *const proc_runner.Recorder) !void {
         try std.testing.expect(proc_runner.findCommandContaining(recorder, command) == null);
     }
 }
+
+const test_api_json =
+    \\{
+    \\  "project": {"name":"demo","root":"/tmp/demo"},
+    \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","command":"serve"}]}]
+    \\}
+;
 
 fn testRuntime(gpa: std.mem.Allocator, runner: proc_runner.Runner, cfg: config.Config) Runtime {
     return .{
