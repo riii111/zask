@@ -891,15 +891,17 @@ test "monitor.dockerMonitorStatus: maps pane and compose state to row status" {
     }
 }
 
-test "monitor.serviceMonitorRow: labels the observed port and exit code" {
+test "monitor.serviceMonitorRow: labels the observed port and status" {
     const cases = [_]struct {
         name: []const u8,
         service: []const u8,
         pane: []const u8,
+        listen_exit: ?u8 = null,
         status: MonitorStatus,
         port: []const u8,
         summary: []const u8,
     }{
+        .{ .name = "port not ready", .service = "{\"name\":\"api\",\"dir\":\"api\",\"command\":\"serve\",\"port\":3000}", .pane = "0||12345|node|\n", .listen_exit = 1, .status = .waiting, .port = ":3000", .summary = "waiting" },
         .{ .name = "exited with port", .service = "{\"name\":\"api\",\"dir\":\"api\",\"command\":\"serve\",\"port\":3000}", .pane = "1|2|12345|node|\n", .status = .dead, .port = ":3000", .summary = "2" },
         .{ .name = "running without port", .service = "{\"name\":\"api\",\"dir\":\"api\",\"command\":\"serve\"}", .pane = "0||12345|node|\n", .status = .live, .port = "no check", .summary = "live" },
     };
@@ -914,6 +916,7 @@ test "monitor.serviceMonitorRow: labels the observed port and exit code" {
         var recorder = proc_runner.Recorder.init(arena.allocator());
         defer recorder.deinit();
         try recorder.enqueue(case.pane, "", .{ .exited = 0 });
+        if (case.listen_exit) |code| try recorder.enqueue("", "", .{ .exited = code });
         const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
         const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
         const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
