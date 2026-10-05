@@ -129,9 +129,20 @@ const Pager = struct {
 
 /// Caller owns the result; null when no less is installed.
 fn findPager(gpa: std.mem.Allocator, io: std.Io, search_path: ?[]const u8) !?Pager {
-    const less = try executable.find(gpa, io, .spawn, search_path, ".", "less") orelse return null;
+    const less = try findAbsolute(gpa, io, search_path, "less") orelse return null;
     errdefer gpa.free(less);
-    return .{ .less = less, .lesskey = try executable.find(gpa, io, .spawn, search_path, ".", "lesskey") };
+    return .{ .less = less, .lesskey = try findAbsolute(gpa, io, search_path, "lesskey") };
+}
+
+/// A relative PATH entry resolves under zask's working directory, which the
+/// popup does not share, so the result is made absolute.
+fn findAbsolute(gpa: std.mem.Allocator, io: std.Io, search_path: ?[]const u8, name: []const u8) !?[]const u8 {
+    const found = try executable.find(gpa, io, .spawn, search_path, ".", name) orelse return null;
+    if (std.fs.path.isAbsolute(found)) return found;
+    defer gpa.free(found);
+    const absolute = try std.Io.Dir.cwd().realPathFileAlloc(io, found, gpa);
+    defer gpa.free(absolute);
+    return try gpa.dupe(u8, absolute);
 }
 
 /// Asks `pager.less` which form it takes, compiling the keys to
@@ -312,6 +323,23 @@ test "log_popup.pagerCommand: quotes the captured file and key paths" {
 
         try std.testing.expectEqualStrings(case.expected, command);
     }
+}
+
+test "log_popup.findPager: resolves a relative PATH entry to an absolute path" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "bin");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "bin/less", .data = "#!/bin/sh\n", .flags = .{ .permissions = @enumFromInt(0o755) } });
+    // std.testing.tmpDir lives under the working directory at this path.
+    const relative = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/bin", .{tmp.sub_path});
+    defer std.testing.allocator.free(relative);
+
+    const pager = (try findPager(std.testing.allocator, std.testing.io, relative)) orelse return error.LessNotFound;
+    defer pager.deinit(std.testing.allocator);
+
+    try std.testing.expect(std.fs.path.isAbsolute(pager.less));
+    try std.testing.expect(std.mem.endsWith(u8, pager.less, "/bin/less"));
+    try std.testing.expectEqual(@as(?[]const u8, null), pager.lesskey);
 }
 
 test "log_popup.pagerKeys: compiles the keys for a less without lesskey sources" {

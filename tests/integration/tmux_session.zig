@@ -947,11 +947,12 @@ test "monitor: l pages recent logs in a popup and returns to the monitor" {
         .data = try std.fmt.allocPrint(gpa, "#!/bin/sh\necho \"$*\" >> {s}\nexec {s} \"$@\"\n", .{ try zask.shell.quote(gpa, less_log), try zask.shell.quote(gpa, real_less) }),
         .flags = .{ .permissions = @enumFromInt(0o755) },
     });
-    const pager_dir = try std.fs.path.join(gpa, &.{ project_root, "pager" });
-    const command = try std.fmt.allocPrint(gpa, "HOME={s} XDG_RUNTIME_DIR={s} PATH={s}:\"$PATH\" {s} --config {s} monitor; sleep 60", .{
+    // The monitor runs from a subdirectory with a relative PATH entry that
+    // does not resolve from the popup's working directory.
+    try tmp.dir.createDirPath(io, "sub");
+    const command = try std.fmt.allocPrint(gpa, "cd sub && HOME={s} XDG_RUNTIME_DIR={s} PATH=../pager:\"$PATH\" {s} --config {s} monitor; sleep 60", .{
         try zask.shell.quote(gpa, project_root),
         try zask.shell.quote(gpa, runtime_dir),
-        try zask.shell.quote(gpa, pager_dir),
         try zask.shell.quote(gpa, build_options.zask_path),
         try zask.shell.quote(gpa, config_path),
     });
