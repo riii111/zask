@@ -1240,6 +1240,89 @@ test "runtime.watch: restarts failed services up to the limit and leaves stopped
     try waitForProcessExit(io, watch_pid);
 }
 
+test "runtime.watch: leaves recovery results for the monitor and the saved log" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-recover-result", .{std.c.getpid()});
+    const client = tmuxClient(gpa, io, session);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    // api fails until `ok` appears, then keeps running.
+    const config_json = try std.fmt.allocPrint(gpa,
+        \\{{
+        \\  "project": {{"name":"{s}","root":"{s}"}},
+        \\  "groups": [{{"name":"backend","services":[
+        \\    {{"name":"api","command":"sh -c 'test -e ok && exec sleep 60; sleep 0.3; exit 3'","restart_on_failure":{{"max_retries":1,"delay_ms":0}}}}
+        \\  ]}}]
+        \\}}
+    , .{ session, project_root });
+    try tmp.dir.writeFile(io, .{ .sub_path = "zask.json", .data = config_json });
+    const config_path = try std.fs.path.join(gpa, &.{ project_root, "zask.json" });
+    const cfg = try zask.config.Config.parse(gpa, config_json, "/tmp");
+    const state_home = try std.fs.path.join(gpa, &.{ project_root, "state" });
+    var environ = std.process.Environ.Map.init(gpa);
+    defer environ.deinit();
+    try environ.put("HOME", project_root);
+    try environ.put("XDG_STATE_HOME", state_home);
+    const log_dir = try zask.service_log.directory(gpa, &environ, session);
+    const run_impl: zask.runner.Runner = .{ .gpa = gpa, .io = io };
+    const runtime = zask.runtime.Runtime{
+        .gpa = gpa,
+        .io = io,
+        .environ = &environ,
+        .cfg = cfg,
+        .config_path = config_path,
+        .zask_path = build_options.zask_path,
+        .command_hint = .{ .config = config_path },
+        .runner_impl = run_impl,
+        .tmux_impl = client,
+        .docker_impl = .{ .gpa = gpa, .runner = run_impl, .dir = project_root, .file = "compose.yaml" },
+        .stop_marks = try zask.stop_marks.StopMarks.forSession(gpa, io, session),
+        .service_log_dir = log_dir,
+    };
+    defer std.Io.Dir.cwd().deleteTree(io, runtime.stop_marks.?.dir) catch {};
+    var buffer: [4096]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    const watch_command = try std.fmt.allocPrint(gpa, "HOME={s} XDG_STATE_HOME={s} {s}", .{ project_root, state_home, try zask.zask_command.invokeWatch(gpa, build_options.zask_path, config_path) });
+    const window = zask.session_layout.watch_window;
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", project_root, "sleep 60");
+    defer client.killSession() catch {};
+    try client.newWindowAfter("dashboard", "api", project_root, try zask.zask_command.waitingPlaceholder(gpa, "api"));
+    try client.setWindowOption("api", "remain-on-exit", "on");
+    try waitForPaneState(client, gpa, io, "api", .idle);
+    try client.newWindowAfter("api", window, project_root, watch_command);
+    try waitForWatchPaneText(gpa, io, session, window, "Restarting api on failure: up to 1 times, 0s apart");
+
+    try runtime.start("api", &writer);
+    try waitForWatchPaneText(gpa, io, session, window, "api exited with status 3 after 1 restarts in a row; not restarting.");
+    try waitForPaneState(client, gpa, io, "api", .dead);
+
+    const gave_up = client.observePane("api");
+    defer gave_up.deinit(gpa);
+    try std.testing.expectEqual(std.meta.Tag(zask.recovery.View).gave_up, std.meta.activeTag(zask.recovery.view(1, gave_up.state, gave_up.processId(), gave_up.recovery)));
+    const log_path = try zask.service_log.servicePath(gpa, log_dir, "api");
+    const saved = try std.Io.Dir.cwd().readFileAlloc(io, log_path, gpa, .limited(64 * 1024));
+    const restarted_at = std.mem.indexOf(u8, saved, "zask: restarting api after it exited with status 3 (1/1)") orelse return error.MissingRestartNotice;
+    const gave_up_at = std.mem.indexOf(u8, saved, "zask: api exited with status 3 after 1 restarts in a row; not restarting it") orelse return error.MissingGiveUpNote;
+    try std.testing.expect(restarted_at < gave_up_at);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "ok", .data = "" });
+    try runtime.start("api", &writer);
+    try waitForPaneState(client, gpa, io, "api", .busy);
+
+    const manual = client.observePane("api");
+    defer manual.deinit(gpa);
+    try std.testing.expectEqual(std.meta.Tag(zask.recovery.View).none, std.meta.activeTag(zask.recovery.view(1, manual.state, manual.processId(), manual.recovery)));
+}
+
 fn tmuxClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) zask.tmux.Client {
     return .{
         .gpa = gpa,

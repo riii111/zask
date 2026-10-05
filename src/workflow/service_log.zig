@@ -48,6 +48,16 @@ pub fn begin(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, service: []con
     return beginRotatingAt(gpa, io, dir, service, started_at, rotate_at_bytes);
 }
 
+/// Appends a zask line about `service` to its log, after the output of the
+/// run it is about: `text` is written as one line.
+pub fn appendNote(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, service: []const u8, text: []const u8) !void {
+    const path = try servicePath(gpa, dir, service);
+    defer gpa.free(path);
+    const line = try std.fmt.allocPrint(gpa, "{s}\n", .{text});
+    defer gpa.free(line);
+    try log_file.appendText(io, path, line);
+}
+
 fn beginRotatingAt(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, service: []const u8, started_at: i64, rotate_at: u64) !Recording {
     const path = try servicePath(gpa, dir, service);
     errdefer gpa.free(path);

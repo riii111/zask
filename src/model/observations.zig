@@ -1,4 +1,5 @@
 const std = @import("std");
+const recovery = @import("recovery.zig");
 
 pub const SessionObservation = enum {
     active,
@@ -38,6 +39,9 @@ pub const PaneObservation = struct {
     /// Unix seconds recorded when zask last spawned the pane process. null means
     /// the start is unknown (e.g. a session opened by an older zask), not "never".
     started_at: ?i64 = null,
+    /// The recovery record on the pane; describes this run only as
+    /// recovery.view decides.
+    recovery: recovery.RecordObservation = .none,
 
     pub fn empty(state: PaneState) PaneObservation {
         return .{ .state = state };

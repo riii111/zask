@@ -31,6 +31,33 @@ pub fn prepareAppend(io: std.Io, path: []const u8, rotated_path: []const u8, rot
     return file.length(io);
 }
 
+/// Appends `text` to the log at `path`, on a line of its own when earlier
+/// output was cut off mid-line, creating the log owner-only when missing. The
+/// same `<path>.lock` as prepareAppend serializes it with rotation, so the
+/// text lands in the log that holds the output before it. A writer still
+/// appending to the log (a pane pipe) is not covered by the lock.
+pub fn appendText(io: std.Io, path: []const u8, text: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
+    if (std.fs.path.dirname(path)) |dir| try ensurePrivateDir(io, dir);
+    var lock_path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const lock_path = std.fmt.bufPrint(&lock_path_buffer, "{s}.lock", .{path}) catch return error.NameTooLong;
+    var lock = try cwd.createFile(io, lock_path, .{ .truncate = false, .lock = .exclusive, .permissions = private_file_permissions });
+    defer lock.close(io);
+
+    try restrictExisting(io, path);
+    var file = try cwd.createFile(io, path, .{ .read = true, .truncate = false, .permissions = private_file_permissions });
+    defer file.close(io);
+    var offset = try file.length(io);
+    if (offset > 0) {
+        var last: [1]u8 = undefined;
+        if (try file.readPositionalAll(io, &last, offset - 1) == 1 and last[0] != '\n') {
+            try file.writePositionalAll(io, "\n", offset);
+            offset += 1;
+        }
+    }
+    try file.writePositionalAll(io, text, offset);
+}
+
 fn ensurePrivateDir(io: std.Io, path: []const u8) !void {
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
     // An iterable handle, unlike the default path-only handle on Linux, can
@@ -94,6 +121,37 @@ fn testSetMode(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, mode: u32) !vo
 fn testMode(io: std.Io, dir: std.Io.Dir, sub_path: []const u8) !u32 {
     const stat = try dir.statFile(io, sub_path, .{});
     return @as(u32, @intCast(@intFromEnum(stat.permissions))) & 0o777;
+}
+
+test "log_file.appendText: starts the text on its own line after cut-off output" {
+    const cases = [_]struct { existing: ?[]const u8, want: []const u8 }{
+        .{ .existing = null, .want = "note\n" },
+        .{ .existing = "", .want = "note\n" },
+        .{ .existing = "done\n", .want = "done\nnote\n" },
+        .{ .existing = "panic: bo", .want = "panic: bo\nnote\n" },
+    };
+
+    for (cases) |case| {
+        const gpa = std.testing.allocator;
+        var threaded = std.Io.Threaded.init(gpa, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        if (case.existing) |data| {
+            try tmp.dir.createDirPath(io, "logs");
+            try tmp.dir.writeFile(io, .{ .sub_path = "logs/api.log", .data = data });
+        }
+        const path = try testPath(gpa, io, tmp.dir, "logs/api.log");
+        defer gpa.free(path);
+
+        try appendText(io, path, "note\n");
+
+        const written = try testReadFile(gpa, io, tmp.dir, "logs/api.log");
+        defer gpa.free(written);
+        try std.testing.expectEqualStrings(case.want, written);
+        try std.testing.expectEqual(@as(u32, 0o600), try testMode(io, tmp.dir, "logs/api.log"));
+    }
 }
 
 test "log_file.prepareAppend: creates missing directories and an empty file" {

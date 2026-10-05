@@ -26,6 +26,7 @@ pub const paths = @import("platform/paths.zig");
 pub const procfile = @import("workflow/procfile.zig");
 pub const process_probe = @import("platform/process_probe.zig");
 pub const readiness_wait = @import("workflow/readiness_wait.zig");
+pub const recovery = @import("model/recovery.zig");
 pub const runner = @import("platform/runner.zig");
 pub const runtime = @import("workflow/runtime.zig");
 pub const service_log = @import("workflow/service_log.zig");
