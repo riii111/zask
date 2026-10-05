@@ -233,6 +233,7 @@ test "config.schema: object properties match parser keys" {
         .{ .path = &.{ "definitions", "namedService" }, .keys = &config.object_keys.named_service },
         .{ .path = &.{ "definitions", "service", "properties", "healthcheck" }, .keys = &config.object_keys.healthcheck },
         .{ .path = &.{ "definitions", "watch" }, .keys = &config.object_keys.watch },
+        .{ .path = &.{ "definitions", "restartOnFailure" }, .keys = &config.object_keys.restart_on_failure },
         .{ .path = &.{ "definitions", "dockerStep" }, .keys = &config.object_keys.docker_step },
         .{ .path = &.{ "definitions", "groupStep" }, .keys = &config.object_keys.group_step },
         .{ .path = &.{ "definitions", "commandStep" }, .keys = &config.object_keys.command_step },
@@ -309,7 +310,8 @@ test "config.schema: accepts every public key with $schema" {
         \\      {"name":"api","dir":"backend","runtime":"cargo","command":"run","port":8080,
         \\       "healthcheck":{"type":"http","path":"/ready"},"env_file":".env.local"},
         \\      {"name":"tool","dir":"~/tools","external":true,"runtime":"","command":"watch",
-        \\       "watch":{"paths":["src","Cargo.toml"],"include":["*.rs"],"exclude":["target/"],"debounce_ms":0}}
+        \\       "watch":{"paths":["src","Cargo.toml"],"include":["*.rs"],"exclude":["target/"],"debounce_ms":0},
+        \\       "restart_on_failure":{"max_retries":5,"delay_ms":0}}
         \\    ]}
         \\  ],
         \\  "startup_order": [
@@ -429,6 +431,18 @@ test "config.schema: rejects structural errors the parser rejects" {
         },
         .{ .name = "empty include pattern", .json =
         \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve","watch":{"include":[""]}}]}]}
+        },
+        .{ .name = "restart_on_failure not object", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve","restart_on_failure":true}]}]}
+        },
+        .{ .name = "restart_on_failure key typo", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve","restart_on_failure":{"retries":3}}]}]}
+        },
+        .{ .name = "zero max_retries", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve","restart_on_failure":{"max_retries":0}}]}]}
+        },
+        .{ .name = "negative restart delay", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve","restart_on_failure":{"delay_ms":-1}}]}]}
         },
         .{ .name = "negative debounce", .json =
         \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve","watch":{"debounce_ms":-1}}]}]}

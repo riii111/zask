@@ -33,6 +33,8 @@ pub const PaneObservation = struct {
     exit_code: []const u8 = "",
     pid: []const u8 = "",
     command: []const u8 = "",
+    /// How the pane process ended. Meaningful only for `dead` panes.
+    exit: PaneExit = .clean,
     /// Unix seconds recorded when zask last spawned the pane process. null means
     /// the start is unknown (e.g. a session opened by an older zask), not "never".
     started_at: ?i64 = null,
@@ -63,6 +65,12 @@ pub const PaneObservation = struct {
         return self.state == .busy;
     }
 
+    /// The pane process id; tmux keeps reporting it after the process exits,
+    /// so it tells one run of a pane from the next. Null when unparseable.
+    pub fn processId(self: PaneObservation) ?i64 {
+        return std.fmt.parseInt(i64, self.pid, 10) catch null;
+    }
+
     pub fn uptime(self: PaneObservation, now: i64) Uptime {
         return switch (self.state) {
             .idle, .dead, .window_missing => .not_running,
@@ -76,6 +84,46 @@ pub const PaneObservation = struct {
             },
         };
     }
+};
+
+/// SIGINT is 2 on every platform zask supports.
+const sigint = 2;
+/// 128 + SIGINT, as a shell reports a child stopped by Ctrl-C.
+const interrupted_status = 128 + sigint;
+
+/// Classifies tmux's `pane_dead_status` and `pane_dead_signal`. A service
+/// started with `exec` replaces the wrapper that turns Ctrl-C into an idle
+/// shell, so Ctrl-C kills the pane process itself and only the signal tells it
+/// apart from a crash.
+pub fn paneExit(status: []const u8, signal: []const u8) PaneExit {
+    const code = std.fmt.parseInt(u32, status, 10) catch
+        return if (isInterruptSignal(signal)) .interrupted else .killed;
+    return switch (code) {
+        0 => .clean,
+        interrupted_status => .interrupted,
+        else => .{ .failed = code },
+    };
+}
+
+/// tmux prints the name from `sys_signame` where the libc has it (`int` on
+/// macOS) and the number otherwise (`2` on glibc).
+fn isInterruptSignal(signal: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(signal, "int") or std.ascii.eqlIgnoreCase(signal, "sigint")) return true;
+    const number = std.fmt.parseInt(u32, signal, 10) catch return false;
+    return number == sigint;
+}
+
+pub const PaneExit = union(enum) {
+    /// Exit status 0.
+    clean,
+    /// Ctrl-C: exit status 130 or SIGINT.
+    interrupted,
+    /// Non-zero exit status. The service wrapper exits with 128+N when the
+    /// service dies from signal N.
+    failed: u32,
+    /// The pane process itself died from a signal other than SIGINT, or
+    /// tmux did not report how it ended.
+    killed,
 };
 
 pub const Uptime = union(enum) {
@@ -269,6 +317,37 @@ test "observations.serviceHealth: maps pane state and probes to health" {
     for (cases) |case| {
         try std.testing.expectEqual(case.expected, serviceHealth(case.pane, case.listen, case.http));
     }
+}
+
+test "observations.paneExit: maps dead status and signal to exit kind" {
+    const cases = [_]struct {
+        status: []const u8,
+        signal: []const u8 = "",
+        want: PaneExit,
+    }{
+        .{ .status = "0", .want = .clean },
+        .{ .status = "1", .want = .{ .failed = 1 } },
+        .{ .status = "130", .want = .interrupted },
+        .{ .status = "137", .want = .{ .failed = 137 } },
+        .{ .status = "", .signal = "int", .want = .interrupted },
+        .{ .status = "", .signal = "2", .want = .interrupted },
+        .{ .status = "", .signal = "15", .want = .killed },
+        .{ .status = "", .signal = "term", .want = .killed },
+        .{ .status = "", .want = .killed },
+        .{ .status = "x", .want = .killed },
+    };
+
+    for (cases) |case| {
+        try std.testing.expectEqual(case.want, paneExit(case.status, case.signal));
+    }
+}
+
+test "observations.pane.processId: parses pid or reports null" {
+    const parsed: PaneObservation = .{ .state = .dead, .pid = "4242" };
+    const missing: PaneObservation = .{ .state = .dead, .pid = "" };
+
+    try std.testing.expectEqual(@as(?i64, 4242), parsed.processId());
+    try std.testing.expectEqual(@as(?i64, null), missing.processId());
 }
 
 test "observations.pane.uptime: maps state and start marker to uptime" {

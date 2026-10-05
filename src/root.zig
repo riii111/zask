@@ -11,6 +11,7 @@ pub const dashboard = @import("interface/ui/dashboard.zig");
 pub const docker = @import("platform/docker.zig");
 pub const environment_check = @import("workflow/environment_check.zig");
 pub const executable = @import("platform/executable.zig");
+pub const failure_restart = @import("workflow/failure_restart.zig");
 pub const lifecycle = @import("workflow/lifecycle.zig");
 pub const init_inference = @import("workflow/init_inference.zig");
 pub const jsonc = @import("model/jsonc.zig");

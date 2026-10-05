@@ -3,6 +3,7 @@ const config = @import("../model/config.zig");
 const configured_path = @import("configured_path.zig");
 const docker_client = @import("../platform/docker.zig");
 const env = @import("../platform/env.zig");
+const failure_restart = @import("failure_restart.zig");
 const file_watch = @import("file_watch.zig");
 const lifecycle_mod = @import("lifecycle.zig");
 const lock = @import("../platform/lock.zig");
@@ -363,21 +364,27 @@ pub const Runtime = struct {
         try self.lifecycle().restartTarget(target, writer);
     }
 
-    /// Restarts services when their watched files change. Runs in the
-    /// `zask-watch` window until `close` or `re` kills the session with it.
-    /// `gpa` must free memory: the loop runs for the life of the session.
+    /// Restarts services when their watched files change or when they exit
+    /// abnormally. Runs in the `zask-watch` window until `close` or `re` kills
+    /// the session with it. One loop runs both, so a file-change restart and a
+    /// recovery never act on a service at the same time. `gpa` must free
+    /// memory: the loop runs for the life of the session.
     pub fn watch(self: Runtime, gpa: std.mem.Allocator, writer: *std.Io.Writer) !void {
-        var supervisor = try watch_restart.Supervisor.init(gpa, self.io, self.cfg);
-        defer supervisor.deinit();
-        if (supervisor.isEmpty()) {
-            try writer.writeAll("No services have watch settings\n");
+        var file_supervisor = try watch_restart.Supervisor.init(gpa, self.io, self.cfg);
+        defer file_supervisor.deinit();
+        var failure_supervisor = try failure_restart.Supervisor.init(gpa, self.cfg);
+        defer failure_supervisor.deinit();
+        if (file_supervisor.isEmpty() and failure_supervisor.isEmpty()) {
+            try writer.writeAll("No services have watch or restart_on_failure settings\n");
             try writer.flush();
             return;
         }
-        try supervisor.writeWatching(writer);
+        try file_supervisor.writeWatching(writer);
+        try failure_supervisor.writeSupervised(writer);
         const restarter: WatchRestarter = .{ .runtime = self, .gpa = gpa };
         while (true) {
-            try supervisor.tick(restarter, writer);
+            try file_supervisor.tick(restarter, writer);
+            try failure_supervisor.tick(restarter, writer);
             self.runner().sleep(.fromMilliseconds(file_watch.poll_interval_ms));
         }
     }
@@ -530,15 +537,15 @@ pub const Runtime = struct {
             try tx.newWindowAfter(previous_window, session_layout.docker_window, try pathing.absolute(scratch, self.io, try self.cfg.dockerDir(scratch)), try zask_command.waitingPlaceholder(scratch, session_layout.docker_placeholder_title));
             previous_window = session_layout.docker_window;
         }
-        if (try self.cfg.anyServiceWatches()) {
+        if (try self.cfg.anyServiceSupervised()) {
             try tx.newWindowAfter(previous_window, session_layout.watch_window, try self.absoluteProjectRoot(scratch), try zask_command.invokeWatch(scratch, self.zask_path, self.config_path));
         }
     }
 
-    /// Workspaces opened before a `watch` setting was added get the window on
-    /// the next `open`.
+    /// Workspaces opened before a `watch` or `restart_on_failure` setting was
+    /// added get the window on the next `open`.
     fn ensureWatchWindow(self: Runtime, scratch: std.mem.Allocator) !void {
-        if (!try self.cfg.anyServiceWatches()) return;
+        if (!try self.cfg.anyServiceSupervised()) return;
         const tx = self.tmux();
         switch (tx.observeWindow(session_layout.watch_window)) {
             .present => {},
@@ -646,7 +653,8 @@ pub const Runtime = struct {
     }
 };
 
-/// Runs each watch-triggered lifecycle step on its own arena over `gpa`.
+/// Runs each watch- or failure-triggered lifecycle step on its own arena over
+/// `gpa`.
 const WatchRestarter = struct {
     runtime: Runtime,
     gpa: std.mem.Allocator,
@@ -671,6 +679,23 @@ const WatchRestarter = struct {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         try self.runtime.withAllocator(arena.allocator()).lifecycle().restartServiceWithNotice(service, notice, writer);
+    }
+
+    pub fn nowSeconds(self: WatchRestarter) i64 {
+        return self.runtime.runner().nowSeconds();
+    }
+
+    pub fn observeRun(self: WatchRestarter, service: []const u8) failure_restart.Run {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const pane = self.runtime.withAllocator(arena.allocator()).tmux().observePane(service);
+        return .{ .state = pane.state, .exit = pane.exit, .pid = pane.processId() };
+    }
+
+    pub fn recover(self: WatchRestarter, service: []const u8, notice: []const u8, writer: *std.Io.Writer) !lifecycle_mod.StartOutcome {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        return self.runtime.withAllocator(arena.allocator()).lifecycle().startServiceWithNotice(service, notice, writer);
     }
 };
 
