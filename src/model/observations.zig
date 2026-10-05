@@ -90,21 +90,31 @@ pub const PaneObservation = struct {
     }
 };
 
+/// SIGINT is 2 on every platform zask supports.
+const sigint = 2;
 /// 128 + SIGINT, as a shell reports a child stopped by Ctrl-C.
-const interrupted_status = 130;
+const interrupted_status = 128 + sigint;
 
-/// Classifies tmux's `pane_dead_status` and `pane_dead_signal` (a lowercase
-/// name such as `int`). A service started with `exec` replaces the wrapper
-/// that turns Ctrl-C into an idle shell, so Ctrl-C kills the pane process
-/// itself and only the signal tells it apart from a crash.
+/// Classifies tmux's `pane_dead_status` and `pane_dead_signal`. A service
+/// started with `exec` replaces the wrapper that turns Ctrl-C into an idle
+/// shell, so Ctrl-C kills the pane process itself and only the signal tells it
+/// apart from a crash.
 pub fn paneExit(status: []const u8, signal: []const u8) PaneExit {
     const code = std.fmt.parseInt(u32, status, 10) catch
-        return if (std.ascii.eqlIgnoreCase(signal, "int")) .interrupted else .killed;
+        return if (isInterruptSignal(signal)) .interrupted else .killed;
     return switch (code) {
         0 => .clean,
         interrupted_status => .interrupted,
         else => .{ .failed = code },
     };
+}
+
+/// tmux prints the name from `sys_signame` where the libc has it (`int` on
+/// macOS) and the number otherwise (`2` on glibc).
+fn isInterruptSignal(signal: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(signal, "int") or std.ascii.eqlIgnoreCase(signal, "sigint")) return true;
+    const number = std.fmt.parseInt(u32, signal, 10) catch return false;
+    return number == sigint;
 }
 
 pub const PaneExit = union(enum) {
@@ -324,6 +334,8 @@ test "observations.paneExit: maps dead status and signal to exit kind" {
         .{ .status = "130", .want = .interrupted },
         .{ .status = "137", .want = .{ .failed = 137 } },
         .{ .status = "", .signal = "int", .want = .interrupted },
+        .{ .status = "", .signal = "2", .want = .interrupted },
+        .{ .status = "", .signal = "15", .want = .killed },
         .{ .status = "", .signal = "term", .want = .killed },
         .{ .status = "", .want = .killed },
         .{ .status = "x", .want = .killed },

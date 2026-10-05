@@ -1218,7 +1218,9 @@ test "runtime.watch: restarts failed services up to the limit and leaves stopped
     try waitForPaneState(client, gpa, io, "worker", .busy);
 
     try runtime.start("web", &writer);
-    try waitForPaneState(client, gpa, io, "web", .busy);
+    // A login shell's profile can make the wrapper look busy before `exec`;
+    // Ctrl-C then reaches the wrapper's trap instead of the service.
+    try waitForPaneCommand(gpa, io, try std.fmt.allocPrint(gpa, "{s}:web", .{session}), "sleep");
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", try std.fmt.allocPrint(gpa, "{s}:web", .{session}), "C-c" });
 
     try runtime.stop("worker", &writer);
@@ -1407,6 +1409,18 @@ fn expectPaneAlive(gpa: std.mem.Allocator, io: std.Io, target: []const u8) !void
         try std.Io.sleep(io, pane_ready_interval, .awake);
     }
     return error.PaneNotAlive;
+}
+
+fn waitForPaneCommand(gpa: std.mem.Allocator, io: std.Io, target: []const u8, command: []const u8) !void {
+    for (0..service_state_attempts) |_| {
+        const result = try run(gpa, io, &.{ build_options.tmux_path, "list-panes", "-t", target, "-F", "#{pane_current_command}" });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+
+        if (std.mem.eql(u8, std.mem.trim(u8, result.stdout, "\n"), command)) return;
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    return error.PaneCommandTimeout;
 }
 
 fn waitForPaneState(client: zask.tmux.Client, gpa: std.mem.Allocator, io: std.Io, window: []const u8, expected: zask.observations.PaneState) !void {
