@@ -914,8 +914,7 @@ test "monitor: l pages recent logs in a popup and returns to the monitor" {
     const client_name = try waitForClient(gpa, io, session);
 
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "l" });
-    const shown = try waitForScratchFile(gpa, io, scratch_dir);
-    try std.testing.expect(std.mem.indexOf(u8, shown, "panic: boom\n") != null);
+    _ = try waitForScratchFile(gpa, io, scratch_dir, "booting\npanic: boom\n");
     try expectPopupOpen(gpa, io, target);
 
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "display-popup", "-C", "-c", client_name });
@@ -952,14 +951,21 @@ fn waitForClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) ![]con
     return error.ClientTimeout;
 }
 
-/// Returns the captured text the monitor handed to the open popup.
-fn waitForScratchFile(gpa: std.mem.Allocator, io: std.Io, dir_path: []const u8) ![]const u8 {
+/// Returns the captured text the monitor handed to the open popup once it
+/// holds `needle`; the file can be seen between its creation and the write.
+fn waitForScratchFile(gpa: std.mem.Allocator, io: std.Io, dir_path: []const u8, needle: []const u8) ![]const u8 {
     for (0..service_state_attempts) |_| {
         if (std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true })) |opened| {
             var dir = opened;
             defer dir.close(io);
             var entries = dir.iterate();
-            if (try entries.next(io)) |entry| return dir.readFileAlloc(io, entry.name, gpa, .limited(64 * 1024));
+            if (try entries.next(io)) |entry| {
+                const contents = dir.readFileAlloc(io, entry.name, gpa, .limited(64 * 1024)) catch |err| switch (err) {
+                    error.FileNotFound => "",
+                    else => return err,
+                };
+                if (std.mem.indexOf(u8, contents, needle) != null) return contents;
+            }
         } else |err| switch (err) {
             error.FileNotFound => {},
             else => return err,

@@ -58,8 +58,9 @@ pub fn show(gpa: std.mem.Allocator, io: std.Io, tmux: tmux_client.Client, reques
     defer gpa.free(name);
     const path = try std.fs.path.join(gpa, &.{ request.scratch_dir, name });
     defer gpa.free(path);
-    try paths.writeFileMode(io, path, lines, paths.private_file_permissions);
+    // Registered before writing so a partly written file is removed too.
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    try paths.writeFileMode(io, path, lines, paths.private_file_permissions);
 
     const title = try std.fmt.allocPrint(gpa, " {s}: last {d} lines ", .{ request.label, max_lines });
     defer gpa.free(title);
