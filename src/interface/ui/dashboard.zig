@@ -10,6 +10,7 @@ const service_observation = @import("../../workflow/service_observation.zig");
 const terminal = @import("../../platform/terminal.zig");
 const tmux_client = @import("../../platform/tmux.zig");
 const RenderContext = @import("context.zig").RenderContext;
+const Runtime = @import("../../workflow/runtime.zig").Runtime;
 
 /// The launcher is a one-shot summary followed by the user's shell; the
 /// monitor pane next to it keeps observing.
@@ -42,8 +43,8 @@ pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env.Map,
     _ = try ctx.runner.run(&.{shell}, .{ .interactive = true });
 }
 
-pub fn runMonitor(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.Io.Writer) !void {
-    try monitor.run(gpa, io, cfg, writer);
+pub fn runMonitor(runtime: Runtime, writer: *std.Io.Writer) !void {
+    try monitor.run(runtime, writer);
 }
 
 const default_width = 80;
@@ -497,7 +498,7 @@ test "dashboard.waitForAttachedClient: polls until a client attaches" {
     waitForAttachedClient(.{ .gpa = std.testing.allocator, .runner = run, .session = "demo" }, run);
 
     try std.testing.expectEqual(@as(usize, 2), recorder.commands.items.len);
-    try proc_runner.expectCommandArgvStartsWith(recorder.commands.items[1], &.{ "tmux", "list-clients", "-t", "demo" });
+    try proc_runner.expectCommandArgvStartsWith(recorder.commands.items[1], &.{ "tmux", "list-clients", "-t", "=demo:" });
     try std.testing.expectEqual(@as(usize, 1), recorder.sleeps.items.len);
     try proc_runner.expectNoRemainingResponses(&recorder);
 }

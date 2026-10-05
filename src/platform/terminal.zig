@@ -66,6 +66,18 @@ pub fn read(fd: posix.fd_t, buffer: []u8) !usize {
     return posix.read(fd, buffer);
 }
 
+/// Drops input already typed but not yet read, so keys pressed while the
+/// caller was blocked are not acted on afterwards.
+pub fn discardInput(fd: posix.fd_t) void {
+    var buffer: [256]u8 = undefined;
+    while (true) {
+        const readiness = waitReadable(fd, 0) catch return;
+        if (readiness != .input) return;
+        const len = read(fd, &buffer) catch return;
+        if (len == 0) return;
+    }
+}
+
 /// Returns null when `fd` is not a terminal or reports a zero size.
 pub fn size(fd: posix.fd_t) ?Size {
     var ws: posix.winsize = undefined;
