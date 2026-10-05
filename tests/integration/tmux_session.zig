@@ -280,6 +280,50 @@ test "cli.logs: tail reports missing service window on stderr" {
     try std.testing.expectEqualStrings("Service window not found: api\n", result.stderr);
 }
 
+test "cli.logs: saved output stays readable after the session closes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-logs-saved", .{std.c.getpid()});
+    const client = tmuxClient(gpa, io, session);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try writeServiceProject(gpa, io, tmp.dir, session);
+    try tmp.dir.writeFile(io, .{ .sub_path = "zask.json", .data = try std.fmt.allocPrint(gpa,
+        \\{{
+        \\  "project": {{"name":"{s}","root":"."}},
+        \\  "groups": [{{"name":"backend","services":[{{"name":"api","dir":".","command":"sh serve.sh"}}]}}]
+        \\}}
+    , .{session}) });
+    try tmp.dir.writeFile(io, .{ .sub_path = "serve.sh", .data = "echo listening\necho 'fatal: boom' >&2\nexit 3\n" });
+    const log_sub_path = try std.fmt.allocPrint(gpa, ".local/state/zask/{s}/logs/api.log", .{session});
+    const log_path = try std.fs.path.join(gpa, &.{ project.root, log_sub_path });
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", project.root, "sleep 60");
+    defer client.killSession() catch {};
+    try client.newWindowAfter("dashboard", "api", project.root, try zask.zask_command.waitingPlaceholder(gpa, "api"));
+    try client.setWindowOption("api", "remain-on-exit", "on");
+    try waitForPaneState(client, gpa, io, "api", .idle);
+    const start = try runZask(gpa, io, project, &.{ "start", "api" });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, start.term);
+    _ = try waitForFileText(gpa, io, tmp.dir, log_sub_path, "fatal: boom");
+    try client.killSession();
+
+    const saved = try runZask(gpa, io, project, &.{ "logs", "api", "--saved", "--tail", "2" });
+    const pane = try runZask(gpa, io, project, &.{ "logs", "api", "--tail", "2" });
+
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, saved.term);
+    try std.testing.expectEqualStrings("listening\r\nfatal: boom\r\n", saved.stdout);
+    try std.testing.expectEqualStrings("", saved.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, pane.term);
+    try std.testing.expectEqualStrings("", pane.stdout);
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(gpa, "Session not running\nSaved output: {s}\nRead it with: zask logs api --saved\n", .{log_path}), pane.stderr);
+}
+
 test "tmux_setup.applySessionOptions: keeps global attach hook while refreshing size hook" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

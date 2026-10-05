@@ -279,6 +279,7 @@ file when it differs from the running zask, so upgrading zask also updates what
 the editor checks. For a project-local `zask.json`, point `"$schema"` at that
 file or at a copy of `schema/zask.schema.json`. Configs without `$schema` keep
 working.
+
 ## Service logs
 
 zask saves the terminal output of each service to
@@ -302,6 +303,23 @@ read with `grep` or an editor after `zask close`.
   `zask: output is no longer saved to ...` line appears in the service window.
 
 Docker Compose output is not saved.
+
+`zask logs` reads the saved log without a running session:
+
+- `zask logs api --saved` prints the whole `api.log`, and
+  `zask logs api --saved --tail 100` its last 100 lines. Neither touches tmux,
+  so they work after `zask close` as well as during a session. The output is
+  the saved bytes, so it keeps color codes and `\r\n` line endings; an earlier
+  generation in `api.log.1` is not included.
+- `zask logs api --path` prints only the log path, for an editor or
+  `grep pattern "$(zask logs api --path)"`. It prints the path even before the
+  first start has created the log.
+- When the session is not running, `zask logs api` and
+  `zask logs api --tail <n>` still fail, and also print the saved log path and
+  the command that reads it, if the log exists. `--tail` does the same when
+  only the service window is gone.
+- `--saved` exits `1` with the expected path when the service has not saved
+  any output yet, and `--saved` or `--path` exits `1` for an unknown service.
 
 ## Requirements
 
