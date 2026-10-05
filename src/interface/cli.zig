@@ -128,6 +128,7 @@ const command_specs = [_]CommandSpec{
 pub fn run(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
+    if (args.len == 4 and std.mem.eql(u8, args[1], "_log-stream")) return root.log_stream.run(arena, init.io, args[2], args[3]);
     var diags = diagnostics.Diagnostics.init(arena);
     var err_ctx: cli_context.ErrorContext = .{};
     const context: CommandContext = .{

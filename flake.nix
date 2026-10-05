@@ -28,6 +28,7 @@
               pkgs.zls
               pkgs.lefthook
               pkgs.tmux
+              pkgs.less
               pkgs.yq-go
               pkgs.shellcheck
             ];

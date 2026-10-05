@@ -15,11 +15,13 @@ const pathing = @import("pathing.zig");
 const phases = @import("phases.zig");
 const proc_runner = @import("../platform/runner.zig");
 const progress_mod = @import("progress.zig");
+const recovery = @import("../model/recovery.zig");
 const service_log = @import("service_log.zig");
 const service_observation = @import("service_observation.zig");
 const session_layout = @import("session_layout.zig");
 const stop_marks_mod = @import("../platform/stop_marks.zig");
 const tmux_client = @import("../platform/tmux.zig");
+const tmux_options = @import("../model/tmux_options.zig");
 const tmux_setup = @import("tmux_setup.zig");
 const waits = @import("waits.zig");
 const watch_restart = @import("watch_restart.zig");
@@ -486,6 +488,7 @@ pub const Runtime = struct {
 
     fn lifecycle(self: Runtime) lifecycle_mod.Lifecycle {
         return .{
+            .zask_path = self.zask_path,
             .gpa = self.gpa,
             .cfg = self.cfg,
             .runner = self.runner(),
@@ -692,10 +695,22 @@ const WatchRestarter = struct {
         return .{ .state = pane.state, .exit = pane.exit, .pid = pane.processId() };
     }
 
-    pub fn recover(self: WatchRestarter, service: []const u8, notice: []const u8, writer: *std.Io.Writer) !lifecycle_mod.StartOutcome {
+    pub fn recover(self: WatchRestarter, service: []const u8, notice: []const u8, record: ?recovery.Record, writer: *std.Io.Writer) !lifecycle_mod.StartOutcome {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
-        return self.runtime.withAllocator(arena.allocator()).lifecycle().startServiceWithNotice(service, notice, writer);
+        return self.runtime.withAllocator(arena.allocator()).lifecycle().startServiceWithNotice(service, notice, record, writer);
+    }
+
+    pub fn recordFailedRun(self: WatchRestarter, service: []const u8, record: recovery.Record, note: ?[]const u8) !lifecycle_mod.FailedRunRecord {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        return self.runtime.withAllocator(arena.allocator()).lifecycle().recordFailedRun(service, record, note);
+    }
+
+    pub fn clearRecovery(self: WatchRestarter, service: []const u8) !void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        try self.runtime.withAllocator(arena.allocator()).tmux().setPaneOption(service, tmux_options.recovery, null);
     }
 };
 

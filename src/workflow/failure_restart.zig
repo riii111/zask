@@ -2,12 +2,15 @@
 //! to file watch, so recovery keeps going after the monitor closes or the
 //! client detaches and ends when `close` kills the session. Restarts use the
 //! same lifecycle start as `zask start`, under the service lock and the stop
-//! record shared with file watch.
+//! record shared with file watch. Each step is also left on the service pane
+//! as a recovery record for the monitor, and giving up is noted in the
+//! service log.
 
 const std = @import("std");
 const config = @import("../model/config.zig");
 const lifecycle = @import("lifecycle.zig");
 const observations = @import("../model/observations.zig");
+const recovery = @import("../model/recovery.zig");
 
 /// A failure this long after the last restart was not a crash loop, so it
 /// starts the retry count over.
@@ -115,9 +118,12 @@ pub const Supervisor = struct {
     /// Observes every supervised service once and restarts those whose
     /// failure has waited `delay_ms`. `ctx` provides `now() i96` (monotonic
     /// ns), `nowSeconds() i64` (Unix seconds), `observeRun(name) Run`,
-    /// `stopMark(name)`, and `recover(name, notice, writer) !StartOutcome`.
-    /// Restart failures are reported and count as attempts; a restart that
-    /// finds the service already started or stopped by someone else does not.
+    /// `stopMark(name)`, `recover(name, notice, record, writer) !StartOutcome`,
+    /// `recordFailedRun(name, record, note) !lifecycle.FailedRunRecord`, and
+    /// `clearRecovery(name) !void`. Restart failures are reported and count
+    /// as attempts; a restart that finds the service already started or
+    /// stopped by someone else does not. A record or note that cannot be
+    /// written is reported and does not stop recovery.
     pub fn tick(self: *Supervisor, ctx: anytype, writer: *std.Io.Writer) !void {
         for (self.services.items) |*service| {
             try self.check(service, ctx, writer);
@@ -133,6 +139,10 @@ pub const Supervisor = struct {
             .stopped => if (service.pending != null) {
                 service.pending = null;
                 try writer.print("  {s} was stopped; not restarting\n", .{service.name});
+                ctx.clearRecovery(service.name) catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    else => try writer.print("  Warning: the monitor cannot show recovery of {s}: {s}\n", .{ service.name, @errorName(err) }),
+                };
             },
             .window_closed => if (service.pending != null) {
                 service.pending = null;
@@ -146,6 +156,7 @@ pub const Supervisor = struct {
                 service.reported_pid = run.pid;
                 service.pending = null;
                 try writer.print("Warning: cannot read whether {s} was stopped; not restarting\n", .{service.name});
+                try recordFailure(service.name, .{ .kind = .unconfirmed, .pid = run.pid, .attempt = service.restarts, .max_retries = service.policy.max_retries, .exit = run.exit }, null, ctx, writer);
             },
             .failed => try self.handleFailure(service, run, ctx, writer),
         }
@@ -161,13 +172,17 @@ pub const Supervisor = struct {
         }
         const failed_at = if (service.pending) |pending| pending.failed_at_ns else first: {
             if (!continuesSeries(service.*, run.pid, ctx.nowSeconds())) service.restarts = 0;
-            const exit_text: ExitText = .{ .exit = run.exit };
+            const exit_text: recovery.ExitText = .{ .exit = run.exit };
             if (service.restarts >= service.policy.max_retries) {
                 service.reported_pid = run.pid;
                 try writer.print("{s} {f} after {d} restarts in a row; not restarting. Fix it and start it again.\n", .{ service.name, exit_text, service.restarts });
+                const note = try std.fmt.allocPrint(self.gpa, "zask: {s} {f} after {d} restarts in a row; not restarting it", .{ service.name, exit_text, service.restarts });
+                defer self.gpa.free(note);
+                try recordFailure(service.name, .{ .kind = .gave_up, .pid = run.pid, .attempt = service.restarts, .max_retries = service.policy.max_retries, .exit = run.exit }, note, ctx, writer);
                 return;
             }
             try writer.print("{s} {f}; restarting in {f} ({d}/{d})\n", .{ service.name, exit_text, DelayText{ .ms = service.policy.delay_ms }, service.restarts + 1, service.policy.max_retries });
+            try recordFailure(service.name, .{ .kind = .waiting, .pid = run.pid, .attempt = service.restarts + 1, .max_retries = service.policy.max_retries, .exit = run.exit }, null, ctx, writer);
             service.pending = .{ .pid = run.pid, .failed_at_ns = now_ns };
             break :first now_ns;
         };
@@ -175,9 +190,10 @@ pub const Supervisor = struct {
 
         service.pending = null;
         const attempt = service.restarts + 1;
-        const notice = try std.fmt.allocPrint(self.gpa, "zask: restarting {s} after it {f} ({d}/{d})", .{ service.name, ExitText{ .exit = run.exit }, attempt, service.policy.max_retries });
+        const notice = try std.fmt.allocPrint(self.gpa, "zask: restarting {s} after it {f} ({d}/{d})", .{ service.name, recovery.ExitText{ .exit = run.exit }, attempt, service.policy.max_retries });
         defer self.gpa.free(notice);
-        const outcome: lifecycle.StartOutcome = ctx.recover(service.name, notice, writer) catch |err| switch (err) {
+        const record: recovery.Record = .{ .kind = .restarted, .attempt = attempt, .max_retries = service.policy.max_retries, .exit = run.exit };
+        const outcome: lifecycle.StartOutcome = ctx.recover(service.name, notice, record, writer) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => failed: {
                 try writer.print("  Warning: could not restart {s}: {s}\n", .{ service.name, @errorName(err) });
@@ -207,18 +223,16 @@ fn reported(service: *const Supervisor.Service, pid: ?i64) bool {
     return pid != null and service.reported_pid == pid;
 }
 
-const ExitText = struct {
-    exit: observations.PaneExit,
-
-    pub fn format(self: ExitText, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        switch (self.exit) {
-            .clean => try writer.writeAll("exited with status 0"),
-            .interrupted => try writer.writeAll("was interrupted"),
-            .failed => |status| try writer.print("exited with status {d}", .{status}),
-            .killed => try writer.writeAll("was killed"),
-        }
-    }
-};
+/// A run started since the failure was seen gets nothing; see
+/// Lifecycle.recordFailedRun.
+fn recordFailure(name: []const u8, record: recovery.Record, note: ?[]const u8, ctx: anytype, writer: *std.Io.Writer) !void {
+    const result: lifecycle.FailedRunRecord = ctx.recordFailedRun(name, record, note) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => .{ .record_error = err },
+    };
+    if (result.record_error) |err| try writer.print("  Warning: the monitor cannot show recovery of {s}: {s}\n", .{ name, @errorName(err) });
+    if (result.note_error) |err| try writer.print("  Warning: could not note this in the {s} log: {s}\n", .{ name, @errorName(err) });
+}
 
 const DelayText = struct {
     ms: u64,
@@ -243,10 +257,22 @@ const TestContext = struct {
     started_elsewhere: ?i64 = null,
     next_pid: i64 = 200,
     recovers: std.ArrayList([]const u8) = .empty,
+    /// The record each recovery start left on the pane.
+    recovered_records: std.ArrayList(?recovery.Record) = .empty,
+    /// The record on the pane; recordRecovery and recover replace it.
+    record: ?recovery.Record = null,
+    fail_record: bool = false,
+    notes: std.ArrayList([]const u8) = .empty,
+    fail_note: bool = false,
+    /// The service lock recordFailedRun takes cannot be held.
+    fail_lock: bool = false,
 
     fn deinit(self: *TestContext) void {
         for (self.recovers.items) |notice| std.testing.allocator.free(notice);
         self.recovers.deinit(std.testing.allocator);
+        self.recovered_records.deinit(std.testing.allocator);
+        for (self.notes.items) |note| std.testing.allocator.free(note);
+        self.notes.deinit(std.testing.allocator);
     }
 
     pub fn now(self: *TestContext) i96 {
@@ -267,19 +293,44 @@ const TestContext = struct {
         return self.mark;
     }
 
-    pub fn recover(self: *TestContext, name: []const u8, notice: []const u8, writer: *std.Io.Writer) !lifecycle.StartOutcome {
+    pub fn recover(self: *TestContext, name: []const u8, notice: []const u8, record: ?recovery.Record, writer: *std.Io.Writer) !lifecycle.StartOutcome {
         _ = name;
         _ = writer;
         if (self.fail_recover) return error.CommandFailed;
         if (self.started_elsewhere) |pid| {
             self.started_elsewhere = null;
             self.run = .{ .state = .busy, .pid = pid };
+            self.record = null;
             return .skipped;
         }
         try self.recovers.append(std.testing.allocator, try std.testing.allocator.dupe(u8, notice));
+        try self.recovered_records.append(std.testing.allocator, record);
+        self.record = record;
         self.run = .{ .state = .busy, .pid = self.next_pid };
         self.next_pid += 1;
         return .started;
+    }
+
+    pub fn recordFailedRun(self: *TestContext, name: []const u8, record: recovery.Record, note: ?[]const u8) !lifecycle.FailedRunRecord {
+        _ = name;
+        if (self.fail_lock) return error.AccessDenied;
+        if (self.run.state != .dead or self.run.pid != record.pid) return .{ .run_gone = true };
+        var result: lifecycle.FailedRunRecord = .{};
+        if (self.fail_record) result.record_error = error.CommandFailed else self.record = record;
+        if (note) |text| {
+            if (self.fail_note) {
+                result.note_error = error.AccessDenied;
+            } else {
+                try self.notes.append(std.testing.allocator, try std.testing.allocator.dupe(u8, text));
+            }
+        }
+        return result;
+    }
+
+    pub fn clearRecovery(self: *TestContext, name: []const u8) error{ CommandFailed, OutOfMemory }!void {
+        _ = name;
+        if (self.fail_record) return error.CommandFailed;
+        self.record = null;
     }
 
     /// The current run dies `after_s` seconds from now.
@@ -565,6 +616,97 @@ test "failure_restart.tick: a manual start winning the lock gets a fresh series"
 
     try std.testing.expectEqual(@as(usize, 2), ctx.recovers.items.len);
     try std.testing.expectEqualStrings("zask: restarting api after it exited with status 1 (1/3)", ctx.recovers.items[1]);
+}
+
+test "failure_restart.tick: records the wait and the restart for the monitor" {
+    var project = try testApi(1000, 3);
+    defer project.deinit();
+    var ctx: TestContext = .{};
+    defer ctx.deinit();
+    ctx.crash(60, .{ .failed = 1 });
+
+    try project.tick(&ctx);
+    const waiting = ctx.record;
+    ctx.now_ns += 1000 * std.time.ns_per_ms;
+    try project.tick(&ctx);
+
+    try std.testing.expectEqualDeep(@as(?recovery.Record, .{ .kind = .waiting, .pid = 100, .attempt = 1, .max_retries = 3, .exit = .{ .failed = 1 } }), waiting);
+    try std.testing.expectEqualDeep(@as(?recovery.Record, .{ .kind = .restarted, .attempt = 1, .max_retries = 3, .exit = .{ .failed = 1 } }), ctx.recovered_records.items[0]);
+}
+
+test "failure_restart.tick: records and logs giving up at the limit" {
+    var project = try testApi(0, 1);
+    defer project.deinit();
+    var ctx: TestContext = .{};
+    defer ctx.deinit();
+    ctx.crash(1, .{ .failed = 1 });
+    try project.tick(&ctx);
+
+    ctx.crash(1, .killed);
+    try project.tick(&ctx);
+    try project.tick(&ctx);
+
+    try std.testing.expectEqualDeep(@as(?recovery.Record, .{ .kind = .gave_up, .pid = 200, .attempt = 1, .max_retries = 1, .exit = .killed }), ctx.record);
+    try std.testing.expectEqual(@as(usize, 1), ctx.notes.items.len);
+    try std.testing.expectEqualStrings("zask: api was killed after 1 restarts in a row; not restarting it", ctx.notes.items[0]);
+}
+
+test "failure_restart.tick: a stop during the delay clears the wait record" {
+    var project = try testApi(1000, 3);
+    defer project.deinit();
+    var ctx: TestContext = .{};
+    defer ctx.deinit();
+    ctx.crash(1, .{ .failed = 2 });
+    try project.tick(&ctx);
+    const waiting = ctx.record;
+
+    ctx.mark = .stopped;
+    try project.tick(&ctx);
+
+    try std.testing.expect(waiting != null);
+    try std.testing.expectEqual(@as(?recovery.Record, null), ctx.record);
+}
+
+test "failure_restart.tick: records an unreadable stop as unconfirmed" {
+    var project = try testApi(0, 3);
+    defer project.deinit();
+    var ctx: TestContext = .{ .mark = .unavailable };
+    defer ctx.deinit();
+    ctx.crash(1, .{ .failed = 1 });
+
+    try project.tick(&ctx);
+
+    try std.testing.expectEqual(recovery.Kind.unconfirmed, ctx.record.?.kind);
+    try std.testing.expectEqual(@as(?i64, 100), ctx.record.?.pid);
+}
+
+test "failure_restart.tick: keeps recovering when the record or note cannot be written" {
+    var project = try testApi(0, 1);
+    defer project.deinit();
+    var ctx: TestContext = .{ .fail_record = true, .fail_note = true };
+    defer ctx.deinit();
+    ctx.crash(1, .{ .failed = 1 });
+    try project.tick(&ctx);
+    ctx.crash(1, .{ .failed = 1 });
+
+    try project.tick(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 1), ctx.recovers.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, project.written(), "Warning: the monitor cannot show recovery of api: CommandFailed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, project.written(), "Warning: could not note this in the api log: AccessDenied") != null);
+}
+
+test "failure_restart.tick: keeps recovering when the service lock cannot be held" {
+    var project = try testApi(0, 2);
+    defer project.deinit();
+    var ctx: TestContext = .{ .fail_lock = true };
+    defer ctx.deinit();
+    ctx.crash(1, .{ .failed = 1 });
+
+    try project.tick(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 1), ctx.recovers.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, project.written(), "Warning: the monitor cannot show recovery of api: AccessDenied") != null);
 }
 
 test "failure_restart.writeSupervised: lists policy per service" {

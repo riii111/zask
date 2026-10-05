@@ -5,6 +5,7 @@ const keys = @import("keys.zig");
 const log_popup = @import("../../workflow/log_popup.zig");
 const observations = @import("../../model/observations.zig");
 const proc_runner = @import("../../platform/runner.zig");
+const recovery = @import("../../model/recovery.zig");
 const selection_state = @import("selection.zig");
 const service_observation = @import("../../workflow/service_observation.zig");
 const session_layout = @import("../../workflow/session_layout.zig");
@@ -19,6 +20,7 @@ const Selection = selection_state.Selection;
 const monitor_name_width = 12;
 const monitor_port_width = 8;
 const monitor_status_width = 8;
+const monitor_recovery_width = 11;
 const monitor_log_width = 35;
 const refresh_interval_ms = 1000;
 // How long a lone ESC waits for the rest of an arrow-key sequence. Only a
@@ -406,6 +408,7 @@ const MonitorRow = struct {
     port: []const u8,
     /// Last non-empty pane line; only captured for rows that are not live.
     log: []const u8 = "",
+    recovery: recovery.View = .not_configured,
 
     fn selectionKey(self: MonitorRow) []const u8 {
         return if (self.kind == .docker) docker_selection_key else self.name;
@@ -431,7 +434,11 @@ fn observeSnapshot(ctx: RenderContext) !Snapshot {
     if (ctx.cfg.dockerEnabled()) try rows.append(ctx.gpa, try dockerMonitorRow(ctx));
     for (try ctx.cfg.services()) |service| try rows.append(ctx.gpa, try serviceMonitorRow(ctx, service));
     for (rows.items) |*row| {
-        if (row.status != .live) row.log = try lastLogLine(ctx, row.name);
+        if (row.status != .live) {
+            row.log = try lastLogLine(ctx, row.name);
+        } else if (row.recovery == .restarted) {
+            row.log = try restartReason(ctx.gpa, row.recovery.restarted);
+        }
     }
     return .{ .rows = try rows.toOwnedSlice(ctx.gpa), .mode = mode };
 }
@@ -530,7 +537,11 @@ fn writeFrame(gpa: std.mem.Allocator, writer: *std.Io.Writer, cfg: config.Config
     var live_count: usize = 0;
     var warn_count: usize = 0;
     var dead_count: usize = 0;
-    for (snapshot.rows) |row| countMonitorRow(row, &live_count, &warn_count, &dead_count);
+    var recovery_column = false;
+    for (snapshot.rows) |row| {
+        countMonitorRow(row, &live_count, &warn_count, &dead_count);
+        if (row.recovery != .not_configured) recovery_column = true;
+    }
     var lines: LineWriter = .{ .writer = writer };
     if (layout.title) {
         try lines.begin();
@@ -559,7 +570,7 @@ fn writeFrame(gpa: std.mem.Allocator, writer: *std.Io.Writer, cfg: config.Config
         const range = rowWindow(visible.items.len, selected_index, layout.row_capacity);
         for (visible.items[range.start..range.end], range.start..) |row, i| {
             try lines.begin();
-            try writeMonitorRow(writer, row, selected_index == i);
+            try writeMonitorRow(writer, row, selected_index == i, recovery_column);
         }
     }
 
@@ -642,12 +653,14 @@ fn rowWindow(count: usize, selected: ?usize, capacity: usize) RowRange {
 
 fn serviceMonitorRow(ctx: RenderContext, service: std.json.Value) !MonitorRow {
     const observation = try observer(ctx).observeService(service);
+    const policy = try config.Config.serviceRestartOnFailure(service);
     return .{
         .name = try config.Config.serviceName(service),
         .status = serviceMonitorStatus(observation),
         .exit_code = observation.pane.exit_code,
         .command = observation.pane.command,
         .port = if (observation.port) |p| try std.fmt.allocPrint(ctx.gpa, ":{d}", .{p}) else "no check",
+        .recovery = recovery.view(if (policy) |value| value.max_retries else null, observation.pane.state, observation.pane.processId(), observation.pane.recovery),
     };
 }
 
@@ -696,7 +709,9 @@ fn dockerMonitorStatus(observation: observations.DockerObservation) MonitorStatu
     };
 }
 
-fn writeMonitorRow(writer: *std.Io.Writer, row: MonitorRow, selected: bool) !void {
+/// `recovery_column` is set when any row has `restart_on_failure`, so
+/// projects without it keep the narrower row.
+fn writeMonitorRow(writer: *std.Io.Writer, row: MonitorRow, selected: bool, recovery_column: bool) !void {
     const color = row.status.color();
     if (selected) try writer.print("{s}>{s} ", .{ ansi.bold, ansi.reset }) else try writer.writeAll("  ");
     try writer.print("{s}{s}{s} ", .{ color, row.status.icon(), ansi.reset });
@@ -708,7 +723,38 @@ fn writeMonitorRow(writer: *std.Io.Writer, row: MonitorRow, selected: bool) !voi
     try writer.print("{s} {s}", .{ ansi.reset, color });
     try ansi.writePadded(writer, row.status.summary(row.exit_code), monitor_status_width);
     try writer.print("{s}", .{ansi.reset});
+    if (recovery_column) {
+        var buffer: [64]u8 = undefined;
+        const cell = recoveryCell(row.recovery, &buffer);
+        try writer.print(" {s}", .{cell.color});
+        try ansi.writePadded(writer, cell.text, monitor_recovery_width);
+        try writer.print("{s}", .{ansi.reset});
+    }
     if (row.log.len > 0) try writer.print(" {s}│{s} {s}", .{ ansi.dim, ansi.reset, ansi.truncate(row.log, monitor_log_width) });
+}
+
+/// Short enough for the log column, so the exit status is never cut off.
+fn restartReason(gpa: std.mem.Allocator, record: recovery.Record) ![]const u8 {
+    return switch (record.exit) {
+        .failed => |status| std.fmt.allocPrint(gpa, "restarted after exit {d}", .{status}),
+        .clean, .interrupted, .killed => "restarted after a kill signal",
+    };
+}
+
+const RecoveryCell = struct { text: []const u8, color: []const u8 };
+
+/// Counts are the restart attempt, as in the `zask-watch` messages and the
+/// notice the service log gets: `wait` is the attempt waiting for its delay,
+/// `limit` means zask gave up after that many. `text` borrows `buffer`.
+fn recoveryCell(view: recovery.View, buffer: []u8) RecoveryCell {
+    return switch (view) {
+        .not_configured => .{ .text = "", .color = "" },
+        .unknown => .{ .text = "↻ ?", .color = ansi.dim },
+        .none => |max| .{ .text = std.fmt.bufPrint(buffer, "↻ 0/{d}", .{max}) catch "↻", .color = ansi.dim },
+        .restarted => |record| .{ .text = std.fmt.bufPrint(buffer, "↻ {d}/{d}", .{ record.attempt, record.max_retries }) catch "↻", .color = ansi.yellow },
+        .waiting => |record| .{ .text = std.fmt.bufPrint(buffer, "↻ {d}/{d} wait", .{ record.attempt, record.max_retries }) catch "↻ wait", .color = ansi.cyan },
+        .gave_up => |record| .{ .text = std.fmt.bufPrint(buffer, "↻ {d}/{d} limit", .{ record.attempt, record.max_retries }) catch "↻ limit", .color = ansi.red },
+    };
 }
 
 fn lastLogLine(ctx: RenderContext, window: []const u8) ![]const u8 {
@@ -1239,6 +1285,122 @@ test "monitor.observeSnapshot: reads filter mode and captures logs only for rows
     try std.testing.expectEqual(MonitorStatus.dead, snapshot.rows[1].status);
     try std.testing.expectEqualStrings("panic: boom", snapshot.rows[1].log);
     try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "monitor.service: reads recovery only for the run it describes" {
+    const cases = [_]struct {
+        name: []const u8,
+        service: []const u8 = "{\"name\":\"api\",\"dir\":\"api\",\"command\":\"serve\",\"restart_on_failure\":{}}",
+        pane: []const u8,
+        want: std.meta.Tag(recovery.View),
+    }{
+        .{ .name = "not configured", .service = "{\"name\":\"api\",\"dir\":\"api\",\"command\":\"serve\"}", .pane = "1|1|100|node|900||gave_up,100,3,3,1\n", .want = .not_configured },
+        .{ .name = "no recovery yet", .pane = "0||100|node|900||\n", .want = .none },
+        .{ .name = "recovered run", .pane = "0||200|node|900||restarted,,2,3,1\n", .want = .restarted },
+        .{ .name = "gave up", .pane = "1|1|100|node|900||gave_up,100,3,3,1\n", .want = .gave_up },
+        .{ .name = "gave up on an earlier run", .pane = "1|1|200|node|900||gave_up,100,3,3,1\n", .want = .none },
+        .{ .name = "unreadable record", .pane = "0||100|node|900||gave_up\n", .want = .unknown },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("case: {s}\n", .{case.name});
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const json = try std.fmt.allocPrint(arena.allocator(),
+            \\{{"project":{{"name":"demo","root":"/tmp/demo"}},"groups":[{{"name":"backend","services":[{s}]}}]}}
+        , .{case.service});
+        var recorder = proc_runner.Recorder.init(arena.allocator());
+        defer recorder.deinit();
+        try recorder.enqueue(case.pane, "", .{ .exited = 0 });
+        const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+        const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+        const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+
+        const row = try serviceMonitorRow(ctx, (try cfg.services())[0]);
+
+        try std.testing.expectEqual(case.want, std.meta.activeTag(row.recovery));
+    }
+}
+
+test "monitor.observeSnapshot: shows why a live service was restarted" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve","restart_on_failure":{}}]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||200|node|900||restarted,,2,3,137\n", "", .{ .exited = 0 });
+    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+
+    const snapshot = try observeSnapshot(ctx);
+
+    try std.testing.expectEqual(MonitorStatus.live, snapshot.rows[0].status);
+    try std.testing.expectEqualStrings("restarted after exit 137", snapshot.rows[0].log);
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "monitor.render: keeps the restart reason whole in the log column" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const reasons = [_][]const u8{
+        try restartReason(gpa, .{ .kind = .restarted, .attempt = 3, .max_retries = 3, .exit = .{ .failed = 4294967295 } }),
+        try restartReason(gpa, .{ .kind = .restarted, .attempt = 3, .max_retries = 3, .exit = .killed }),
+    };
+
+    for (reasons) |reason| {
+        var row = testRow("a-very-long-service-name", .live);
+        row.recovery = .{ .restarted = .{ .kind = .restarted, .attempt = 3, .max_retries = 3, .exit = .killed } };
+        row.log = reason;
+        const rows = [_]MonitorRow{row};
+
+        const body = try testRender(gpa, .{ .rows = &rows }, .{});
+
+        try std.testing.expect(std.mem.indexOf(u8, body, reason) != null);
+    }
+}
+
+test "monitor.recoveryCell: labels each recovery state apart" {
+    const record: recovery.Record = .{ .kind = .restarted, .attempt = 2, .max_retries = 3, .exit = .{ .failed = 1 } };
+    const cases = [_]struct { view: recovery.View, text: []const u8 }{
+        .{ .view = .not_configured, .text = "" },
+        .{ .view = .unknown, .text = "↻ ?" },
+        .{ .view = .{ .none = 3 }, .text = "↻ 0/3" },
+        .{ .view = .{ .restarted = record }, .text = "↻ 2/3" },
+        .{ .view = .{ .waiting = record }, .text = "↻ 2/3 wait" },
+        .{ .view = .{ .gave_up = record }, .text = "↻ 2/3 limit" },
+    };
+
+    for (cases) |case| {
+        var buffer: [64]u8 = undefined;
+        const cell = recoveryCell(case.view, &buffer);
+        try std.testing.expectEqualStrings(case.text, cell.text);
+        try std.testing.expect(ansi.displayWidth(cell.text) <= monitor_recovery_width);
+    }
+}
+
+test "monitor.render: adds the recovery column only when a service has restart_on_failure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var gave_up = testRow("worker", .dead);
+    gave_up.recovery = .{ .gave_up = .{ .kind = .gave_up, .pid = 1, .attempt = 3, .max_retries = 3, .exit = .{ .failed = 1 } } };
+    gave_up.log = "panic: boom";
+    const with = [_]MonitorRow{ testRow("api", .live), gave_up };
+    const without = [_]MonitorRow{ testRow("api", .live), testRow("web", .dead) };
+
+    const shown = try testRender(arena.allocator(), .{ .rows = &with }, .{});
+    const hidden = try testRender(arena.allocator(), .{ .rows = &without }, .{});
+
+    try std.testing.expect(std.mem.indexOf(u8, shown, "↻ 3/3 limit") != null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "panic: boom") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hidden, "↻") == null);
 }
 
 test "monitor.Layout.fit: drops fixed lines before the selected row" {

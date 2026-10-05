@@ -283,6 +283,25 @@ starts the count over. A service that
 exits with status 0 or is stopped with `zask stop`, Ctrl-C in its window, or
 `zask close` is not restarted.
 
+The monitor shows recovery in its own column for each service with
+`restart_on_failure`. The count is the restart attempt, as in the messages
+above, and only describes the current run: a later start by `zask start`,
+`zask restart`, or a file change clears it, and `zask close` clears all of it.
+
+| Column | Meaning |
+| --- | --- |
+| `↻ 0/3` | Recovery is on and has not restarted the current run |
+| `↻ 2/3` | The current run is the second restart; the row shows why |
+| `↻ 2/3 wait` | The service failed and the second restart waits for `delay_ms` |
+| `↻ 3/3 limit` | The service failed after 3 restarts in a row and stays stopped |
+| `↻ ?` | tmux or the recovery state could not be read, or zask could not tell whether the service was stopped |
+
+A stopped or cleanly exited service shows `↻ 0/3` with its usual status.
+The [service log](#service-logs) keeps the same history: each restart prints
+its reason and attempt at the start of the new run, and giving up adds a
+`zask: <service> ... not restarting it` line after the output of the run that
+failed last.
+
 [`schema/zask.schema.json`](schema/zask.schema.json) describes the config for
 editors that support JSON Schema. Point a top-level `"$schema"` key at it to get
 completion, descriptions, and diagnostics for keys, types, and allowed values,
@@ -311,6 +330,8 @@ read with `grep` or an editor after `zask close`.
   stays readable.
 - When the log has reached 8 MiB at a start, it moves to `<service>.log.1`,
   replacing the older one, and a new log begins.
+- Logging ends when the foreground service command finishes. Commands should
+  keep their service in the foreground rather than leave background children.
 - The log keeps the output as the terminal received it, including color codes
   and `\r\n` line endings.
 - Logs may contain secrets, so the logs directory and the log files are made
@@ -342,7 +363,8 @@ Docker Compose output is not saved.
 
 ## Requirements
 
-- tmux
+- tmux (3.3 or newer for log popups)
+- `less` for log popups
 - Zig 0.16.0 to build from source
 - Docker with Docker Compose, when the config has a `docker` section
 
