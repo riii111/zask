@@ -503,7 +503,7 @@ test "cli.version: prints package version" {
     var writer: std.Io.Writer = .fixed(&buffer);
 
     try runWithArgs(.{ .gpa = std.testing.allocator }, &.{"version"}, &writer);
-    try std.testing.expectEqualStrings("zask 0.1.3\n", writer.buffered());
+    try std.testing.expectEqualStrings("zask 0.2.0\n", writer.buffered());
 }
 
 test "cli.help: prints public commands" {
