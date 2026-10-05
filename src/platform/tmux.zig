@@ -82,6 +82,44 @@ pub const Client = struct {
         return try clients.toOwnedSlice(self.gpa);
     }
 
+    /// Caller owns the returned name. The most recently active client of the
+    /// session whose current pane is `pane_id`, i.e. the one whose keys reach
+    /// that pane; null when no client shows it or the session is gone.
+    /// error.TmuxUnavailable when tmux cannot run or its socket is unusable.
+    pub fn clientShowingPane(self: Client, pane_id: []const u8) !?[]const u8 {
+        const session_target = try self.sessionTarget();
+        defer self.gpa.free(session_target);
+        const run_result = self.runner.run(&.{ self.tmux_path, "list-clients", "-t", session_target, "-F", "#{client_activity}|#{pane_id}|#{client_name}" }, .{}) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return error.TmuxUnavailable,
+        };
+        const result = runner.captured(run_result);
+        defer self.gpa.free(result.stdout);
+        defer self.gpa.free(result.stderr);
+        if (result.term != .exited) return error.TmuxUnavailable;
+        if (result.term.exited != 0) return if (serverUnavailable(result.stderr)) error.TmuxUnavailable else null;
+
+        // Strict parse: the format is fixed here, so a malformed line is a
+        // contract violation. The name is last because tty paths may hold '|'.
+        var best: ?[]const u8 = null;
+        var best_activity: u64 = 0;
+        var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+        while (lines.next()) |line| {
+            if (line.len == 0) continue;
+            var fields = std.mem.splitScalar(u8, line, '|');
+            const activity = std.fmt.parseUnsigned(u64, fields.next().?, 10) catch return error.InvalidClientListOutput;
+            const pane = fields.next() orelse return error.InvalidClientListOutput;
+            const name = fields.rest();
+            if (name.len == 0) return error.InvalidClientListOutput;
+            if (!std.mem.eql(u8, pane, pane_id)) continue;
+            if (best == null or activity > best_activity) {
+                best = name;
+                best_activity = activity;
+            }
+        }
+        return if (best) |name| try self.gpa.dupe(u8, name) else null;
+    }
+
     pub fn windowExists(self: Client, window: []const u8) bool {
         return self.observeWindow(window) == .present;
     }
@@ -378,6 +416,29 @@ pub const Client = struct {
 
     pub fn chooseTree(self: Client, pane_id: []const u8) !void {
         _ = try self.runner.run(&.{ self.tmux_path, "choose-tree", "-Zw", "-t", pane_id }, .{ .check = true, .discard = true });
+    }
+
+    /// Shows `command` in a popup on `client_name` and blocks until the popup
+    /// closes. The client is always named: left to itself, tmux falls back to a
+    /// client of another session when this one has none attached. The popup closes by itself only when
+    /// `command` succeeds, so a failing command leaves its message on screen.
+    /// error.PopupUnavailable when tmux rejects the popup (the client is gone,
+    /// tmux older than 3.3); error.TmuxUnavailable when tmux cannot run.
+    pub fn displayPopup(self: Client, client_name: []const u8, title: []const u8, command: []const u8) !void {
+        const run_result = self.runner.run(&.{ self.tmux_path, "display-popup", "-c", client_name, "-EE", "-w", "90%", "-h", "80%", "-T", title, command }, .{}) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return error.TmuxUnavailable,
+        };
+        const result = runner.captured(run_result);
+        defer self.gpa.free(result.stdout);
+        defer self.gpa.free(result.stderr);
+        if (result.term != .exited) return error.TmuxUnavailable;
+        if (result.term.exited == 0) return;
+        // tmux exits with the popup command's status once the popup ran (129
+        // when it is closed from outside), and only prints on stderr when it
+        // refused the popup, so an empty stderr still means it was shown.
+        if (std.mem.trim(u8, result.stderr, " \t\r\n").len == 0) return;
+        return if (serverUnavailable(result.stderr)) error.TmuxUnavailable else error.PopupUnavailable;
     }
 
     // `=` makes tmux accept only exact session and window names. Without it a
@@ -1203,6 +1264,109 @@ test "tmux.captureRecentLines: reports query failures as errors" {
         const client = testClient(&recorder);
 
         try std.testing.expectError(case.expected, client.captureRecentLines("api", 100));
+    }
+}
+
+test "tmux.displayPopup: targets the client and keeps failed commands on screen" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const client = testClient(&recorder);
+
+    try client.displayPopup("/dev/pts/1", " api ", "less file");
+
+    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "display-popup", "-c", "/dev/pts/1", "-EE", "-w", "90%", "-h", "80%", "-T", " api ", "less file" });
+}
+
+test "tmux.displayPopup: a popup command's own exit status is not a failure" {
+    const statuses = [_]u8{ 1, 127, 129 };
+    for (statuses) |status| {
+        var recorder = runner.Recorder.init(std.testing.allocator);
+        defer recorder.deinit();
+        try recorder.enqueue("", "", .{ .exited = status });
+        const client = testClient(&recorder);
+
+        try client.displayPopup("/dev/pts/1", " api ", "less file");
+    }
+}
+
+test "tmux.displayPopup: reports rejected popups apart from tmux failures" {
+    const cases = [_]struct {
+        name: []const u8,
+        term: ?std.process.Child.Term,
+        stderr: []const u8 = "",
+        spawn_error: ?anyerror = null,
+        expected: anyerror,
+    }{
+        .{ .name = "client gone", .term = .{ .exited = 1 }, .stderr = "can't find client: /dev/pts/1", .expected = error.PopupUnavailable },
+        .{ .name = "old tmux", .term = .{ .exited = 1 }, .stderr = "unknown command: display-popup", .expected = error.PopupUnavailable },
+        .{ .name = "permission denied", .term = .{ .exited = 1 }, .stderr = "error connecting to /tmp/tmux-501/default (Permission denied)", .expected = error.TmuxUnavailable },
+        .{ .name = "signaled", .term = .{ .signal = @enumFromInt(9) }, .expected = error.TmuxUnavailable },
+        .{ .name = "spawn error", .term = null, .spawn_error = error.FileNotFound, .expected = error.TmuxUnavailable },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("case: {s}\n", .{case.name});
+        var recorder = runner.Recorder.init(std.testing.allocator);
+        defer recorder.deinit();
+        if (case.spawn_error) |err| try recorder.enqueueError(err) else try recorder.enqueue("", case.stderr, case.term.?);
+        const client = testClient(&recorder);
+
+        try std.testing.expectError(case.expected, client.displayPopup("/dev/pts/1", " api ", "less file"));
+    }
+}
+
+test "tmux.clientShowingPane: picks the most recently active client on the pane" {
+    const cases = [_]struct {
+        name: []const u8,
+        stdout: []const u8,
+        expected: ?[]const u8,
+    }{
+        .{ .name = "latest of two", .stdout = "100|%3|/dev/pts/1\n300|%3|/dev/pts/2\n200|%3|/dev/pts/3\n", .expected = "/dev/pts/2" },
+        .{ .name = "other pane ignored", .stdout = "900|%7|/dev/pts/1\n100|%3|/dev/pts/2\n", .expected = "/dev/pts/2" },
+        .{ .name = "name with separator", .stdout = "100|%3|/tmp/a|b\n", .expected = "/tmp/a|b" },
+        .{ .name = "no client on pane", .stdout = "900|%7|/dev/pts/1\n", .expected = null },
+        .{ .name = "no client", .stdout = "", .expected = null },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("case: {s}\n", .{case.name});
+        var recorder = runner.Recorder.init(std.testing.allocator);
+        defer recorder.deinit();
+        try recorder.enqueue(case.stdout, "", .{ .exited = 0 });
+        const client = testClient(&recorder);
+
+        const name = try client.clientShowingPane("%3");
+        defer if (name) |owned| std.testing.allocator.free(owned);
+
+        try std.testing.expectEqualDeep(case.expected, name);
+        try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "list-clients", "-t", "=demo:", "-F", "#{client_activity}|#{pane_id}|#{client_name}" });
+    }
+}
+
+test "tmux.clientShowingPane: reports failures apart from a missing session" {
+    const cases = [_]struct {
+        name: []const u8,
+        term: ?std.process.Child.Term,
+        stdout: []const u8 = "",
+        stderr: []const u8 = "",
+        spawn_error: ?anyerror = null,
+        expected: anyerror!?[]const u8,
+    }{
+        .{ .name = "missing session", .term = .{ .exited = 1 }, .stderr = "can't find session: demo", .expected = null },
+        .{ .name = "permission denied", .term = .{ .exited = 1 }, .stderr = "error connecting to /tmp/tmux-501/default (Permission denied)", .expected = error.TmuxUnavailable },
+        .{ .name = "spawn error", .term = null, .spawn_error = error.FileNotFound, .expected = error.TmuxUnavailable },
+        .{ .name = "malformed line", .term = .{ .exited = 0 }, .stdout = "%3|/dev/pts/1\n", .expected = error.InvalidClientListOutput },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("case: {s}\n", .{case.name});
+        var recorder = runner.Recorder.init(std.testing.allocator);
+        defer recorder.deinit();
+        if (case.spawn_error) |err| try recorder.enqueueError(err) else try recorder.enqueue(case.stdout, case.stderr, case.term.?);
+        const client = testClient(&recorder);
+
+        try std.testing.expectEqualDeep(case.expected, client.clientShowingPane("%3"));
     }
 }
 

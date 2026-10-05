@@ -7,6 +7,7 @@ const file_watch = @import("file_watch.zig");
 const lifecycle_mod = @import("lifecycle.zig");
 const lock = @import("../platform/lock.zig");
 const log_reader = @import("../platform/log_reader.zig");
+const log_popup = @import("log_popup.zig");
 const observations = @import("../model/observations.zig");
 const paths = @import("../platform/paths.zig");
 const pathing = @import("pathing.zig");
@@ -178,6 +179,20 @@ pub const Runtime = struct {
         defer self.gpa.free(path);
         try out.print("{s}\n", .{path});
         try out.flush();
+    }
+
+    /// Pages the recent lines of `window` in a tmux popup over the caller's
+    /// client and returns once it closes. The caller (the monitor) keeps its
+    /// own pane; nothing is selected, attached, or started.
+    pub fn showLogPopup(self: Runtime, window: []const u8, label: []const u8) !log_popup.Outcome {
+        const scratch_dir = try paths.runtimeBase(self.gpa, self.environ);
+        defer self.gpa.free(scratch_dir);
+        return log_popup.show(self.gpa, self.io, self.tmux(), .{
+            .window = window,
+            .label = label,
+            .pane = env.get(self.environ, "TMUX_PANE"),
+            .scratch_dir = scratch_dir,
+        });
     }
 
     pub fn previewList(self: Runtime, pane_id: []const u8, client_width: u16, client_height: u16) !void {

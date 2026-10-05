@@ -20,6 +20,7 @@ pub const file_watch = @import("workflow/file_watch.zig");
 pub const lock = @import("platform/lock.zig");
 pub const log_file = @import("platform/log_file.zig");
 pub const log_reader = @import("platform/log_reader.zig");
+pub const log_popup = @import("workflow/log_popup.zig");
 pub const observations = @import("model/observations.zig");
 pub const phases = @import("workflow/phases.zig");
 pub const paths = @import("platform/paths.zig");

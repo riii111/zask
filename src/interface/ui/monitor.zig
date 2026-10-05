@@ -2,6 +2,7 @@ const std = @import("std");
 const ansi = @import("ansi.zig");
 const config = @import("../../model/config.zig");
 const keys = @import("keys.zig");
+const log_popup = @import("../../workflow/log_popup.zig");
 const observations = @import("../../model/observations.zig");
 const proc_runner = @import("../../platform/runner.zig");
 const selection_state = @import("selection.zig");
@@ -23,7 +24,7 @@ const refresh_interval_ms = 1000;
 // How long a lone ESC waits for the rest of an arrow-key sequence. Only a
 // bare ESC is delayed by this, and the monitor binds no action to it.
 const escape_timeout_ms = 250;
-const action_guide = "⏎ go  s start  x stop  r restart";
+const action_guide = "⏎ go  s start  x stop  r restart  l logs";
 const key_guide = "j/k ↑↓ select  f filter  q quit";
 
 /// Runs until `q` / Ctrl+C or the terminal closes. Leaving restores the
@@ -58,6 +59,7 @@ const Action = union(enum) {
     quit,
     select: selection_state.Direction,
     toggle_filter,
+    show_logs,
     operate: Operation,
 };
 
@@ -108,6 +110,7 @@ fn actionForKey(key: keys.Key) Action {
             's' => .{ .operate = .start },
             'x' => .{ .operate = .stop },
             'r' => .{ .operate = .restart },
+            'l' => .show_logs,
             'f' => .toggle_filter,
             'q' => .quit,
             else => .none,
@@ -215,6 +218,7 @@ const Monitor = struct {
             },
             .toggle_filter => self.toggleFilter(),
             .operate => |operation| try self.operate(writer, operation),
+            .show_logs => try self.showLogs(),
         }
         return .keep;
     }
@@ -256,6 +260,41 @@ const Monitor = struct {
             if (std.mem.startsWith(u8, trimmed, "Warning:")) notice.print("; {s}", .{trimmed}) catch {};
         }
         self.notice = notice.buffered();
+    }
+
+    /// Blocks while the popup is open; tmux restores this pane when it closes.
+    /// Keys typed before the popup took over, such as a repeated `l`, are
+    /// dropped so the popup does not reopen.
+    fn showLogs(self: *Monitor) !void {
+        const target = selectedTarget(self.snapshot, self.selection) orelse {
+            self.notice = "no service selected";
+            return;
+        };
+        var scratch = std.heap.ArenaAllocator.init(self.gpa);
+        defer scratch.deinit();
+        const window = switch (target.kind) {
+            .service => target.name,
+            .docker => session_layout.docker_window,
+        };
+        const outcome = self.runtime.withAllocator(scratch.allocator()).showLogPopup(window, target.name) catch |err| {
+            self.setNotice("logs {s} failed: {s}", .{ target.name, @errorName(err) });
+            return;
+        };
+        self.notice = null;
+        switch (outcome) {
+            .shown => {},
+            .empty => self.setNotice("{s} has no log output yet", .{target.name}),
+            .outside_tmux => self.notice = "log popup unavailable: monitor is not in tmux",
+            .no_client => self.notice = "log popup unavailable: no client shows the monitor",
+            .window_missing => self.setNotice("logs {s}: window not found", .{target.name}),
+            .tmux_unavailable => self.notice = "log popup failed: tmux unavailable",
+            .popup_unavailable => self.notice = "log popup unavailable: needs tmux 3.3+",
+        }
+
+        terminal.discardInput(terminal.stdin);
+        self.input = .{};
+        self.pending_since = null;
+        try self.refresh();
     }
 
     /// Text that does not fit in `notice_buffer` is cut off.
@@ -1031,6 +1070,7 @@ test "monitor.actionForKey: maps keys to monitor actions" {
         .{ .key = .{ .char = 's' }, .expected = .{ .operate = .start } },
         .{ .key = .{ .char = 'x' }, .expected = .{ .operate = .stop } },
         .{ .key = .{ .char = 'r' }, .expected = .{ .operate = .restart } },
+        .{ .key = .{ .char = 'l' }, .expected = .show_logs },
         .{ .key = .{ .char = 'f' }, .expected = .toggle_filter },
         .{ .key = .{ .char = 'q' }, .expected = .quit },
         .{ .key = .ctrl_c, .expected = .quit },

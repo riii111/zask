@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zask = @import("zask");
 const build_options = @import("tmux_integration_options");
 
@@ -906,6 +907,137 @@ test "monitor: keys move selection, toggle the filter, and quit restores the ter
     try expectPaneAlive(gpa, io, target);
 }
 
+test "monitor: l pages recent logs in a popup and returns to the monitor" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-log-popup", .{std.c.getpid()});
+    const client = tmuxClient(gpa, io, session);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "zask.json",
+        .data = try std.fmt.allocPrint(gpa,
+            \\{{
+            \\  "project": {{"name":"{s}","root":"."}},
+            \\  "groups": [{{"name":"backend","services":[
+            \\    {{"name":"api","dir":".","command":"/bin/sleep 60"}},
+            \\    {{"name":"web","dir":".","command":"/bin/sleep 60"}}
+            \\  ]}}]
+            \\}}
+        , .{session}),
+    });
+    const project_root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    const config_path = try std.fs.path.join(gpa, &.{ project_root, "zask.json" });
+    const runtime_dir = try std.fs.path.join(gpa, &.{ project_root, "run" });
+    const scratch_dir = try std.fs.path.join(gpa, &.{ runtime_dir, "zask" });
+    const command = try std.fmt.allocPrint(gpa, "HOME={s} XDG_RUNTIME_DIR={s} {s} --config {s} monitor; sleep 60", .{
+        try zask.shell.quote(gpa, project_root),
+        try zask.shell.quote(gpa, runtime_dir),
+        try zask.shell.quote(gpa, build_options.zask_path),
+        try zask.shell.quote(gpa, config_path),
+    });
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", project_root, command);
+    defer client.killSession() catch {};
+    try client.newWindowAfter("dashboard", "api", project_root, "printf 'booting\\npanic: boom\\n'; exec sleep 60");
+    const target = try std.fmt.allocPrint(gpa, "{s}:dashboard", .{session});
+    try waitForSelectedRow(gpa, io, target, "api");
+
+    // Detached sessions have no client to draw a popup on.
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "l" });
+    try waitForPaneText(gpa, io, target, "log popup unavailable");
+
+    var attached = try attachClient(gpa, io, session);
+    defer attached.kill(io);
+    const client_name = try waitForClient(gpa, io, session);
+
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "l" });
+    _ = try waitForScratchFile(gpa, io, scratch_dir, "booting\npanic: boom\n");
+    try expectPopupOpen(gpa, io, target);
+
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "display-popup", "-C", "-c", client_name });
+    try waitForScratchDirEmpty(io, scratch_dir);
+    // The notice clears on the redraw after the monitor drops the keys typed
+    // while it waited, so later keys are acted on again.
+    try waitForPaneTextGone(gpa, io, target, "log popup unavailable");
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "j" });
+    try waitForSelectedRow(gpa, io, target, "web");
+    try expectPaneAlive(gpa, io, target);
+}
+
+/// Attaches a real terminal client through `script`, so tmux has a client to
+/// draw popups on. The returned child must be killed by the caller.
+fn attachClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) !std.process.Child {
+    // Unset TMUX so attaching also works when the tests run inside tmux, and
+    // set TERM since the test runner may have none.
+    const attach = try std.fmt.allocPrint(gpa, "unset TMUX; export TERM=xterm-256color; exec {s} attach-session -t {s}", .{ try zask.shell.quote(gpa, build_options.tmux_path), try zask.shell.quote(gpa, session) });
+    const argv: []const []const u8 = switch (builtin.os.tag) {
+        .linux => &.{ "script", "-qfec", attach, "/dev/null" },
+        else => &.{ "script", "-q", "/dev/null", "sh", "-c", attach },
+    };
+    // A pipe that is never written keeps script's stdin open without input.
+    return std.process.spawn(io, .{ .argv = argv, .stdin = .pipe, .stdout = .ignore, .stderr = .ignore });
+}
+
+fn waitForClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) ![]const u8 {
+    for (0..service_state_attempts) |_| {
+        const result = try run(gpa, io, &.{ build_options.tmux_path, "list-clients", "-t", session, "-F", "#{client_name}" });
+        const name = std.mem.trim(u8, result.stdout, " \t\r\n");
+        if (name.len > 0) return name;
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    return error.ClientTimeout;
+}
+
+/// Returns the captured text the monitor handed to the open popup once it
+/// holds `needle`; the file can be seen between its creation and the write.
+fn waitForScratchFile(gpa: std.mem.Allocator, io: std.Io, dir_path: []const u8, needle: []const u8) ![]const u8 {
+    for (0..service_state_attempts) |_| {
+        if (std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true })) |opened| {
+            var dir = opened;
+            defer dir.close(io);
+            var entries = dir.iterate();
+            if (try entries.next(io)) |entry| {
+                const contents = dir.readFileAlloc(io, entry.name, gpa, .limited(64 * 1024)) catch |err| switch (err) {
+                    error.FileNotFound => "",
+                    else => return err,
+                };
+                if (std.mem.indexOf(u8, contents, needle) != null) return contents;
+            }
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        }
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    return error.FileTimeout;
+}
+
+fn waitForScratchDirEmpty(io: std.Io, dir_path: []const u8) !void {
+    for (0..service_state_attempts) |_| {
+        var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true });
+        defer dir.close(io);
+        var entries = dir.iterate();
+        if (try entries.next(io) == null) return;
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    return error.ScratchFileLeft;
+}
+
+/// The monitor waits on the popup, so it ignores keys sent to its pane until
+/// the popup closes.
+fn expectPopupOpen(gpa: std.mem.Allocator, io: std.Io, target: []const u8) !void {
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "j" });
+    try std.Io.sleep(io, .fromMilliseconds(300), .awake);
+    try waitForSelectedRow(gpa, io, target, "api");
+}
+
 /// Returns the file once it contains `needle`; the pane pipe writes it
 /// asynchronously.
 fn waitForFileText(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sub_path: []const u8, needle: []const u8) ![]const u8 {
@@ -1292,6 +1424,19 @@ fn waitForPaneText(gpa: std.mem.Allocator, io: std.Io, target: []const u8, needl
         defer gpa.free(result.stderr);
 
         if (std.mem.indexOf(u8, result.stdout, needle) != null) return;
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    try dumpPane(gpa, io, target);
+    return error.PaneTextTimeout;
+}
+
+fn waitForPaneTextGone(gpa: std.mem.Allocator, io: std.Io, target: []const u8, needle: []const u8) !void {
+    for (0..service_state_attempts) |_| {
+        const result = try run(gpa, io, &.{ build_options.tmux_path, "capture-pane", "-p", "-t", target });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+
+        if (std.mem.indexOf(u8, result.stdout, needle) == null) return;
         try std.Io.sleep(io, service_state_interval, .awake);
     }
     try dumpPane(gpa, io, target);
