@@ -1,5 +1,4 @@
 const std = @import("std");
-const dashboard_ui = @import("../ui/dashboard.zig");
 const Context = @import("context.zig").Context;
 
 pub const Options = struct {
@@ -16,13 +15,14 @@ pub const Options = struct {
 pub fn run(ctx: *Context, opts: Options) !void {
     _ = opts;
     const rt = try ctx.runtime();
-    try dashboard_ui.runMonitor(rt, ctx.writer);
+    // The CLI arena never frees, and this loop runs for the whole session.
+    try rt.watch(std.heap.smp_allocator, ctx.writer);
 }
 
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
-test "monitor.Options: rejects arguments" {
+test "watch.Options: rejects arguments" {
     try std.testing.expectError(error.InvalidArguments, Options.parse(&.{"extra"}));
 }

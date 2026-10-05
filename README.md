@@ -85,7 +85,10 @@ Compose detection still applies. An invalid line or duplicate name stops init
 with its `Procfile.dev:<line>` location, before any config is written.
 
 Run `zask help` for the full command list.
-`zask check` lists config mistakes and missing configured paths without opening a session.
+`zask check` lists config mistakes, missing configured paths, and environment problems without opening a session.
+The environment check looks for tmux, Docker when `docker.compose` is set, service commands in `PATH`, and service ports already taken by other processes.
+It never starts or stops anything; compound shell commands and probes that do not answer within a few seconds are listed as not verified.
+User-defined `prechecks` run only with `zask check --prechecks`, each with a 10 second limit.
 Commands exit with `1` for runtime or environment failures, and `2` for usage or config errors.
 
 zask reads `zask.json`, `.zask.json`, `zask.jsonc`, or `.zask.jsonc` from the
@@ -244,11 +247,29 @@ btrfs, XFS, or tmpfs on Linux); elsewhere zask add refuses to write.
 zask add api "cargo run" --group backend --port 8080
 ```
 
+`watch` restarts a service when files under its directory change. Patterns
+follow `.gitignore` style, and changes are batched until they pause for
+`debounce_ms`:
+
+```json
+{"name": "api", "dir": "backend", "command": "serve",
+ "watch": {"paths": ["src"], "include": ["*.go"], "exclude": ["*_test.go"]}}
+```
+
+The `zask-watch` window runs the watcher for the whole session, so it keeps
+going after you close the monitor or detach, and stops with `zask close`. It
+shows each change and restart, and the service window prints the reason before
+the command starts again. A service stopped with `zask stop` stays stopped,
+even while it is still shutting down; one stopped with Ctrl-C in its window
+stays stopped once it exits. If a service keeps changing its own watched files
+right after each restart, restarts pause until the changes stop; add those
+files to `exclude`. The service name `zask-watch` is reserved for this window.
+
 [`schema/zask.schema.json`](schema/zask.schema.json) describes the config for
 editors that support JSON Schema. Point a top-level `"$schema"` key at it to get
 completion, descriptions, and diagnostics for keys, types, and allowed values,
 in `.json` and `.jsonc` files alike; zask ignores the value. References between groups, services, and aliases,
-duplicate names, and paths that leave the project root are checked only when
+duplicate and reserved names, and paths that leave the project root are checked only when
 zask loads the config.
 
 zask carries the schema of the version you run. `zask init` writes it to
@@ -259,6 +280,29 @@ file when it differs from the running zask, so upgrading zask also updates what
 the editor checks. For a project-local `zask.json`, point `"$schema"` at that
 file or at a copy of `schema/zask.schema.json`. Configs without `$schema` keep
 working.
+## Service logs
+
+zask saves the terminal output of each service to
+`$XDG_STATE_HOME/zask/<project>/logs/<service>.log` (`~/.local/state/zask/...`
+when `XDG_STATE_HOME` is unset), so the output of a failed start can still be
+read with `grep` or an editor after `zask close`.
+
+- Every start, including a restart, appends to the log after a
+  `=== zask: <service> started at <UTC time> ===` line, so the previous run
+  stays readable.
+- When the log has reached 8 MiB at a start, it moves to `<service>.log.1`,
+  replacing the older one, and a new log begins.
+- The log keeps the output as the terminal received it, including color codes
+  and `\r\n` line endings.
+- Logs may contain secrets, so the logs directory and the log files are made
+  owner-only (`0700` / `0600`), including logs that already existed with wider
+  permissions. `<service>.log.lock` coordinates concurrent starts.
+- If the log cannot be written at start, zask warns and starts the service
+  anyway; its output then stays only in the tmux window. If writing fails
+  while the service runs (for example, a full disk), a
+  `zask: output is no longer saved to ...` line appears in the service window.
+
+Docker Compose output is not saved.
 
 ## Requirements
 

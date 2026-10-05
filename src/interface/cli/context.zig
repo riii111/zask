@@ -10,6 +10,8 @@ const proc_runner = @import("../../platform/runner.zig");
 const tmux_client = @import("../../platform/tmux.zig");
 const validate = @import("../../model/validate.zig");
 const Runtime = @import("../../workflow/runtime.zig").Runtime;
+const service_log = @import("../../workflow/service_log.zig");
+const StopMarks = @import("../../platform/stop_marks.zig").StopMarks;
 const zask_command = @import("../../workflow/zask_command.zig");
 
 pub const ConfigSource = enum {
@@ -117,6 +119,7 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
         .explicit, .discovered => {},
     }
     const runner: proc_runner.Runner = .{ .gpa = context.gpa, .io = io };
+    const stop_marks = try StopMarks.forSession(context.gpa, io, try cfg.projectName());
     return .{
         .gpa = context.gpa,
         .io = io,
@@ -128,6 +131,8 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
         .runner_impl = runner,
         .tmux_impl = tmux_client.Client{ .gpa = context.gpa, .runner = runner, .session = try cfg.projectName() },
         .docker_impl = docker_client.Compose{ .gpa = context.gpa, .runner = runner, .dir = try cfg.dockerDir(context.gpa), .file = cfg.dockerComposeFile() },
+        .service_log_dir = try service_log.directory(context.gpa, context.environ, try cfg.projectName()),
+        .stop_marks = stop_marks,
     };
 }
 
