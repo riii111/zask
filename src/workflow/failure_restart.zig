@@ -456,24 +456,34 @@ test "failure_restart.tick: leaves a clean exit stopped and reports it once" {
     try std.testing.expectEqualStrings("api exited with status 0; not restarting\n", project.written());
 }
 
-test "failure_restart.tick: a stop during the delay cancels the restart" {
-    var project = try testApi(1000, 3);
-    defer project.deinit();
-    var ctx: TestContext = .{};
-    defer ctx.deinit();
-    ctx.crash(1, .{ .failed = 2 });
-    try project.tick(&ctx);
-    const waiting = ctx.record;
+test "failure_restart.tick: a stop during the delay cancels the restart and clears the wait record" {
+    const cases = [_]struct { name: []const u8, observed_after_ms: i96 }{
+        .{ .name = "observed before the delay ends", .observed_after_ms = 0 },
+        .{ .name = "observed after the delay ends", .observed_after_ms = 2000 },
+    };
 
-    ctx.mark = .stopped;
-    ctx.now_ns += 2 * std.time.ns_per_s;
-    try project.tick(&ctx);
-    try project.tick(&ctx);
+    for (cases) |case| {
+        errdefer std.debug.print("case: {s}\n", .{case.name});
+        var project = try testApi(1000, 3);
+        defer project.deinit();
+        var ctx: TestContext = .{};
+        defer ctx.deinit();
+        ctx.crash(1, .{ .failed = 2 });
+        try project.tick(&ctx);
+        const waiting = ctx.record;
 
-    try std.testing.expect(waiting != null);
-    try std.testing.expectEqual(@as(?recovery.Record, null), ctx.record);
-    try std.testing.expectEqual(@as(usize, 0), ctx.recovers.items.len);
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, project.written(), "api was stopped; not restarting"));
+        ctx.mark = .stopped;
+        ctx.now_ns += case.observed_after_ms * std.time.ns_per_ms;
+        try project.tick(&ctx);
+        const after_stop = ctx.record;
+        ctx.now_ns += 2 * std.time.ns_per_s;
+        try project.tick(&ctx);
+
+        try std.testing.expect(waiting != null);
+        try std.testing.expectEqual(@as(?recovery.Record, null), after_stop);
+        try std.testing.expectEqual(@as(usize, 0), ctx.recovers.items.len);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, project.written(), "api was stopped; not restarting"));
+    }
 }
 
 test "failure_restart.tick: does not restart stopped, missing, or unreadable services" {
