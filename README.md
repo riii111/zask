@@ -1,6 +1,6 @@
 # zask
 
-![dashboard](https://github.com/user-attachments/assets/47a720b8-bf98-4b92-ac51-4fee14fc79e7)
+![zask demo](assets/demo.gif)
 
 A tmux-native process manager for local development, written in Zig.
 
@@ -17,8 +17,6 @@ predictable tmux windows, and commands that operate on the processes you
 actually use while coding.
 
 ## Features
-
-![switch pane](https://github.com/user-attachments/assets/64214681-3a0d-4d15-ac01-c3d26671d70a)
 
 - Keep services in a persistent tmux session, with a dashboard and live monitor.
 - Start and stop one service, a group, Docker, or the whole workspace.
