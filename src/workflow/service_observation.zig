@@ -124,12 +124,14 @@ test "observer.service: maps probe results of a running service to health" {
     const cases = [_]struct {
         name: []const u8,
         service: []const u8,
+        shell_child: bool = false,
         probes: []const TestProbe,
         listen: observations.ProbeObservation,
         http: observations.ProbeObservation,
         health: observations.HealthObservation,
     }{
         .{ .name = "tcp ready", .service = tcp, .probes = &.{.{ .exit = 0 }}, .listen = .passed, .http = .not_configured, .health = .ready },
+        .{ .name = "shell with a child", .service = tcp, .shell_child = true, .probes = &.{.{ .exit = 0 }}, .listen = .passed, .http = .not_configured, .health = .ready },
         .{ .name = "tcp waiting", .service = tcp, .probes = &.{.{ .exit = 1 }}, .listen = .failed, .http = .not_configured, .health = .waiting },
         .{ .name = "nc missing", .service = tcp, .probes = &.{.spawn_error}, .listen = .unavailable, .http = .not_configured, .health = .unavailable },
         .{ .name = "http ready", .service = http, .probes = &.{ .{ .exit = 0 }, .{ .exit = 0 } }, .listen = .passed, .http = .passed, .health = .ready },
@@ -144,7 +146,12 @@ test "observer.service: maps probe results of a running service to health" {
         defer arena.deinit();
         var recorder = proc_runner.Recorder.init(arena.allocator());
         defer recorder.deinit();
-        try recorder.enqueue("0||12345|node|900\n", "", .{ .exited = 0 });
+        if (case.shell_child) {
+            try recorder.enqueue("0||12345|zsh|900\n", "", .{ .exited = 0 });
+            try recorder.enqueue("12346\n", "", .{ .exited = 0 });
+        } else {
+            try recorder.enqueue("0||12345|node|900\n", "", .{ .exited = 0 });
+        }
         for (case.probes) |probe| try testEnqueueProbe(&recorder, probe);
         const observer = testObserver(arena.allocator(), &recorder);
 

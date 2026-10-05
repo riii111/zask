@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const add = @import("cli/add.zig");
 const attach = @import("cli/attach.zig");
 const check = @import("cli/check.zig");
@@ -503,7 +504,7 @@ test "cli.version: prints package version" {
     var writer: std.Io.Writer = .fixed(&buffer);
 
     try runWithArgs(.{ .gpa = std.testing.allocator }, &.{"version"}, &writer);
-    try std.testing.expectEqualStrings("zask 0.2.0\n", writer.buffered());
+    try std.testing.expectEqualStrings("zask " ++ build_options.version ++ "\n", writer.buffered());
 }
 
 test "cli.help: prints public commands" {

@@ -686,7 +686,7 @@ test "dashboard.renderLauncher: keeps every line within a narrow pane" {
         var lines = std.mem.splitScalar(u8, body, '\n');
         while (lines.next()) |line| {
             errdefer std.debug.print("line: {s}\n", .{line});
-            try std.testing.expect(displayWidth(line) <= width);
+            try std.testing.expect(ansi.displayWidth(line) <= width);
         }
         try testExpectContains(body, "Needs attention");
         try testExpectContains(body, "Ctrl+q m");
