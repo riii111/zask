@@ -48,14 +48,36 @@ pub fn begin(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, service: []con
     return beginRotatingAt(gpa, io, dir, service, started_at, rotate_at_bytes);
 }
 
-/// Appends a zask line about `service` to its log, after the output of the
-/// run it is about: `text` is written as one line.
-pub fn appendNote(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, service: []const u8, text: []const u8) !void {
+/// Appends a zask line about `service` to its log after the output of its
+/// last run: `text` is written as one line. The pane pipe may still be
+/// writing that output when the run has just died, so this first waits,
+/// up to `settle_limit_ms`, until the log stops growing.
+pub fn appendNoteAfterOutput(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, service: []const u8, text: []const u8) !void {
     const path = try servicePath(gpa, dir, service);
     defer gpa.free(path);
+    waitUntilSettled(io, path);
     const line = try std.fmt.allocPrint(gpa, "{s}\n", .{text});
     defer gpa.free(line);
-    try log_file.appendText(io, path, line);
+    try log_file.appendText(gpa, io, path, line);
+}
+
+const settle_poll_ms = 50;
+const settle_limit_ms = 1000;
+
+fn waitUntilSettled(io: std.Io, path: []const u8) void {
+    var previous = logSize(io, path);
+    var waited: u32 = 0;
+    while (waited < settle_limit_ms) : (waited += settle_poll_ms) {
+        std.Io.sleep(io, .fromMilliseconds(settle_poll_ms), .awake) catch return;
+        const size = logSize(io, path);
+        if (size == previous) return;
+        previous = size;
+    }
+}
+
+fn logSize(io: std.Io, path: []const u8) ?u64 {
+    const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch return null;
+    return stat.size;
 }
 
 fn beginRotatingAt(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, service: []const u8, started_at: i64, rotate_at: u64) !Recording {

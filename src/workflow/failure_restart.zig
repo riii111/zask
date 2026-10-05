@@ -119,8 +119,8 @@ pub const Supervisor = struct {
     /// failure has waited `delay_ms`. `ctx` provides `now() i96` (monotonic
     /// ns), `nowSeconds() i64` (Unix seconds), `observeRun(name) Run`,
     /// `stopMark(name)`, `recover(name, notice, record, writer) !StartOutcome`,
-    /// `recordRecovery(name, ?recovery.Record) !void` (null clears), and
-    /// `noteInLog(name, text) !void`. Restart failures are reported and count
+    /// `recordFailedRun(name, record, note) !lifecycle.FailedRunRecord`, and
+    /// `clearRecovery(name) !void`. Restart failures are reported and count
     /// as attempts; a restart that finds the service already started or
     /// stopped by someone else does not. A record or note that cannot be
     /// written is reported and does not stop recovery.
@@ -139,7 +139,10 @@ pub const Supervisor = struct {
             .stopped => if (service.pending != null) {
                 service.pending = null;
                 try writer.print("  {s} was stopped; not restarting\n", .{service.name});
-                try recordOnPane(service.name, null, ctx, writer);
+                ctx.clearRecovery(service.name) catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    else => try writer.print("  Warning: the monitor cannot show recovery of {s}: {s}\n", .{ service.name, @errorName(err) }),
+                };
             },
             .window_closed => if (service.pending != null) {
                 service.pending = null;
@@ -153,7 +156,7 @@ pub const Supervisor = struct {
                 service.reported_pid = run.pid;
                 service.pending = null;
                 try writer.print("Warning: cannot read whether {s} was stopped; not restarting\n", .{service.name});
-                try recordOnPane(service.name, .{ .kind = .unconfirmed, .pid = run.pid, .attempt = service.restarts, .max_retries = service.policy.max_retries, .exit = run.exit }, ctx, writer);
+                try recordFailure(service.name, .{ .kind = .unconfirmed, .pid = run.pid, .attempt = service.restarts, .max_retries = service.policy.max_retries, .exit = run.exit }, null, ctx, writer);
             },
             .failed => try self.handleFailure(service, run, ctx, writer),
         }
@@ -173,17 +176,13 @@ pub const Supervisor = struct {
             if (service.restarts >= service.policy.max_retries) {
                 service.reported_pid = run.pid;
                 try writer.print("{s} {f} after {d} restarts in a row; not restarting. Fix it and start it again.\n", .{ service.name, exit_text, service.restarts });
-                try recordOnPane(service.name, .{ .kind = .gave_up, .pid = run.pid, .attempt = service.restarts, .max_retries = service.policy.max_retries, .exit = run.exit }, ctx, writer);
                 const note = try std.fmt.allocPrint(self.gpa, "zask: {s} {f} after {d} restarts in a row; not restarting it", .{ service.name, exit_text, service.restarts });
                 defer self.gpa.free(note);
-                ctx.noteInLog(service.name, note) catch |err| switch (err) {
-                    error.OutOfMemory => return err,
-                    else => try writer.print("  Warning: could not note this in the {s} log: {s}\n", .{ service.name, @errorName(err) }),
-                };
+                try recordFailure(service.name, .{ .kind = .gave_up, .pid = run.pid, .attempt = service.restarts, .max_retries = service.policy.max_retries, .exit = run.exit }, note, ctx, writer);
                 return;
             }
             try writer.print("{s} {f}; restarting in {f} ({d}/{d})\n", .{ service.name, exit_text, DelayText{ .ms = service.policy.delay_ms }, service.restarts + 1, service.policy.max_retries });
-            try recordOnPane(service.name, .{ .kind = .waiting, .pid = run.pid, .attempt = service.restarts + 1, .max_retries = service.policy.max_retries, .exit = run.exit }, ctx, writer);
+            try recordFailure(service.name, .{ .kind = .waiting, .pid = run.pid, .attempt = service.restarts + 1, .max_retries = service.policy.max_retries, .exit = run.exit }, null, ctx, writer);
             service.pending = .{ .pid = run.pid, .failed_at_ns = now_ns };
             break :first now_ns;
         };
@@ -224,11 +223,12 @@ fn reported(service: *const Supervisor.Service, pid: ?i64) bool {
     return pid != null and service.reported_pid == pid;
 }
 
-fn recordOnPane(name: []const u8, record: ?recovery.Record, ctx: anytype, writer: *std.Io.Writer) !void {
-    ctx.recordRecovery(name, record) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => try writer.print("  Warning: the monitor cannot show recovery of {s}: {s}\n", .{ name, @errorName(err) }),
-    };
+/// A run started since the failure was seen gets nothing; see
+/// Lifecycle.recordFailedRun.
+fn recordFailure(name: []const u8, record: recovery.Record, note: ?[]const u8, ctx: anytype, writer: *std.Io.Writer) !void {
+    const result: lifecycle.FailedRunRecord = try ctx.recordFailedRun(name, record, note);
+    if (result.record_error) |err| try writer.print("  Warning: the monitor cannot show recovery of {s}: {s}\n", .{ name, @errorName(err) });
+    if (result.note_error) |err| try writer.print("  Warning: could not note this in the {s} log: {s}\n", .{ name, @errorName(err) });
 }
 
 const DelayText = struct {
@@ -306,16 +306,25 @@ const TestContext = struct {
         return .started;
     }
 
-    pub fn recordRecovery(self: *TestContext, name: []const u8, record: ?recovery.Record) error{ CommandFailed, OutOfMemory }!void {
+    pub fn recordFailedRun(self: *TestContext, name: []const u8, record: recovery.Record, note: ?[]const u8) !lifecycle.FailedRunRecord {
         _ = name;
-        if (self.fail_record) return error.CommandFailed;
-        self.record = record;
+        if (self.run.state != .dead or self.run.pid != record.pid) return .{ .run_gone = true };
+        var result: lifecycle.FailedRunRecord = .{};
+        if (self.fail_record) result.record_error = error.CommandFailed else self.record = record;
+        if (note) |text| {
+            if (self.fail_note) {
+                result.note_error = error.AccessDenied;
+            } else {
+                try self.notes.append(std.testing.allocator, try std.testing.allocator.dupe(u8, text));
+            }
+        }
+        return result;
     }
 
-    pub fn noteInLog(self: *TestContext, name: []const u8, text: []const u8) !void {
+    pub fn clearRecovery(self: *TestContext, name: []const u8) error{ CommandFailed, OutOfMemory }!void {
         _ = name;
-        if (self.fail_note) return error.AccessDenied;
-        try self.notes.append(std.testing.allocator, try std.testing.allocator.dupe(u8, text));
+        if (self.fail_record) return error.CommandFailed;
+        self.record = null;
     }
 
     /// The current run dies `after_s` seconds from now.

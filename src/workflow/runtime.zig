@@ -14,7 +14,6 @@ const phases = @import("phases.zig");
 const proc_runner = @import("../platform/runner.zig");
 const progress_mod = @import("progress.zig");
 const recovery = @import("../model/recovery.zig");
-const service_log = @import("service_log.zig");
 const service_observation = @import("service_observation.zig");
 const session_layout = @import("session_layout.zig");
 const stop_marks_mod = @import("../platform/stop_marks.zig");
@@ -622,17 +621,16 @@ const WatchRestarter = struct {
         return self.runtime.withAllocator(arena.allocator()).lifecycle().startServiceWithNotice(service, notice, record, writer);
     }
 
-    pub fn recordRecovery(self: WatchRestarter, service: []const u8, record: ?recovery.Record) !void {
+    pub fn recordFailedRun(self: WatchRestarter, service: []const u8, record: recovery.Record, note: ?[]const u8) !lifecycle_mod.FailedRunRecord {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
-        const value = if (record) |value| try value.encode(arena.allocator()) else null;
-        try self.runtime.withAllocator(arena.allocator()).tmux().setPaneOption(service, tmux_options.recovery, value);
+        return self.runtime.withAllocator(arena.allocator()).lifecycle().recordFailedRun(service, record, note);
     }
 
-    /// Without a log directory there is no saved log to note it in.
-    pub fn noteInLog(self: WatchRestarter, service: []const u8, text: []const u8) !void {
-        const log_dir = self.runtime.service_log_dir orelse return;
-        try service_log.appendNote(self.gpa, self.runtime.io, log_dir, service, text);
+    pub fn clearRecovery(self: WatchRestarter, service: []const u8) !void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        try self.runtime.withAllocator(arena.allocator()).tmux().setPaneOption(service, tmux_options.recovery, null);
     }
 };
 

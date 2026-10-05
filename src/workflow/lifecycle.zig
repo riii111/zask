@@ -14,6 +14,7 @@ const session_layout = @import("session_layout.zig");
 const shell = @import("../platform/shell.zig");
 const stop_marks_mod = @import("../platform/stop_marks.zig");
 const tmux_client = @import("../platform/tmux.zig");
+const tmux_options = @import("../model/tmux_options.zig");
 const waits = @import("waits.zig");
 const zask_command = @import("zask_command.zig");
 
@@ -30,6 +31,14 @@ pub const Outcome = enum { done, incomplete };
 /// `skipped` means no new process: the service was already running or a
 /// recorded stop kept it stopped.
 pub const StartOutcome = enum { started, skipped };
+
+/// What recordFailedRun left. `run_gone` means the pane no longer holds the
+/// failed run (someone started or closed it), so nothing was written.
+pub const FailedRunRecord = struct {
+    run_gone: bool = false,
+    record_error: ?anyerror = null,
+    note_error: ?anyerror = null,
+};
 
 /// `failed` is split from `signaled` so `stop --all` can surface services it could
 /// not signal — they may still be running in the workspace it leaves up.
@@ -241,6 +250,33 @@ pub const Lifecycle = struct {
         noticed.respect_stop_mark = true;
         var progress = progress_mod.Line.init(writer);
         return noticed.ensureServiceRunning(service, &progress, .observe);
+    }
+
+    /// Leaves `record` on the pane of the failed run it names, and `note` in
+    /// the service log after that run's output, only while the pane still
+    /// holds that dead run. The check runs under the service lock that starts
+    /// take, so a start after the supervisor saw the failure gets neither.
+    /// A record or note that cannot be written is returned, not raised.
+    pub fn recordFailedRun(self: Lifecycle, service: []const u8, record: recovery.Record, note: ?[]const u8) !FailedRunRecord {
+        const held = try self.holdStopMark(service);
+        defer if (held) |h| h.release();
+        const pane = self.tmux.observePane(service);
+        defer pane.deinit(self.gpa);
+        const pid = pane.processId();
+        if (pane.state != .dead or pid == null or pid != record.pid) return .{ .run_gone = true };
+
+        var result: FailedRunRecord = .{};
+        self.tmux.setPaneOption(service, tmux_options.recovery, try record.encode(self.gpa)) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => result.record_error = err,
+        };
+        const text = note orelse return result;
+        const log_dir = self.service_log_dir orelse return result;
+        service_log.appendNoteAfterOutput(self.gpa, self.runner.io, log_dir, service, text) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => result.note_error = err,
+        };
+        return result;
     }
 
     pub fn observeStopMark(self: Lifecycle, service: []const u8) observations.StopMarkObservation {
@@ -2608,6 +2644,57 @@ test "lifecycle.startAll: resolves relative service cwd before sending command" 
     const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
     try proc_runner.expectCommandArg(respawn, 6, cwd);
     try proc_runner.expectCommandArgContains(respawn, 9, "serve");
+}
+
+test "lifecycle.recordFailedRun: records the failed run on its pane and in its log" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "logs");
+    try tmp.dir.writeFile(io, .{ .sub_path = "logs/api.log", .data = "panic: boom\n" });
+    var recorder = proc_runner.Recorder.init(gpa);
+    defer recorder.deinit();
+    try recorder.enqueue("1|3|123|serve|1700000000\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = gpa, .io = io, .recorder = &recorder };
+    var lifecycle = testLifecycle(gpa, run, try parseTestConfig(gpa, test_api_config));
+    lifecycle.service_log_dir = try std.fs.path.join(gpa, &.{ try tmp.dir.realPathFileAlloc(io, ".", gpa), "logs" });
+
+    const result = try lifecycle.recordFailedRun("api", .{ .kind = .gave_up, .pid = 123, .attempt = 3, .max_retries = 3, .exit = .{ .failed = 3 } }, "zask: api gave up");
+
+    try std.testing.expectEqualDeep(FailedRunRecord{}, result);
+    try proc_runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "set-option", "-p", "-t", "=demo:=api", "@zask_recovery", "gave_up,123,3,3,3" });
+    try std.testing.expectEqualStrings("panic: boom\nzask: api gave up\n", try tmp.dir.readFileAlloc(io, "logs/api.log", gpa, .limited(1024)));
+}
+
+test "lifecycle.recordFailedRun: leaves a run started since the failure alone" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "logs");
+    try tmp.dir.writeFile(io, .{ .sub_path = "logs/api.log", .data = "=== zask: api started ===\n" });
+    var recorder = proc_runner.Recorder.init(gpa);
+    defer recorder.deinit();
+    try recorder.enqueue("0||456|serve|1700000100\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = gpa, .io = io, .recorder = &recorder };
+    var lifecycle = testLifecycle(gpa, run, try parseTestConfig(gpa, test_api_config));
+    lifecycle.service_log_dir = try std.fs.path.join(gpa, &.{ try tmp.dir.realPathFileAlloc(io, ".", gpa), "logs" });
+
+    const result = try lifecycle.recordFailedRun("api", .{ .kind = .gave_up, .pid = 123, .attempt = 3, .max_retries = 3, .exit = .{ .failed = 3 } }, "zask: api gave up");
+
+    try std.testing.expect(result.run_gone);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "set-option") == null);
+    try std.testing.expectEqualStrings("=== zask: api started ===\n", try tmp.dir.readFileAlloc(io, "logs/api.log", gpa, .limited(1024)));
 }
 
 test "lifecycle.startService: pipes output to the service log with the respawn" {

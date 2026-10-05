@@ -398,7 +398,7 @@ fn observeSnapshot(ctx: RenderContext) !Snapshot {
         if (row.status != .live) {
             row.log = try lastLogLine(ctx, row.name);
         } else if (row.recovery == .restarted) {
-            row.log = try std.fmt.allocPrint(ctx.gpa, "restarted after it {f}", .{recovery.ExitText{ .exit = row.recovery.restarted.exit }});
+            row.log = try restartReason(ctx.gpa, row.recovery.restarted);
         }
     }
     return .{ .rows = try rows.toOwnedSlice(ctx.gpa), .mode = mode };
@@ -692,6 +692,14 @@ fn writeMonitorRow(writer: *std.Io.Writer, row: MonitorRow, selected: bool, reco
         try writer.print("{s}", .{ansi.reset});
     }
     if (row.log.len > 0) try writer.print(" {s}│{s} {s}", .{ ansi.dim, ansi.reset, ansi.truncate(row.log, monitor_log_width) });
+}
+
+/// Short enough for the log column, so the exit status is never cut off.
+fn restartReason(gpa: std.mem.Allocator, record: recovery.Record) ![]const u8 {
+    return switch (record.exit) {
+        .failed => |status| std.fmt.allocPrint(gpa, "restarted after exit {d}", .{status}),
+        .clean, .interrupted, .killed => "restarted after a kill signal",
+    };
 }
 
 const RecoveryCell = struct { text: []const u8, color: []const u8 };
@@ -1294,8 +1302,29 @@ test "monitor.observeSnapshot: shows why a live service was restarted" {
     const snapshot = try observeSnapshot(ctx);
 
     try std.testing.expectEqual(MonitorStatus.live, snapshot.rows[0].status);
-    try std.testing.expectEqualStrings("restarted after it exited with status 137", snapshot.rows[0].log);
+    try std.testing.expectEqualStrings("restarted after exit 137", snapshot.rows[0].log);
     try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "monitor.render: keeps the restart reason whole in the log column" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const reasons = [_][]const u8{
+        try restartReason(gpa, .{ .kind = .restarted, .attempt = 3, .max_retries = 3, .exit = .{ .failed = 4294967295 } }),
+        try restartReason(gpa, .{ .kind = .restarted, .attempt = 3, .max_retries = 3, .exit = .killed }),
+    };
+
+    for (reasons) |reason| {
+        var row = testRow("a-very-long-service-name", .live);
+        row.recovery = .{ .restarted = .{ .kind = .restarted, .attempt = 3, .max_retries = 3, .exit = .killed } };
+        row.log = reason;
+        const rows = [_]MonitorRow{row};
+
+        const body = try testRender(gpa, .{ .rows = &rows }, .{});
+
+        try std.testing.expect(std.mem.indexOf(u8, body, reason) != null);
+    }
 }
 
 test "monitor.recoveryCell: labels each recovery state apart" {
