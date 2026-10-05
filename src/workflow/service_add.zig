@@ -2,6 +2,7 @@ const std = @import("std");
 const config = @import("../model/config.zig");
 const config_edit = @import("../model/config_edit.zig");
 const diagnostics = @import("../model/diagnostics.zig");
+const jsonc = @import("../model/jsonc.zig");
 const file_swap = @import("../platform/file_swap.zig");
 
 pub const NewService = config_edit.NewService;
@@ -61,19 +62,16 @@ pub fn lockConfigEdits(gpa: std.mem.Allocator, io: std.Io, lock_dir: []const u8)
 
 const edit_lock_name = "config-edit.lock";
 
-/// Comment-preserving edits are not supported yet, so `.jsonc` configs are
-/// left for the user to edit by hand.
-pub fn ensureEditable(path: []const u8) error{CommentedConfigNotEditable}!void {
-    if (std.mem.endsWith(u8, path, ".jsonc")) return error.CommentedConfigNotEditable;
-}
-
-/// Adds `service` to the config at `target.path`. The file is replaced only
+/// Adds `service` to the config at `target.path`, read as JSONC when the path
+/// ends in `.jsonc` like the loader does. The file is replaced only
 /// when the edited config passes validation and the file still holds
 /// `target.bytes`; otherwise it is left untouched. Callers hold
 /// `lockConfigEdits` from selecting the config until this call returns. Returned slices are allocated
 /// from `gpa`; pass an arena.
 pub fn addService(gpa: std.mem.Allocator, io: std.Io, target: Target, group: ?[]const u8, service: NewService, diags: *diagnostics.Diagnostics) !Outcome {
-    const source = try config.parseJsonBytes(gpa, target.bytes);
+    const format = jsonc.Format.fromPath(target.path);
+    var syntax_error: jsonc.SyntaxError = undefined;
+    const source = try jsonc.parse(gpa, target.bytes, format, &syntax_error);
     const added = switch (try config_edit.addService(gpa, target.bytes, source, group, service)) {
         .added => |added| added,
         .duplicate => |holder| return .{ .duplicate = holder },
@@ -81,7 +79,7 @@ pub fn addService(gpa: std.mem.Allocator, io: std.Io, target: Target, group: ?[]
         .group_required => |names| return .{ .group_required = names },
     };
     if (!config.fitsLoadLimit(added.bytes.len)) return .too_large;
-    _ = config.Config.parseWithDiagnostics(gpa, added.bytes, target.home, diags) catch |err| switch (err) {
+    _ = config.Config.parseFormatWithDiagnostics(gpa, added.bytes, format, target.home, diags) catch |err| switch (err) {
         error.InvalidConfig => return .invalid,
         else => return err,
     };
@@ -241,6 +239,7 @@ const test_config =
 const TestFile = struct {
     tmp: std.testing.TmpDir,
     dir_path: []const u8,
+    name: []const u8,
     path: []const u8,
 
     fn target(self: TestFile, path: []const u8, bytes: []const u8) Target {
@@ -250,14 +249,19 @@ const TestFile = struct {
 };
 
 fn testWriteConfig(gpa: std.mem.Allocator, io: std.Io, contents: []const u8) !TestFile {
+    return testWriteNamedConfig(gpa, io, "zask.json", contents);
+}
+
+fn testWriteNamedConfig(gpa: std.mem.Allocator, io: std.Io, name: []const u8, contents: []const u8) !TestFile {
     var tmp = std.testing.tmpDir(.{});
     errdefer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = "zask.json", .data = contents });
+    try tmp.dir.writeFile(io, .{ .sub_path = name, .data = contents });
     const dir_path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     return .{
         .tmp = tmp,
         .dir_path = dir_path,
-        .path = try std.fs.path.join(gpa, &.{ dir_path, "zask.json" }),
+        .name = name,
+        .path = try std.fs.path.join(gpa, &.{ dir_path, name }),
     };
 }
 
@@ -529,7 +533,7 @@ test "service_add.PendingWrite.stage: creates the temporary file with the config
 /// config, replacing the file instead of rewriting it.
 fn testEditorSave(file: TestFile, io: std.Io, contents: []const u8) !void {
     try file.tmp.dir.writeFile(io, .{ .sub_path = ".editor-save", .data = contents });
-    try file.tmp.dir.rename(".editor-save", file.tmp.dir, "zask.json", io);
+    try file.tmp.dir.rename(".editor-save", file.tmp.dir, file.name, io);
 }
 
 fn testExpectOnlyConfig(file: TestFile, io: std.Io) !void {
@@ -538,13 +542,119 @@ fn testExpectOnlyConfig(file: TestFile, io: std.Io) !void {
     var it = dir.iterate();
     var count: usize = 0;
     while (try it.next(io)) |entry| {
-        try std.testing.expectEqualStrings("zask.json", entry.name);
+        try std.testing.expectEqualStrings(file.name, entry.name);
         count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), count);
 }
 
-test "service_add.ensureEditable: rejects jsonc paths" {
-    try ensureEditable("/tmp/zask.json");
-    try std.testing.expectError(error.CommentedConfigNotEditable, ensureEditable("/tmp/zask.jsonc"));
+const test_jsonc_config =
+    \\// local services
+    \\{
+    \\  "project": {"name": "demo", "root": "/tmp/demo"},
+    \\  "groups": [{"name": "backend", "services": {
+    \\    "worker": "work" // paused by default
+    \\  }}]
+    \\}
+    \\
+;
+
+test "service_add.addService: writes a jsonc config with its comments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var file = try testWriteNamedConfig(gpa, io, "zask.jsonc", test_jsonc_config);
+    defer file.tmp.cleanup();
+    var diags = diagnostics.Diagnostics.init(gpa);
+
+    const outcome = try addService(gpa, io, file.target(file.path, test_jsonc_config), null, .{ .name = "api", .command = "cargo run" }, &diags);
+
+    try std.testing.expect(outcome == .added);
+    try std.testing.expectEqualStrings(
+        \\// local services
+        \\{
+        \\  "project": {"name": "demo", "root": "/tmp/demo"},
+        \\  "groups": [{"name": "backend", "services": {
+        \\    "worker": "work", // paused by default
+        \\    "api": "cargo run"
+        \\  }}]
+        \\}
+        \\
+    , try testRead(gpa, io, file.path));
+    try testExpectOnlyConfig(file, io);
+}
+
+test "service_add.addService: refuses comments in a json config" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var file = try testWriteConfig(gpa, io, test_jsonc_config);
+    defer file.tmp.cleanup();
+    var diags = diagnostics.Diagnostics.init(gpa);
+
+    const result = addService(gpa, io, file.target(file.path, test_jsonc_config), null, .{ .name = "api", .command = "x" }, &diags);
+
+    try std.testing.expectError(error.InvalidSyntax, result);
+    try std.testing.expectEqualStrings(test_jsonc_config, try testRead(gpa, io, file.path));
+}
+
+test "service_add.addService: leaves a jsonc config that changed after loading" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    const edited_elsewhere = test_jsonc_config ++ "// edited elsewhere\n";
+    var file = try testWriteNamedConfig(gpa, io, "zask.jsonc", edited_elsewhere);
+    defer file.tmp.cleanup();
+    var diags = diagnostics.Diagnostics.init(gpa);
+
+    const outcome = try addService(gpa, io, file.target(file.path, test_jsonc_config), null, .{ .name = "api", .command = "x" }, &diags);
+
+    try std.testing.expect(outcome == .changed);
+    try std.testing.expectEqualStrings(edited_elsewhere, try testRead(gpa, io, file.path));
+    try testExpectOnlyConfig(file, io);
+}
+
+test "service_add.addService: keeps a jsonc config on write failure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var file = try testWriteNamedConfig(gpa, io, "zask.jsonc", test_jsonc_config);
+    defer file.tmp.cleanup();
+    var diags = diagnostics.Diagnostics.init(gpa);
+    try std.Io.Dir.cwd().setFilePermissions(io, file.dir_path, @enumFromInt(0o555), .{});
+    defer std.Io.Dir.cwd().setFilePermissions(io, file.dir_path, @enumFromInt(0o755), .{}) catch {};
+
+    const result = addService(gpa, io, file.target(file.path, test_jsonc_config), null, .{ .name = "api", .command = "x" }, &diags);
+
+    try std.testing.expectError(error.AccessDenied, result);
+    try std.testing.expectEqualStrings(test_jsonc_config, try testRead(gpa, io, file.path));
+}
+
+test "service_add.replaceIfUnchanged: puts back an editor save to a jsonc config" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var file = try testWriteNamedConfig(gpa, io, "zask.jsonc", test_jsonc_config);
+    defer file.tmp.cleanup();
+    const editor_save = test_jsonc_config ++ "// saved in the editor\n";
+    const pending = (try PendingWrite.stage(gpa, io, file.path, test_jsonc_config, "ours\n")).?;
+    try std.testing.expect(try pending.targetUnchanged(gpa, io));
+
+    try testEditorSave(file, io, editor_save);
+    try pending.swapIn(gpa);
+    const result = if (pending.displacedIsExpected(gpa, io)) Replacement.replaced else pending.restoreDisplaced(gpa, io);
+
+    try std.testing.expect(result == .changed);
+    try std.testing.expectEqualStrings(editor_save, try testRead(gpa, io, file.path));
+    try testExpectOnlyConfig(file, io);
 }

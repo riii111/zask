@@ -41,3 +41,55 @@ test "add: adds a service that list reads" {
         \\
     , list_res.stdout);
 }
+
+test "add: keeps comments in a jsonc config that list reads" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ws = try harness.Workspace.init(gpa, io);
+    defer ws.deinit(gpa);
+    try ws.writeProjectFile(io, "zask.jsonc",
+        \\// local services
+        \\{
+        \\  "project": {"name": "demo", "root": "."},
+        \\  "groups": [{"name": "backend", "services": {
+        \\    "worker": "work" // paused by default
+        \\  }}]
+        \\}
+        \\
+    );
+    const opts: harness.SpawnOptions = .{ .cwd = ws.project, .xdg_config_home = ws.xdg, .home = ws.home };
+
+    var add_res = try harness.spawnZask(gpa, io, opts, &.{ "add", "api", "cargo run", "--port", "8080" });
+    defer add_res.deinit(gpa);
+
+    try std.testing.expect(add_res.exitedWith(0));
+    const config_path = try std.fs.path.join(gpa, &.{ ws.project, "zask.jsonc" });
+    defer gpa.free(config_path);
+    const edited = try std.Io.Dir.cwd().readFileAlloc(io, config_path, gpa, .limited(1 << 20));
+    defer gpa.free(edited);
+    try std.testing.expectEqualStrings(
+        \\// local services
+        \\{
+        \\  "project": {"name": "demo", "root": "."},
+        \\  "groups": [{"name": "backend", "services": {
+        \\    "worker": "work", // paused by default
+        \\    "api": {"command": "cargo run", "port": 8080}
+        \\  }}]
+        \\}
+        \\
+    , edited);
+
+    var list_res = try harness.spawnZask(gpa, io, opts, &.{"list"});
+    defer list_res.deinit(gpa);
+
+    try std.testing.expect(list_res.exitedWith(0));
+    try std.testing.expectEqualStrings(
+        \\demo
+        \\- worker [backend]
+        \\- api [backend] :8080
+        \\
+    , list_res.stdout);
+}
