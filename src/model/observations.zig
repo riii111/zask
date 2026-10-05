@@ -92,19 +92,14 @@ pub const PaneObservation = struct {
 
 /// SIGINT is 2 on every platform zask supports.
 const sigint = 2;
-/// 128 + SIGINT, as a shell reports a child stopped by Ctrl-C.
-const interrupted_status = 128 + sigint;
 
-/// Classifies tmux's `pane_dead_status` and `pane_dead_signal`. A service
-/// started with `exec` replaces the wrapper that turns Ctrl-C into an idle
-/// shell, so Ctrl-C kills the pane process itself and only the signal tells it
-/// apart from a crash.
+/// Classifies tmux's process status and signal separately: an ordinary
+/// exit 130 is a failure; a process terminated by SIGINT was interrupted.
 pub fn paneExit(status: []const u8, signal: []const u8) PaneExit {
     const code = std.fmt.parseInt(u32, status, 10) catch
         return if (isInterruptSignal(signal)) .interrupted else .killed;
     return switch (code) {
         0 => .clean,
-        interrupted_status => .interrupted,
         else => .{ .failed = code },
     };
 }
@@ -120,7 +115,7 @@ fn isInterruptSignal(signal: []const u8) bool {
 pub const PaneExit = union(enum) {
     /// Exit status 0.
     clean,
-    /// Ctrl-C: exit status 130 or SIGINT.
+    /// SIGINT, distinct from a command that returns status 130.
     interrupted,
     /// Non-zero exit status. The service wrapper exits with 128+N when the
     /// service dies from signal N.
@@ -331,7 +326,7 @@ test "observations.paneExit: maps dead status and signal to exit kind" {
     }{
         .{ .status = "0", .want = .clean },
         .{ .status = "1", .want = .{ .failed = 1 } },
-        .{ .status = "130", .want = .interrupted },
+        .{ .status = "130", .want = .{ .failed = 130 } },
         .{ .status = "137", .want = .{ .failed = 137 } },
         .{ .status = "", .signal = "int", .want = .interrupted },
         .{ .status = "", .signal = "2", .want = .interrupted },

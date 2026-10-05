@@ -328,6 +328,8 @@ read with `grep` or an editor after `zask close`.
   stays readable.
 - When the log has reached 8 MiB at a start, it moves to `<service>.log.1`,
   replacing the older one, and a new log begins.
+- Logging ends when the foreground service command finishes. Commands should
+  keep their service in the foreground rather than leave background children.
 - The log keeps the output as the terminal received it, including color codes
   and `\r\n` line endings.
 - Logs may contain secrets, so the logs directory and the log files are made
@@ -342,7 +344,8 @@ Docker Compose output is not saved.
 
 ## Requirements
 
-- tmux
+- tmux (3.3 or newer for log popups)
+- `less` for log popups
 - Zig 0.16.0 to build from source
 - Docker with Docker Compose, when the config has a `docker` section
 

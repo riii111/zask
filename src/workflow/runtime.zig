@@ -409,6 +409,7 @@ pub const Runtime = struct {
 
     fn lifecycle(self: Runtime) lifecycle_mod.Lifecycle {
         return .{
+            .zask_path = self.zask_path,
             .gpa = self.gpa,
             .cfg = self.cfg,
             .runner = self.runner(),
