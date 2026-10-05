@@ -256,7 +256,7 @@ test "add.run: leaves the config on refusal" {
         try std.testing.expectEqual(@as(?anyerror, case.err), run_result.err);
         try std.testing.expect(std.mem.startsWith(u8, run_result.output, case.first_line));
         try std.testing.expectEqual(case.lists_groups, std.mem.indexOf(u8, run_result.output, "\nGroups: backend frontend\n") != null);
-        try std.testing.expect(std.mem.indexOf(u8, run_result.output, "The config was not changed.\n") != null);
+        try std.testing.expect(std.mem.endsWith(u8, run_result.output, "Config: <config>\nThe config was not changed.\n"));
         try std.testing.expectEqualStrings(test_config, run_result.config);
     }
 }
