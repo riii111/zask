@@ -226,7 +226,10 @@ fn reported(service: *const Supervisor.Service, pid: ?i64) bool {
 /// A run started since the failure was seen gets nothing; see
 /// Lifecycle.recordFailedRun.
 fn recordFailure(name: []const u8, record: recovery.Record, note: ?[]const u8, ctx: anytype, writer: *std.Io.Writer) !void {
-    const result: lifecycle.FailedRunRecord = try ctx.recordFailedRun(name, record, note);
+    const result: lifecycle.FailedRunRecord = ctx.recordFailedRun(name, record, note) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => .{ .record_error = err },
+    };
     if (result.record_error) |err| try writer.print("  Warning: the monitor cannot show recovery of {s}: {s}\n", .{ name, @errorName(err) });
     if (result.note_error) |err| try writer.print("  Warning: could not note this in the {s} log: {s}\n", .{ name, @errorName(err) });
 }
@@ -261,6 +264,8 @@ const TestContext = struct {
     fail_record: bool = false,
     notes: std.ArrayList([]const u8) = .empty,
     fail_note: bool = false,
+    /// The service lock recordFailedRun takes cannot be held.
+    fail_lock: bool = false,
 
     fn deinit(self: *TestContext) void {
         for (self.recovers.items) |notice| std.testing.allocator.free(notice);
@@ -308,6 +313,7 @@ const TestContext = struct {
 
     pub fn recordFailedRun(self: *TestContext, name: []const u8, record: recovery.Record, note: ?[]const u8) !lifecycle.FailedRunRecord {
         _ = name;
+        if (self.fail_lock) return error.AccessDenied;
         if (self.run.state != .dead or self.run.pid != record.pid) return .{ .run_gone = true };
         var result: lifecycle.FailedRunRecord = .{};
         if (self.fail_record) result.record_error = error.CommandFailed else self.record = record;
@@ -688,6 +694,19 @@ test "failure_restart.tick: keeps recovering when the record or note cannot be w
     try std.testing.expectEqual(@as(usize, 1), ctx.recovers.items.len);
     try std.testing.expect(std.mem.indexOf(u8, project.written(), "Warning: the monitor cannot show recovery of api: CommandFailed") != null);
     try std.testing.expect(std.mem.indexOf(u8, project.written(), "Warning: could not note this in the api log: AccessDenied") != null);
+}
+
+test "failure_restart.tick: keeps recovering when the service lock cannot be held" {
+    var project = try testApi(0, 2);
+    defer project.deinit();
+    var ctx: TestContext = .{ .fail_lock = true };
+    defer ctx.deinit();
+    ctx.crash(1, .{ .failed = 1 });
+
+    try project.tick(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 1), ctx.recovers.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, project.written(), "Warning: the monitor cannot show recovery of api: AccessDenied") != null);
 }
 
 test "failure_restart.writeSupervised: lists policy per service" {

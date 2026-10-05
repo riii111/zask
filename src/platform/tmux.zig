@@ -363,6 +363,23 @@ pub const Client = struct {
         _ = try self.runner.run(argv.items, .{ .check = true, .discard = true });
     }
 
+    /// Whether the pane still pipes its output to a command (a service log).
+    pub fn panePipeOpen(self: Client, window: []const u8) !bool {
+        const pane_target = try self.target(window);
+        defer self.gpa.free(pane_target);
+        const result = runner.captured(try self.runner.run(&.{ self.tmux_path, "display-message", "-p", "-t", pane_target, "#{pane_pipe}" }, .{ .check = true }));
+        defer self.gpa.free(result.stdout);
+        defer self.gpa.free(result.stderr);
+        return std.mem.eql(u8, std.mem.trim(u8, result.stdout, " \t\r\n"), "1");
+    }
+
+    /// Closes the pane's output pipe; the pipe command finishes on its own.
+    pub fn closePanePipe(self: Client, window: []const u8) !void {
+        const pane_target = try self.target(window);
+        defer self.gpa.free(pane_target);
+        _ = try self.runner.run(&.{ self.tmux_path, "pipe-pane", "-t", pane_target }, .{ .check = true, .discard = true });
+    }
+
     /// Sets the pane option `name` of `window`; null unsets it.
     pub fn setPaneOption(self: Client, window: []const u8, name: []const u8, value: ?[]const u8) !void {
         const pane_target = try self.target(window);
@@ -477,6 +494,9 @@ fn serverUnavailable(stderr: []const u8) bool {
 /// open. The umask keeps a log recreated by `>>` (deleted after it was
 /// prepared) owner-only. When the log stops accepting writes mid-run (disk full, size limit),
 /// a notice is written to the pane's own terminal, where the output continues.
+/// Once the pipe closes and `cat` has written everything, the pipe appends
+/// and removes `<log>.note-<pane pid>` if present: a note about the run
+/// (see OutputLog.notePath) then lands after the run's last output.
 /// tmux expands both formats and strftime sequences in the pipe command, so
 /// every '#' and '%' is doubled to reach the shell unchanged.
 fn buildOutputPipe(gpa: std.mem.Allocator, log: OutputLog) ![]const u8 {
@@ -484,21 +504,28 @@ fn buildOutputPipe(gpa: std.mem.Allocator, log: OutputLog) ![]const u8 {
     defer gpa.free(header);
     const path = try shell.quote(gpa, log.path);
     defer gpa.free(path);
+    const note_prefix_text = try std.fmt.allocPrint(gpa, "{s}{s}", .{ log.path, OutputLog.note_suffix });
+    defer gpa.free(note_prefix_text);
+    const note_prefix = try shell.quote(gpa, note_prefix_text);
+    defer gpa.free(note_prefix);
     const notice_text = try std.fmt.allocPrint(gpa, "zask: output is no longer saved to {s}", .{log.path});
     defer gpa.free(notice_text);
     const notice = try shell.quote(gpa, notice_text);
     defer gpa.free(notice);
-    const command = try std.fmt.allocPrint(gpa, "umask 077; {{ printf '%s' {s}; cat; }} >> {s} || printf '\\r\\n%s\\r\\n' {s} > {s}", .{ header, path, notice, pane_tty_placeholder });
+    const command = try std.fmt.allocPrint(gpa, "umask 077; {{ printf '%s' {s}; cat; s=$?; cat -- {s}{s} 2>/dev/null; rm -f -- {s}{s}; [ $s -eq 0 ]; }} >> {s} || printf '\\r\\n%s\\r\\n' {s} > {s}", .{ header, note_prefix, pane_pid_placeholder, note_prefix, pane_pid_placeholder, path, notice, pane_tty_placeholder });
     defer gpa.free(command);
     const formats_escaped = try std.mem.replaceOwned(u8, gpa, command, "#", "##");
     defer gpa.free(formats_escaped);
     const escaped = try std.mem.replaceOwned(u8, gpa, formats_escaped, "%", "%%");
     defer gpa.free(escaped);
-    return std.mem.replaceOwned(u8, gpa, escaped, pane_tty_placeholder, "'#{pane_tty}'");
+    const with_tty = try std.mem.replaceOwned(u8, gpa, escaped, pane_tty_placeholder, "'#{pane_tty}'");
+    defer gpa.free(with_tty);
+    return std.mem.replaceOwned(u8, gpa, with_tty, pane_pid_placeholder, "#{pane_pid}");
 }
 
-/// Contains neither '#' nor '%', so it survives escaping until it is replaced.
+/// Contain neither '#' nor '%', so they survive escaping until replaced.
 const pane_tty_placeholder = "\x00pane_tty\x00";
+const pane_pid_placeholder = "\x00pane_pid\x00";
 
 fn tailNonEmptyLines(gpa: std.mem.Allocator, pane: []const u8, max_lines: usize) !PaneTail {
     if (max_lines == 0) return .{ .lines = try gpa.alloc([]const u8, 0) };
@@ -615,6 +642,14 @@ const RowsCapture = struct {
 pub const OutputLog = struct {
     path: []const u8,
     header: []const u8,
+
+    const note_suffix = ".note-";
+
+    /// Caller owns the path of the note the pipe of the run `pid` appends to
+    /// the log at `log_path` when it closes.
+    pub fn notePath(gpa: std.mem.Allocator, log_path: []const u8, pid: i64) ![]const u8 {
+        return std.fmt.allocPrint(gpa, "{s}{s}{d}", .{ log_path, note_suffix, pid });
+    }
 };
 
 pub const PaneTail = struct {
@@ -855,7 +890,7 @@ test "tmux.respawnPaneWithOutputLog: appends output to the log in the respawn in
     try runner.expectCommandArg(recorder.commands.items[0], 1, "respawn-pane");
     try runner.expectCommandArgContains(recorder.commands.items[0], 9, "npm run dev");
     try runner.expectCommandArgv(.{ .argv = argv[10..], .cwd = null, .interactive = false }, &.{
-        ";",          "pipe-pane",      "-t",               "=demo:=api", "umask 077; { printf '%%s' '=== api ===\n'; cat; } >> '/state/it'\\''s ##1 100%%/api.log' || printf '\\r\\n%%s\\r\\n' 'zask: output is no longer saved to /state/it'\\''s ##1 100%%/api.log' > '#{pane_tty}'",
+        ";",          "pipe-pane",      "-t",               "=demo:=api", "umask 077; { printf '%%s' '=== api ===\n'; cat; s=$?; cat -- '/state/it'\\''s ##1 100%%/api.log.note-'#{pane_pid} 2>/dev/null; rm -f -- '/state/it'\\''s ##1 100%%/api.log.note-'#{pane_pid}; [ $s -eq 0 ]; } >> '/state/it'\\''s ##1 100%%/api.log' || printf '\\r\\n%%s\\r\\n' 'zask: output is no longer saved to /state/it'\\''s ##1 100%%/api.log' > '#{pane_tty}'",
         ";",          "set-option",     "-p",               "-u",         "-t",
         "=demo:=api", "@zask_recovery", ";",                "set-option", "-p",
         "-t",         "=demo:=api",     "@zask_started_at", "1700000000",
@@ -915,6 +950,45 @@ test "tmux.buildRespawnScript: propagates command exit status" {
     defer std.testing.allocator.free(result.stderr);
 
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 7 }, result.term);
+}
+
+test "tmux.buildOutputPipe: appends the run's note after output that arrives late" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const log_path = try std.fs.path.join(gpa, &.{ root, "api.log" });
+    defer gpa.free(log_path);
+    const note_path = try OutputLog.notePath(gpa, log_path, 123);
+    defer gpa.free(note_path);
+    try tmp.dir.writeFile(io, .{ .sub_path = "api.log.note-123", .data = "zask: note\n" });
+    const pipe = try buildOutputPipe(gpa, .{ .path = log_path, .header = "=== api ===\n" });
+    defer gpa.free(pipe);
+    // What tmux hands the shell after expanding formats in the pipe command.
+    const tty_expanded = try std.mem.replaceOwned(u8, gpa, pipe, "'#{pane_tty}'", "/dev/null");
+    defer gpa.free(tty_expanded);
+    const pid_expanded = try std.mem.replaceOwned(u8, gpa, tty_expanded, "#{pane_pid}", "123");
+    defer gpa.free(pid_expanded);
+    const hashes = try std.mem.replaceOwned(u8, gpa, pid_expanded, "##", "#");
+    defer gpa.free(hashes);
+    const command = try std.mem.replaceOwned(u8, gpa, hashes, "%%", "%");
+    defer gpa.free(command);
+    const script = try std.fmt.allocPrint(gpa, "{{ printf 'early\\n'; sleep 0.3; printf 'FINAL\\n'; }} | {{ {s}; }}", .{command});
+    defer gpa.free(script);
+
+    const result = try std.process.run(gpa, io, .{ .argv = &.{ "sh", "-c", script } });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    const log = try tmp.dir.readFileAlloc(io, "api.log", gpa, .limited(1024));
+    defer gpa.free(log);
+    try std.testing.expectEqualStrings("=== api ===\nearly\nFINAL\nzask: note\n", log);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "api.log.note-123", .{}));
 }
 
 test "tmux.resizeWindow: sizing helpers record and parse argv" {

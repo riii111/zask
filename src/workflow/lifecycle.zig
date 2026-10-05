@@ -272,11 +272,26 @@ pub const Lifecycle = struct {
         };
         const text = note orelse return result;
         const log_dir = self.service_log_dir orelse return result;
-        service_log.appendNoteAfterOutput(self.gpa, self.runner.io, log_dir, service, text) catch |err| switch (err) {
+        self.noteAfterRun(service, log_dir, pid.?, text) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => result.note_error = err,
         };
         return result;
+    }
+
+    /// While the run's output pipe is open, its last output may still be on
+    /// the way to the log, so the note goes to the file the pipe appends once
+    /// it closes (tmux_client.OutputLog.notePath), and the pipe is closed. The
+    /// caller holds the service lock, so no start reopens the pipe meanwhile.
+    /// Without an open pipe nothing else writes the log, so the note is
+    /// appended directly.
+    fn noteAfterRun(self: Lifecycle, service: []const u8, log_dir: []const u8, pid: i64, text: []const u8) !void {
+        if (!try self.tmux.panePipeOpen(service)) return service_log.appendNote(self.gpa, self.runner.io, log_dir, service, text);
+        const log_path = try service_log.servicePath(self.gpa, log_dir, service);
+        const note_path = try tmux_client.OutputLog.notePath(self.gpa, log_path, pid);
+        try paths.writeFileMode(self.runner.io, note_path, try std.fmt.allocPrint(self.gpa, "{s}\n", .{text}), @enumFromInt(0o600));
+        errdefer std.Io.Dir.cwd().deleteFile(self.runner.io, note_path) catch {};
+        try self.tmux.closePanePipe(service);
     }
 
     pub fn observeStopMark(self: Lifecycle, service: []const u8) observations.StopMarkObservation {
@@ -2646,7 +2661,7 @@ test "lifecycle.startAll: resolves relative service cwd before sending command" 
     try proc_runner.expectCommandArgContains(respawn, 9, "serve");
 }
 
-test "lifecycle.recordFailedRun: records the failed run on its pane and in its log" {
+test "lifecycle.recordFailedRun: appends the note directly without an open pipe" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
@@ -2661,6 +2676,7 @@ test "lifecycle.recordFailedRun: records the failed run on its pane and in its l
     defer recorder.deinit();
     try recorder.enqueue("1|3|123|serve|1700000000\n", "", .{ .exited = 0 });
     try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0\n", "", .{ .exited = 0 });
     const run = proc_runner.Runner{ .gpa = gpa, .io = io, .recorder = &recorder };
     var lifecycle = testLifecycle(gpa, run, try parseTestConfig(gpa, test_api_config));
     lifecycle.service_log_dir = try std.fs.path.join(gpa, &.{ try tmp.dir.realPathFileAlloc(io, ".", gpa), "logs" });
@@ -2670,6 +2686,37 @@ test "lifecycle.recordFailedRun: records the failed run on its pane and in its l
     try std.testing.expectEqualDeep(FailedRunRecord{}, result);
     try proc_runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "set-option", "-p", "-t", "=demo:=api", "@zask_recovery", "gave_up,123,3,3,3" });
     try std.testing.expectEqualStrings("panic: boom\nzask: api gave up\n", try tmp.dir.readFileAlloc(io, "logs/api.log", gpa, .limited(1024)));
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "lifecycle.recordFailedRun: leaves the note for an open pipe to append after the output" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "logs");
+    try tmp.dir.writeFile(io, .{ .sub_path = "logs/api.log", .data = "panic: bo" });
+    var recorder = proc_runner.Recorder.init(gpa);
+    defer recorder.deinit();
+    try recorder.enqueue("1|3|123|serve|1700000000\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("1\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = gpa, .io = io, .recorder = &recorder };
+    var lifecycle = testLifecycle(gpa, run, try parseTestConfig(gpa, test_api_config));
+    lifecycle.service_log_dir = try std.fs.path.join(gpa, &.{ try tmp.dir.realPathFileAlloc(io, ".", gpa), "logs" });
+
+    const result = try lifecycle.recordFailedRun("api", .{ .kind = .gave_up, .pid = 123, .attempt = 3, .max_retries = 3, .exit = .{ .failed = 3 } }, "zask: api gave up");
+
+    try std.testing.expectEqualDeep(FailedRunRecord{}, result);
+    try proc_runner.expectCommandArgv(recorder.commands.items[3], &.{ "tmux", "pipe-pane", "-t", "=demo:=api" });
+    try std.testing.expectEqualStrings("panic: bo", try tmp.dir.readFileAlloc(io, "logs/api.log", gpa, .limited(1024)));
+    try std.testing.expectEqualStrings("zask: api gave up\n", try tmp.dir.readFileAlloc(io, "logs/api.log.note-123", gpa, .limited(1024)));
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
 test "lifecycle.recordFailedRun: leaves a run started since the failure alone" {
