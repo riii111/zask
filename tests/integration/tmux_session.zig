@@ -1382,6 +1382,67 @@ test "lifecycle.recordFailedRun: a delayed output relay saves final bytes before
     try std.testing.expect(std.mem.indexOf(u8, saved, "zask-output-done") == null);
 }
 
+test "lifecycle.startService: retries after Ctrl-C interrupts spawn preparation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-spawn-interrupt", .{std.c.getpid()});
+    const paused = try std.fs.path.join(gpa, &.{ project_root, "paused" });
+    const script = try std.fmt.allocPrint(gpa,
+        \\#!/bin/sh
+        \\if {{ [ "$1" = if-shell ] || [ "$1" = show-options ]; }} && [ ! -e {s} ]; then
+        \\  printf paused > {s}
+        \\  sleep 2
+        \\fi
+        \\exec {s} "$@"
+        \\
+    , .{ try zask.shell.quote(gpa, paused), try zask.shell.quote(gpa, paused), try zask.shell.quote(gpa, build_options.tmux_path) });
+    try tmp.dir.writeFile(io, .{ .sub_path = "tmux-wrapper", .data = script, .flags = .{ .permissions = @enumFromInt(0o700) } });
+    var client = tmuxClient(gpa, io, session);
+    client.tmux_path = try std.fs.path.join(gpa, &.{ project_root, "tmux-wrapper" });
+    const config_json = try std.fmt.allocPrint(gpa,
+        \\{{"project":{{"name":"interrupt","root":"{s}"}},"groups":[{{"name":"backend","services":[{{"name":"api","command":"echo run >> api.runs; exec sleep 60"}}]}}]}}
+    , .{project_root});
+    const cfg = try zask.config.Config.parse(gpa, config_json, project_root);
+    const run_impl: zask.runner.Runner = .{ .gpa = gpa, .io = io };
+    const lifecycle = zask.lifecycle.Lifecycle{
+        .gpa = gpa,
+        .cfg = cfg,
+        .command_hint = .{ .config = "zask.json" },
+        .runner = run_impl,
+        .tmux = client,
+        .docker = .{ .gpa = gpa, .runner = run_impl, .dir = project_root, .file = "compose.yaml" },
+        .stop_marks = try zask.stop_marks.StopMarks.forSession(gpa, io, session),
+    };
+    defer std.Io.Dir.cwd().deleteTree(io, lifecycle.stop_marks.?.dir) catch {};
+    client.killSession() catch {};
+    try client.newSession("dashboard", project_root, "sleep 60");
+    defer client.killSession() catch {};
+    try client.newWindowAfter("dashboard", "api", project_root, "exec sh");
+    try client.setWindowOption("api", "remain-on-exit", "on");
+    var buffer: [4096]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startService("api", &writer, .observe);
+    _ = try waitForFileText(gpa, io, tmp.dir, "paused", "paused");
+    try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", try std.fmt.allocPrint(gpa, "{s}:api", .{session}), "C-c" });
+    try waitForPaneState(client, gpa, io, "api", .idle);
+    try std.testing.expectEqual(@as(?[]const u8, null), try client.showPaneOption("api", "@zask_starting"));
+    try std.testing.expectEqual(@as(?[]const u8, null), try client.showPaneOption("api", "@zask_started_at"));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "api.runs", .{}));
+
+    try lifecycle.startService("api", &writer, .observe);
+    _ = try waitForFileText(gpa, io, tmp.dir, "api.runs", "run");
+    try waitForPaneState(client, gpa, io, "api", .busy);
+    try std.testing.expectEqualStrings("run\n", try tmp.dir.readFileAlloc(io, "api.runs", gpa, .limited(4096)));
+}
+
 fn tmuxClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) zask.tmux.Client {
     return .{
         .gpa = gpa,

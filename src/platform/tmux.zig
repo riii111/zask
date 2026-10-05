@@ -473,23 +473,29 @@ pub const Client = struct {
         const marker = if (log != null) try std.fmt.allocPrint(self.gpa, "printf '\\033]9999;zask-output-done;{s}\\007'", .{token}) else try self.gpa.dupe(u8, "");
         defer self.gpa.free(marker);
         return std.fmt.allocPrint(self.gpa,
-            \\__zask_interrupted=0
-            \\trap '__zask_interrupted=1' INT
-            \\(
-            \\if [ -n "$TMUX_PANE" ]; then
-            \\  if [ "$({s} show-options -pqv -t "$TMUX_PANE" @zask_starting)" = '{s}' ]; then
-            \\    {s} set-option -p -u -t "$TMUX_PANE" @zask_starting
+            \\__zask_clear_starting() {{
+            \\  if [ -n "$TMUX_PANE" ]; then
+            \\    if [ "$__zask_interrupted" = 1 ]; then
+            \\      {s} if-shell -F -t "$TMUX_PANE" "#{{==:#{{pane_pid}},$$}}" "set-option -p -u -t $TMUX_PANE @zask_starting ; set-option -p -u -t $TMUX_PANE @zask_started_at"
+            \\    else
+            \\      {s} if-shell -F -t "$TMUX_PANE" "#{{&&:#{{==:#{{pane_pid}},$$}},#{{==:#{{@zask_starting}},{s}}}}}" "set-option -p -u -t $TMUX_PANE @zask_starting"
+            \\    fi
             \\  fi
-            \\fi
+            \\}}
+            \\__zask_interrupted=0
+            \\trap '__zask_interrupted=1; __zask_clear_starting' INT
+            \\(
+            \\__zask_clear_starting
             \\{s}
             \\)
             \\__zask_status=$?
+            \\__zask_clear_starting
             \\{s}
             \\if [ "$__zask_interrupted" = 1 ]; then
             \\  exec "${{SHELL:-sh}}"
             \\fi
             \\exit "$__zask_status"
-        , .{ tmux_path, token, tmux_path, command, marker });
+        , .{ tmux_path, tmux_path, token, command, marker });
     }
 };
 
@@ -854,7 +860,7 @@ test "tmux.respawnPane: records wrapped shell command" {
     try runner.expectCommandArg(command, 8, "respawn-pane");
     try runner.expectCommandArg(command, 14, "sh");
     try runner.expectCommandArg(command, 15, "-lc");
-    try runner.expectCommandArgContains(command, 16, "trap '__zask_interrupted=1' INT");
+    try runner.expectCommandArgContains(command, 16, "trap '__zask_interrupted=1; __zask_clear_starting' INT");
     try runner.expectCommandArgContains(command, 16, "npm run dev");
     try runner.expectCommandArgContains(command, 16, "exec \"${SHELL:-sh}\"");
 }
