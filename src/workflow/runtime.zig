@@ -195,6 +195,7 @@ pub const Runtime = struct {
             .label = label,
             .pane = env.get(self.environ, "TMUX_PANE"),
             .scratch_dir = scratch_dir,
+            .search_path = env.get(self.environ, "PATH"),
         });
     }
 

@@ -937,9 +937,21 @@ test "monitor: l pages recent logs in a popup and returns to the monitor" {
     const config_path = try std.fs.path.join(gpa, &.{ project_root, "zask.json" });
     const runtime_dir = try std.fs.path.join(gpa, &.{ project_root, "run" });
     const scratch_dir = try std.fs.path.join(gpa, &.{ runtime_dir, "zask" });
-    const command = try std.fmt.allocPrint(gpa, "HOME={s} XDG_RUNTIME_DIR={s} {s} --config {s} monitor; sleep 60", .{
+    // Only the monitor's PATH has this less, which logs its arguments and runs
+    // the real one; the popup's shell starts with the tmux server's PATH.
+    const real_less = try zask.executable.find(gpa, io, .spawn, if (std.c.getenv("PATH")) |path| std.mem.span(path) else null, ".", "less") orelse return error.LessMissing;
+    const less_log = try std.fs.path.join(gpa, &.{ project_root, "less-calls.txt" });
+    try tmp.dir.createDirPath(io, "pager");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "pager/less",
+        .data = try std.fmt.allocPrint(gpa, "#!/bin/sh\necho \"$*\" >> {s}\nexec {s} \"$@\"\n", .{ try zask.shell.quote(gpa, less_log), try zask.shell.quote(gpa, real_less) }),
+        .flags = .{ .permissions = @enumFromInt(0o755) },
+    });
+    const pager_dir = try std.fs.path.join(gpa, &.{ project_root, "pager" });
+    const command = try std.fmt.allocPrint(gpa, "HOME={s} XDG_RUNTIME_DIR={s} PATH={s}:\"$PATH\" {s} --config {s} monitor; sleep 60", .{
         try zask.shell.quote(gpa, project_root),
         try zask.shell.quote(gpa, runtime_dir),
+        try zask.shell.quote(gpa, pager_dir),
         try zask.shell.quote(gpa, build_options.zask_path),
         try zask.shell.quote(gpa, config_path),
     });
@@ -963,6 +975,8 @@ test "monitor: l pages recent logs in a popup and returns to the monitor" {
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "l" });
     _ = try waitForScratchFile(gpa, io, scratch_dir, "line-300\n");
     try expectPopupOpen(gpa, io, target);
+    // The popup runs the less whose keys the monitor checked.
+    _ = try waitForFileText(gpa, io, std.Io.Dir.cwd(), less_log, "+G");
 
     // The popup opens at the end; each Emacs move shifts the first line shown.
     const end_top = try waitForPopupTop(gpa, io, terminal, null);
