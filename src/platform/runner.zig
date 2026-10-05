@@ -224,6 +224,12 @@ pub const Recorder = struct {
     now_seconds: i64 = 0,
     advance_clock_on_sleep: bool = false,
     seconds_per_command: i64 = 0,
+    before_record: ?BeforeRecord = null,
+
+    pub const BeforeRecord = struct {
+        context: *anyopaque,
+        call: *const fn (context: *anyopaque, argv: []const []const u8) void,
+    };
 
     pub fn init(gpa: std.mem.Allocator) Recorder {
         return .{ .gpa = gpa, .commands = .empty, .responses = .empty, .errors = .empty, .sleeps = .empty };
@@ -266,6 +272,7 @@ pub const Recorder = struct {
 
     fn record(self: *Recorder, argv: []const []const u8, options: RunOptions) !std.process.RunResult {
         self.now_seconds += self.seconds_per_command;
+        if (self.before_record) |hook| hook.call(hook.context, argv);
         const owned_argv = try self.gpa.alloc([]const u8, argv.len);
         for (argv, 0..) |arg, index| owned_argv[index] = try self.gpa.dupe(u8, arg);
         try self.commands.append(self.gpa, .{
