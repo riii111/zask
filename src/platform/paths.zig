@@ -1,6 +1,9 @@
 const std = @import("std");
 const env = @import("env.zig");
 
+pub const private_dir_permissions: std.Io.Dir.Permissions = @enumFromInt(0o700);
+pub const private_file_permissions: std.Io.File.Permissions = @enumFromInt(0o600);
+
 pub fn configBase(gpa: std.mem.Allocator, environ: ?*const env.Map) ![]const u8 {
     if (env.get(environ, "XDG_CONFIG_HOME")) |value| return std.fs.path.join(gpa, &.{ value, "zask" });
     return std.fs.path.join(gpa, &.{ try home(environ), ".config", "zask" });
@@ -9,6 +12,15 @@ pub fn configBase(gpa: std.mem.Allocator, environ: ?*const env.Map) ![]const u8 
 pub fn dataBase(gpa: std.mem.Allocator, environ: ?*const env.Map) ![]const u8 {
     if (env.get(environ, "XDG_DATA_HOME")) |value| return std.fs.path.join(gpa, &.{ value, "zask" });
     return std.fs.path.join(gpa, &.{ try home(environ), ".local", "share", "zask" });
+}
+
+/// Follows the XDG rule that an empty or relative XDG_STATE_HOME is ignored:
+/// a relative base would resolve differently in each pane's directory.
+pub fn stateBase(gpa: std.mem.Allocator, environ: ?*const env.Map) ![]const u8 {
+    if (env.get(environ, "XDG_STATE_HOME")) |value| {
+        if (std.fs.path.isAbsolute(value)) return std.fs.path.join(gpa, &.{ value, "zask" });
+    }
+    return std.fs.path.join(gpa, &.{ try home(environ), ".local", "state", "zask" });
 }
 
 pub fn runtimeBase(gpa: std.mem.Allocator, environ: ?*const env.Map) ![]const u8 {
@@ -25,12 +37,7 @@ pub fn exists(io: std.Io, path: []const u8) bool {
     return true;
 }
 
-pub const private_dir_permissions: std.Io.Dir.Permissions = @enumFromInt(0o700);
-pub const private_file_permissions: std.Io.File.Permissions = @enumFromInt(0o600);
-
-/// Creates `path` (absolute) when missing and narrows it to the owner. Fails
-/// when the directory belongs to someone else, so files placed in it are not
-/// readable by other users.
+/// Creates `path` and its parents, then restricts `path` itself to the owner.
 pub fn ensurePrivateDir(io: std.Io, path: []const u8) !void {
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
     var dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true, .follow_symlinks = false });
@@ -57,6 +64,21 @@ pub fn writeFileMode(io: std.Io, path: []const u8, contents: []const u8, permiss
 
 test "paths.home: requires HOME in environment map" {
     try std.testing.expectError(error.HomeNotSet, home(null));
+}
+
+test "paths.stateBase: ignores empty and relative XDG_STATE_HOME" {
+    const cases = [_][]const u8{ "", "state" };
+    for (cases) |value| {
+        var environ = env.Map.init(std.testing.allocator);
+        defer environ.deinit();
+        try environ.put("HOME", "/home/me");
+        try environ.put("XDG_STATE_HOME", value);
+
+        const path = try stateBase(std.testing.allocator, &environ);
+        defer std.testing.allocator.free(path);
+
+        try std.testing.expectEqualStrings("/home/me/.local/state/zask", path);
+    }
 }
 
 test "paths.runtimeBase: fallback is scoped by uid" {

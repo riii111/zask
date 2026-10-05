@@ -7,7 +7,7 @@ const jsonc = @import("jsonc.zig");
 const watch = @import("watch.zig");
 
 const Value = std.json.Value;
-const max_config_bytes = 10 * 1024 * 1024;
+pub const max_config_bytes = 10 * 1024 * 1024;
 
 /// ユーザーが zask.json に書く公開キー名の単一定義。
 /// validate の許可リスト・normalize の入力読み取り・init の生成で共有する。
@@ -84,6 +84,10 @@ pub const object_keys = struct {
     pub const precheck = [_][]const u8{ keys.name, keys.command, keys.on_fail, keys.hint, keys.dir };
     pub const start_profile = [_][]const u8{ keys.profile, keys.label, keys.group_overrides };
 };
+
+/// Names of windows zask opens for itself. tmux addresses service windows by
+/// service name, so a service with one of these names would collide with them.
+pub const reserved_service_names = [_][]const u8{"zask-watch"};
 
 /// Values accepted for enumerated string keys. The JSON Schema `enum` lists
 /// must match; the schema consistency test compares them.
@@ -269,6 +273,13 @@ pub const Config = struct {
     pub fn serviceHealthcheckPath(service: Value) []const u8 {
         const healthcheck = serviceHealthcheck(service) orelse return "/health";
         return config_value.optionalObjectString(healthcheck, "path", "/health");
+    }
+
+    pub fn anyServiceWatches(self: Config) !bool {
+        for (try self.services()) |service| {
+            if (service == .object and service.object.get(keys.watch) != null) return true;
+        }
+        return false;
     }
 
     /// Returns null when the service has no `watch`. Release the result with
@@ -523,12 +534,36 @@ pub fn loadPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []co
 // Like loadPath, but records config validation problems into the caller's
 // collector. File and JSON-syntax failures stay as plain errors.
 pub fn loadPathWithDiagnostics(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []const u8, diags: *diagnostics.Diagnostics) !Config {
-    const bytes = readFile(gpa, io, path) catch |err| switch (err) {
+    return (try loadFileWithDiagnostics(gpa, io, path, home, diags)).cfg;
+}
+
+pub const ConfigFile = struct {
+    /// The exact file content `cfg` was parsed from.
+    bytes: []const u8,
+    cfg: Config,
+};
+
+/// Like loadPathWithDiagnostics, but keeps the file content for editing.
+/// Both fields are allocated from `gpa`; pass an arena.
+pub fn loadFileWithDiagnostics(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []const u8, diags: *diagnostics.Diagnostics) !ConfigFile {
+    const bytes = try readConfigBytes(gpa, io, path);
+    return .{ .bytes = bytes, .cfg = try Config.parseFormatWithDiagnostics(gpa, bytes, jsonc.Format.fromPath(path), home, diags) };
+}
+
+/// Whether a config of `len` bytes can be loaded; the read limit counts a
+/// file that reaches it as too large.
+pub fn fitsLoadLimit(len: usize) bool {
+    return len < max_config_bytes;
+}
+
+/// Returns the file content owned by the caller, with the same size limit
+/// and errors as loading a config.
+pub fn readConfigBytes(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
+    return readFile(gpa, io, path) catch |err| switch (err) {
         error.FileNotFound => return error.ConfigNotFound,
         error.StreamTooLong => return error.ConfigTooLarge,
         else => return err,
     };
-    return Config.parseFormatWithDiagnostics(gpa, bytes, jsonc.Format.fromPath(path), home, diags);
 }
 
 pub fn parseJsonBytes(gpa: std.mem.Allocator, bytes: []const u8) !Value {
@@ -934,6 +969,7 @@ fn validateNamedService(gpa: std.mem.Allocator, name: []const u8, service: Value
 }
 
 fn checkServiceName(name: []const u8, path: []const u8, diags: *diagnostics.Diagnostics, refs: *ValidationIndex) !void {
+    if (containsString(name, &reserved_service_names)) try diags.addFmt(path, "'{s}' is reserved by zask", .{name});
     validate.identifier(name) catch try diags.add(path, "must be a valid identifier");
     if (refs.services.contains(name)) {
         try diags.addFmt(path, "duplicate service '{s}'", .{name});
@@ -2224,6 +2260,17 @@ test "config.serviceWatch: applies defaults and resolves paths from the service 
     try std.testing.expectEqualStrings("/opt/shared", try cfg.serviceWatchPath(gpa, worker, explicit.paths[1]));
     try std.testing.expectEqualStrings("/home/me/lib", try cfg.serviceWatchPath(gpa, worker, explicit.paths[2]));
     try std.testing.expect((try Config.serviceWatch(gpa, try cfg.findService("web"))) == null);
+    try std.testing.expect(try cfg.anyServiceWatches());
+}
+
+test "config.anyServiceWatches: false without watch settings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try parseTestConfig(&arena,
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve"}]}]}
+    );
+
+    try std.testing.expect(!try cfg.anyServiceWatches());
 }
 
 test "config.validateAll: reports watch problems with field paths" {
@@ -2421,5 +2468,28 @@ test "config.validateAll: suggests close keys and references without guessing ti
     for (expected, diags.slice()) |want, got| {
         try std.testing.expectEqualStrings(want.path, got.path);
         try std.testing.expectEqualStrings(want.message, got.message);
+    }
+}
+
+test "config.validateAll: rejects reserved names in every service form" {
+    const cases = [_]struct { services: []const u8, path: []const u8 }{
+        .{ .services = "[{\"name\":\"zask-watch\",\"command\":\"serve\"}]", .path = "groups[0].services[0].name" },
+        .{ .services = "{\"zask-watch\":\"serve\"}", .path = "groups[0].services.zask-watch" },
+        .{ .services = "{\"zask-watch\":{\"command\":\"serve\"}}", .path = "groups[0].services.zask-watch" },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const gpa = arena.allocator();
+        const json = try std.fmt.allocPrint(gpa, "{{\"project\":{{\"name\":\"demo\",\"root\":\"/tmp\"}},\"groups\":[{{\"name\":\"backend\",\"services\":{s}}}]}}", .{case.services});
+        const value = try parseJsonBytes(gpa, json);
+        var diags = diagnostics.Diagnostics.init(gpa);
+        defer diags.deinit();
+
+        try validateAll(gpa, value, &diags);
+
+        try std.testing.expectEqual(@as(usize, 1), diags.slice().len);
+        try std.testing.expectEqualStrings(case.path, diags.slice()[0].path);
+        try std.testing.expectEqualStrings("'zask-watch' is reserved by zask", diags.slice()[0].message);
     }
 }
