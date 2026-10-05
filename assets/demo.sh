@@ -11,11 +11,17 @@ if [ $# -ne 1 ]; then
 fi
 wallpaper=$1
 
+# Run from inside tmux, TMUX would point every tmux command here and in the recording at the caller's server.
+unset TMUX
+
 tmp=$(mktemp -d)
 scratch="$tmp/scratch"
+# The socket the recording's tmux creates from TMUX_TMPDIR="$scratch/tmux".
+demo_socket="$scratch/tmux/tmux-$(id -u)/default"
 cleanup() {
   # Stops the demo tmux server even when the recording fails halfway, so no services keep running.
-  TMUX_TMPDIR="$scratch/tmux" tmux kill-server 2>/dev/null || true
+  # The explicit socket keeps this from reaching any other tmux server.
+  tmux -S "$demo_socket" kill-server 2>/dev/null || true
   rm -rf "$tmp"
 }
 trap cleanup EXIT
