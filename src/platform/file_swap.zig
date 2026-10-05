@@ -2,16 +2,12 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub const ExchangeError = error{
-    /// The OS or filesystem cannot exchange paths atomically.
     ExchangeUnsupported,
     FileNotFound,
     AccessDenied,
     Unexpected,
 } || std.mem.Allocator.Error;
 
-/// Atomically swaps the files at two absolute paths on one filesystem: after
-/// the call each path names the file the other one named, and no other
-/// process sees a moment where either path is missing.
 pub fn exchange(gpa: std.mem.Allocator, a: []const u8, b: []const u8) ExchangeError!void {
     const a_z = try gpa.dupeZ(u8, a);
     defer gpa.free(a_z);

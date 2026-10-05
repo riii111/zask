@@ -6,9 +6,6 @@ pub const ClockTime = struct {
     second: u8,
 };
 
-/// Wall-clock time of day in the local time zone. null means the C library
-/// could not convert the timestamp; callers should omit the time rather than
-/// show UTC as if it were local.
 pub fn localClockTime(epoch_seconds: i64) ?ClockTime {
     const t: std.c.time_t = std.math.cast(std.c.time_t, epoch_seconds) orelse return null;
     var parts: Tm = undefined;
@@ -20,8 +17,6 @@ pub fn localClockTime(epoch_seconds: i64) ?ClockTime {
     };
 }
 
-// std.c has no `struct tm`; this matches the glibc / musl / Darwin layout,
-// which all append tm_gmtoff and tm_zone after the nine ISO C fields.
 const Tm = extern struct {
     tm_sec: c_int,
     tm_min: c_int,

@@ -2,9 +2,6 @@ const std = @import("std");
 
 const max_name_len = 64;
 
-/// Returns the single candidate within a small edit distance of `value`, or
-/// null when nothing is close enough or the closest candidates tie. Ties return
-/// null so diagnostics never present a guess as the answer.
 pub fn closest(value: []const u8, candidates: []const []const u8) ?[]const u8 {
     if (value.len == 0 or value.len > max_name_len) return null;
     const limit = maxDistance(value.len);
@@ -26,13 +23,10 @@ pub fn closest(value: []const u8, candidates: []const []const u8) ?[]const u8 {
     return if (tied) null else best;
 }
 
-// Short names allow one edit only; otherwise most short keys would match each other.
 fn maxDistance(len: usize) usize {
     return if (len <= 4) 1 else 2;
 }
 
-// Optimal string alignment distance: Levenshtein plus adjacent transpositions,
-// so "prot" -> "port" counts as one edit.
 fn editDistance(a: []const u8, b: []const u8) usize {
     var rows: [3][max_name_len + 1]usize = undefined;
     var prev2 = &rows[0];

@@ -34,10 +34,7 @@ pub const ErrorContext = struct {
     config_path: ?[]const u8 = null,
     /// Source is recorded after discovery so diagnostics only mention real selections.
     config_source: ?ConfigSource = null,
-    /// Every existing candidate when selection fails with error.AmbiguousConfig.
     conflicting_config_paths: []const []const u8 = &.{},
-    /// Set by commands whose stdout is a single JSON document, so failures are
-    /// written as that document instead of text.
     json_output: bool = false,
 };
 
@@ -72,8 +69,6 @@ pub const Context = struct {
         return self.runtime_value.?;
     }
 
-    /// Selects the config the same way as `runtime()` and records it for
-    /// error output. The caller releases it with `deinitExpectedProjectName`.
     pub fn selectConfig(self: *Context) !ResolvedConfigPath {
         const io = self.base.io orelse return error.MissingIo;
         const resolved = try resolveConfigPath(self.base.gpa, io, self.base, self.parsed);
@@ -81,7 +76,6 @@ pub const Context = struct {
         return resolved;
     }
 
-    /// Loads a config from `selectConfig` with the same validation as `runtime()`.
     pub fn loadSelectedConfig(self: *Context, selected: ResolvedConfigPath) !config.ConfigFile {
         return loadConfigFile(self.base, selected);
     }
@@ -96,8 +90,6 @@ pub fn parseSize(arg: []const u8) !u16 {
     return std.fmt.parseUnsigned(u16, arg, 10) catch return error.InvalidArguments;
 }
 
-/// Selects and loads the config exactly as commands do, without touching tmux
-/// or Docker. Allocations are left in `context.gpa`, which is expected to be an arena.
 pub fn loadConfig(context: CommandContext, parsed: ParsedArgs) !config.Config {
     const io = context.io orelse return error.MissingIo;
     var resolved = try resolveConfigPath(context.gpa, io, context, parsed);
@@ -112,9 +104,6 @@ fn loadRuntime(context: CommandContext, parsed: ParsedArgs) !Runtime {
     recordSelection(context, resolved);
     const cfg = (try loadConfigFile(context, resolved)).cfg;
     switch (resolved.source) {
-        // Named configs written by `zask init` reference the shared schema copy.
-        // Refreshing it here keeps editors in step with an upgraded zask; a
-        // read-only config dir must not block the command itself.
         .named, .inferred_named => config_schema.install(context.gpa, io, context.environ) catch {},
         .explicit, .discovered => {},
     }
@@ -228,8 +217,6 @@ pub fn projectConfigPath(gpa: std.mem.Allocator, io: std.Io, environ: ?*const en
 
 fn absoluteConfigPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
     if (std.fs.path.isAbsolute(path)) return path;
-    // Join with the cwd instead of resolving the file itself: the selected
-    // file name decides JSON or JSONC, even when it is a symlink.
     const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", gpa);
     defer gpa.free(cwd);
     const absolute = try std.fs.path.join(gpa, &.{ cwd, path });
@@ -253,9 +240,6 @@ fn discoverConfigPath(gpa: std.mem.Allocator, io: std.Io, err_ctx: ?*ErrorContex
     return try findSingleCandidate(gpa, io, cwd, &local_config_names, err_ctx) orelse error.ConfigNotFound;
 }
 
-/// Returns the only existing `dir/name` as an owned path, or null when none
-/// exists. On error.AmbiguousConfig, the existing candidates are stored in
-/// `err_ctx` and owned by `gpa`.
 fn findSingleCandidate(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, names: []const []const u8, err_ctx: ?*ErrorContext) !?[]const u8 {
     var found: std.ArrayList([]const u8) = .empty;
     defer found.deinit(gpa);

@@ -66,9 +66,6 @@ pub fn writePaneTail(ctx: anytype, window: []const u8, progress: anytype) !void 
     try progress.detail(tail.lines);
 }
 
-/// Returns false when the pane was still busy after the last attempt or could
-/// not be observed; the warning is already printed, so callers decide only
-/// whether to report it.
 pub fn waitForStopped(ctx: anytype, service: []const u8, writer: *std.Io.Writer) !bool {
     var attempt: usize = 0;
     try writeStopProgress(writer, service, 1);

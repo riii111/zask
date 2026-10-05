@@ -8,9 +8,7 @@ const file_swap = @import("../platform/file_swap.zig");
 pub const NewService = config_edit.NewService;
 
 pub const Target = struct {
-    /// Path of the selected config; symlinks are followed when writing.
     path: []const u8,
-    /// The exact content the selected config was loaded from.
     bytes: []const u8,
     home: []const u8,
 };
@@ -20,36 +18,20 @@ pub const Outcome = union(enum) {
     duplicate: []const u8,
     group_not_found: []const []const u8,
     group_required: []const []const u8,
-    /// The edited config fails validation; the diagnostics hold the reasons.
     invalid,
-    /// The edited config would exceed the size zask loads.
     too_large,
-    /// The file changed after it was loaded; nothing was written.
     changed,
-    /// The file changed while it was being replaced. The version that was
-    /// replaced is kept at this path for the user to compare.
     conflict: []const u8,
 };
 
-/// Serializes `zask add` runs. Hold it from selecting the config until
-/// `addService` returns, so a concurrent run loads the result of this one
-/// instead of overwriting it. The lock covers every config rather than one
-/// file: on macOS, `realpath` of a config can return the temporary name of a
-/// file that another run is swapping in, so no run may resolve its config
-/// while another one writes. Editors do not take the lock; `addService`
-/// detects their saves instead.
 pub const EditLock = struct {
     file: std.Io.File,
 
-    /// Closing the file drops the OS lock; the kernel also drops it when the
-    /// process exits, so a crashed run never leaves zask add locked. The lock
-    /// file itself stays in the lock directory for reuse.
     pub fn release(self: EditLock, io: std.Io) void {
         self.file.close(io);
     }
 };
 
-/// Waits for the exclusive edit lock, using a lock file under `lock_dir`.
 pub fn lockConfigEdits(gpa: std.mem.Allocator, io: std.Io, lock_dir: []const u8) !EditLock {
     const lock_path = try std.fs.path.join(gpa, &.{ lock_dir, edit_lock_name });
     defer gpa.free(lock_path);
@@ -62,12 +44,6 @@ pub fn lockConfigEdits(gpa: std.mem.Allocator, io: std.Io, lock_dir: []const u8)
 
 const edit_lock_name = "config-edit.lock";
 
-/// Adds `service` to the config at `target.path`, read as JSONC when the path
-/// ends in `.jsonc` like the loader does. The file is replaced only
-/// when the edited config passes validation and the file still holds
-/// `target.bytes`; otherwise it is left untouched. Callers hold
-/// `lockConfigEdits` from selecting the config until this call returns. Returned slices are allocated
-/// from `gpa`; pass an arena.
 pub fn addService(gpa: std.mem.Allocator, io: std.Io, target: Target, group: ?[]const u8, service: NewService, diags: *diagnostics.Diagnostics) !Outcome {
     const format = jsonc.Format.fromPath(target.path);
     var syntax_error: jsonc.SyntaxError = undefined;
@@ -90,30 +66,15 @@ pub fn addService(gpa: std.mem.Allocator, io: std.Io, target: Target, group: ?[]
     };
 }
 
-/// Result of writing the edited config.
 const Replacement = union(enum) {
     replaced,
-    /// The config changed before the write; nothing was written.
     changed,
-    /// The config changed while it was being replaced. The version that was
-    /// replaced is kept at this path; see `PendingWrite.restoreDisplaced`.
     conflict: []const u8,
 };
 
-/// Writes `contents` over the real file behind `path` only if that file
-/// still holds `expected`.
-///
-/// Editors do not take `lockConfigEdits`, and a rename cannot check what it
-/// replaces, so the new file is exchanged with the config instead of renamed
-/// over it. The file it displaces stays at the temporary path and is checked
-/// afterwards; a displaced file that is not `expected` is put back, or kept
-/// on disk when that cannot be confirmed. No version of the config is
-/// deleted without being compared first. Filesystems without an atomic
-/// exchange fail with error.ExchangeUnsupported before anything is written.
 fn replaceIfUnchanged(gpa: std.mem.Allocator, io: std.Io, path: []const u8, expected: []const u8, contents: []const u8) !Replacement {
     const pending = (try PendingWrite.stage(gpa, io, path, expected, contents)) orelse return .changed;
     {
-        // Until the exchange, the temporary file holds only this edit.
         errdefer pending.discard(io);
         if (!try pending.targetUnchanged(gpa, io)) {
             pending.discard(io);
@@ -128,25 +89,18 @@ fn replaceIfUnchanged(gpa: std.mem.Allocator, io: std.Io, path: []const u8, expe
     return pending.restoreDisplaced(gpa, io);
 }
 
-/// New config content written to a temporary file next to the real config,
-/// with the original permissions. A symlinked config keeps its link because
-/// every step works on the real path.
 const PendingWrite = struct {
     real_path: []const u8,
     temp_path: []const u8,
     expected: []const u8,
     contents: []const u8,
 
-    /// Returns null when the config no longer exists.
     fn stage(gpa: std.mem.Allocator, io: std.Io, path: []const u8, expected: []const u8, contents: []const u8) !?PendingWrite {
         const real_path = std.Io.Dir.cwd().realPathFileAlloc(io, path, gpa) catch |err| switch (err) {
             error.FileNotFound => return null,
             else => return err,
         };
         const stat = try std.Io.Dir.cwd().statFile(io, real_path, .{});
-        // Created with the config's mode, which the umask can only narrow,
-        // and widened back to it before any content is written, so a private
-        // config is never readable through the temporary file.
         const temp = try createTempFile(gpa, io, real_path, stat.permissions);
         errdefer std.Io.Dir.deleteFileAbsolute(io, temp.path) catch {};
         defer temp.file.close(io);
@@ -160,23 +114,14 @@ const PendingWrite = struct {
         return fileEquals(gpa, io, self.real_path, self.expected);
     }
 
-    /// Exchanges the new file with the config. On error nothing was
-    /// exchanged. Afterwards the displaced config is at `temp_path` and may
-    /// be the only copy of someone else's save, so it is deleted only after
-    /// `displacedIsExpected` or `restoreDisplaced` confirms it.
     fn swapIn(self: PendingWrite, gpa: std.mem.Allocator) !void {
         try file_swap.exchange(gpa, self.temp_path, self.real_path);
     }
 
-    /// A read failure counts as unconfirmed, which keeps the file.
     fn displacedIsExpected(self: PendingWrite, gpa: std.mem.Allocator, io: std.Io) bool {
         return fileEquals(gpa, io, self.temp_path, self.expected) catch false;
     }
 
-    /// Puts a displaced file that someone else saved back at the config, so
-    /// their save wins and this edit is dropped. The temporary file is
-    /// deleted only when it is confirmed to hold this edit; otherwise it is
-    /// kept and reported, because it may be the only copy of another save.
     fn restoreDisplaced(self: PendingWrite, gpa: std.mem.Allocator, io: std.Io) Replacement {
         file_swap.exchange(gpa, self.temp_path, self.real_path) catch return .{ .conflict = self.temp_path };
         const holds_this_edit = fileEquals(gpa, io, self.temp_path, self.contents) catch false;
@@ -192,8 +137,6 @@ const PendingWrite = struct {
 
 const TempFile = struct { file: std.Io.File, path: []const u8 };
 
-/// Creates `.<name>.zask-add-<pid>[-n]` next to `real_path`. The path is
-/// allocated from `gpa`.
 fn createTempFile(gpa: std.mem.Allocator, io: std.Io, real_path: []const u8, permissions: std.Io.File.Permissions) !TempFile {
     const dir = std.fs.path.dirname(real_path) orelse "/";
     const name = std.fs.path.basename(real_path);
@@ -529,8 +472,6 @@ test "service_add.PendingWrite.stage: creates the temporary file with the config
     try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(@intFromEnum(stat.permissions) & 0o777)));
 }
 
-/// Saves like editors that write a temporary file and rename it over the
-/// config, replacing the file instead of rewriting it.
 fn testEditorSave(file: TestFile, io: std.Io, contents: []const u8) !void {
     try file.tmp.dir.writeFile(io, .{ .sub_path = ".editor-save", .data = contents });
     try file.tmp.dir.rename(".editor-save", file.tmp.dir, file.name, io);

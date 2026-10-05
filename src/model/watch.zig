@@ -1,18 +1,8 @@
-//! File watch settings for a service and the path filter derived from them.
-//!
-//! Patterns follow the gitignore convention: a pattern without `/` matches the
-//! last path component at any depth (`*.log`, `node_modules`); a pattern with
-//! `/` matches the whole path relative to the watched path (`build/**`). A
-//! trailing `/` is ignored. `*` and `?` stay within one component and `**`
-//! spans any number of components.
-
 const std = @import("std");
 
 pub const default_paths = [_][]const u8{"."};
 pub const default_debounce_ms: u64 = 300;
 
-/// Version-control metadata changes on every `git status`; watching it would
-/// restart services without any source change.
 pub const builtin_excludes = [_][]const u8{ ".git", ".hg", ".svn" };
 
 pub const Spec = struct {
@@ -21,14 +11,12 @@ pub const Spec = struct {
     exclude: []const []const u8,
     debounce_ms: u64,
 
-    /// Frees the outer slices only; the strings are borrowed from the config.
     pub fn deinit(self: Spec, gpa: std.mem.Allocator) void {
         gpa.free(self.paths);
         gpa.free(self.include);
         gpa.free(self.exclude);
     }
 
-    /// Excluded directories are not descended into.
     pub fn skipsDir(self: Spec, rel_path: []const u8) bool {
         return self.excludes(rel_path);
     }
@@ -68,7 +56,6 @@ pub fn patternMessage(err: PatternError) []const u8 {
     };
 }
 
-/// `rel_path` uses `/` separators and is relative to the watched path.
 pub fn matches(pattern: []const u8, rel_path: []const u8) bool {
     const trimmed = trimTrailingSlash(pattern);
     if (std.mem.indexOfScalar(u8, trimmed, '/') == null) {
@@ -100,7 +87,6 @@ fn matchComponents(pattern: []const u8, path: []const u8) bool {
     if (!matchComponent(pattern_head, path_head)) return false;
     if (pattern_rest == null and path_rest == null) return true;
     if (pattern_rest == null) return false;
-    // `dir/**` also matches `dir` itself so the directory can be pruned.
     if (path_rest == null) return std.mem.eql(u8, pattern_rest.?, "**");
     return matchComponents(pattern_rest.?, path_rest.?);
 }

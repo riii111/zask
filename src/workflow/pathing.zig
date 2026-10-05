@@ -7,7 +7,6 @@ pub fn absolute(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u
     return gpa.dupe(u8, buffer[0..len]);
 }
 
-/// Display only: relative paths are resolved lexically, so never stat the result.
 pub fn absoluteForDisplay(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
     if (std.fs.path.isAbsolute(path)) return withoutCurrentDirParts(gpa, path);
     const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", gpa);
@@ -15,7 +14,6 @@ pub fn absoluteForDisplay(gpa: std.mem.Allocator, io: std.Io, path: []const u8) 
     return std.fs.path.resolve(gpa, &.{ cwd, path });
 }
 
-// Dropping `.` keeps the target unchanged; `..` stays because it can cross a symlink.
 fn withoutCurrentDirParts(gpa: std.mem.Allocator, path: []const u8) ![]const u8 {
     var parts: std.ArrayList([]const u8) = .empty;
     defer parts.deinit(gpa);

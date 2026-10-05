@@ -5,15 +5,9 @@ const validate = @import("../model/validate.zig");
 pub const Service = struct {
     name: []const u8,
     command: []const u8,
-    /// 1-based line in the source file, kept so later checks can point back to it.
     line: usize,
 };
 
-/// Parses Procfile `name: command` lines. Blank lines and lines starting with
-/// `#` are skipped; the command is everything after the first colon and its
-/// following spaces, so later colons and whitespace survive. Every problem is added to `diags` as
-/// `<source>:<line>` before failing with `error.InvalidProcfile`.
-/// Returned names and commands borrow from `bytes`; pass an arena for `gpa`.
 pub fn parse(gpa: std.mem.Allocator, source: []const u8, bytes: []const u8, diags: *diagnostics.Diagnostics) ![]const Service {
     var services: std.ArrayList(Service) = .empty;
     const problems_before = diags.slice().len;
@@ -22,8 +16,6 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8, bytes: []const u8, diag
     var line_number: usize = 0;
     while (lines.next()) |raw_line| {
         line_number += 1;
-        // Only the line ending is dropped: trailing whitespace can be part of
-        // the command (`foo\ ` escapes a space), so it is kept verbatim.
         const line = std.mem.trimStart(u8, std.mem.trimEnd(u8, raw_line, "\r"), " \t");
         if (std.mem.trimEnd(u8, line, " \t").len == 0 or line[0] == '#') continue;
 

@@ -2,17 +2,10 @@ const std = @import("std");
 const env = @import("../platform/env.zig");
 const paths = @import("../platform/paths.zig");
 
-/// The schema of the config keys this binary accepts. It is installed under the
-/// config base so generated `$schema` references resolve without network access
-/// and follow the installed zask version.
 pub const contents = @embedFile("config_schema");
 pub const file_name = "zask.schema.json";
-/// `$schema` value for a named config at `<config base>/<project>/config.json`.
 pub const named_config_reference = "../" ++ file_name;
 
-/// Writes the embedded schema to `<config base>/zask.schema.json` unless the
-/// file already has the same contents. The file is replaced atomically so an
-/// editor reading it never sees a partial schema.
 pub fn install(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env.Map) !void {
     const base = try paths.configBase(gpa, environ);
     defer gpa.free(base);

@@ -15,7 +15,6 @@ pub const Options = struct {
 pub fn run(ctx: *Context, opts: Options) !void {
     _ = opts;
     const rt = try ctx.runtime();
-    // The CLI arena never frees, and this loop runs for the whole session.
     try rt.watch(std.heap.smp_allocator, ctx.writer);
 }
 

@@ -5,15 +5,11 @@ const proc_runner = @import("../platform/runner.zig");
 const service_observation = @import("service_observation.zig");
 const waits = @import("waits.zig");
 
-/// Matches the startup port wait so `wait` gives up no sooner than `open` would.
 pub const default_timeout_seconds = 180;
 const poll_interval_ms = 1_000;
 
-/// What one observation means for a service being waited on.
 pub const WaitDecision = enum {
-    /// The configured port listens and, when configured, the HTTP check passes.
     ready,
-    /// No port is configured, so a running process is the success condition.
     running_without_check,
     pending,
     not_running,
@@ -30,23 +26,14 @@ pub fn waitDecision(health: observations.HealthObservation) WaitDecision {
     };
 }
 
-/// Polls the shared service observation until every target is ready. Read-only:
-/// nothing is started, stopped, or selected, so a service that is not running
-/// fails at once instead of being waited on. `timeout_seconds` bounds the whole
-/// wait, not each service. A target is a group (checked first, as in `start`)
-/// or a service; a service named by several targets is waited on once.
 pub fn waitReady(cfg: config.Config, observer: service_observation.Observer, targets: []const []const u8, timeout_seconds: u32, writer: *std.Io.Writer) !void {
     const gpa = observer.gpa;
     const services = try expandTargets(gpa, cfg, targets, writer);
     defer gpa.free(services);
     const deadline = observer.runner.nowMilliseconds() + @as(i64, timeout_seconds) * std.time.ms_per_s;
-    // Every tmux and probe command is killed at the deadline, so a command
-    // that never returns cannot hold the wait past it. Such a command reads as
-    // unavailable; past the deadline that is reported as the timeout it is.
     const bounded = observer.withDeadline(deadline);
     const timeout: Timeout = .{ .runner = bounded.runner, .deadline = deadline };
 
-    // Last health per service for the timeout report; null until observed.
     const last = try gpa.alloc(?observations.HealthObservation, services.len);
     defer gpa.free(last);
     @memset(last, null);
@@ -67,8 +54,6 @@ pub fn waitReady(cfg: config.Config, observer: service_observation.Observer, tar
     defer gpa.free(reported);
     @memset(reported, false);
 
-    // Every round re-observes all targets, so one that became ready and then
-    // exited still fails the wait.
     while (true) {
         var all_ready = true;
         for (services, last, reported) |service, *health, *was_reported| {
@@ -113,7 +98,6 @@ const Timeout = struct {
     }
 };
 
-/// Caller owns the returned slice; the values borrow from `cfg`.
 fn expandTargets(gpa: std.mem.Allocator, cfg: config.Config, targets: []const []const u8, writer: *std.Io.Writer) ![]std.json.Value {
     var services: std.ArrayList(std.json.Value) = .empty;
     errdefer services.deinit(gpa);
@@ -155,7 +139,6 @@ fn reportNotRunning(writer: *std.Io.Writer, name: []const u8, pane: observations
             try waits.writeProgress(writer, "{s} exited\n", .{name}),
         .idle => try waits.writeProgress(writer, "{s} is not running\n", .{name}),
         .window_missing => try waits.writeProgress(writer, "{s} has no window\n", .{name}),
-        // serviceHealth maps these to running or unavailable, never not_running.
         .busy, .tmux_unavailable => unreachable,
     }
     return error.ServiceNotRunning;
@@ -182,8 +165,6 @@ fn reportTimeout(writer: *std.Io.Writer, services: []const std.json.Value, last:
         switch (observed) {
             .waiting => try writer.print("  {s}: port {d} not listening\n", .{ name, port }),
             .degraded => try writer.print("  {s}: HTTP check on port {d} failing\n", .{ name, port }),
-            // Not reaching the deadline check: not_running / unavailable end
-            // the wait at once.
             .ready, .no_check, .not_running, .unavailable => continue,
         }
         listed += 1;
@@ -258,7 +239,6 @@ const TestHarness = struct {
         return count;
     }
 
-    /// Fails if the wait issued anything beyond observation queries.
     fn expectReadOnly(self: *TestHarness) !void {
         for (self.recorder.commands.items) |command| {
             for ([_][]const u8{ "respawn-pane", "send-keys", "select-window", "kill-session", "new-window" }) |mutating| {
@@ -343,14 +323,12 @@ test "readiness_wait.waitReady: waits for every service of a group" {
     h.init();
     defer h.deinit();
     try h.enqueue(test_session_active, 0);
-    // round 1: api ready, worker running, web not listening yet
     try h.enqueue(test_pane_running, 0);
     try h.enqueue("", 0);
     try h.enqueue("", 0);
     try h.enqueue(test_pane_running, 0);
     try h.enqueue(test_pane_running, 0);
     try h.enqueue("", 1);
-    // round 2: every service is observed again; api and worker are not reported twice
     try h.enqueue(test_pane_running, 0);
     try h.enqueue("", 0);
     try h.enqueue("", 0);

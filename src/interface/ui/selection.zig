@@ -1,6 +1,5 @@
 const std = @import("std");
 
-/// `page_up` / `page_down` carry the rows one page moves, at least one.
 pub const Motion = union(enum) {
     up,
     down,
@@ -10,22 +9,15 @@ pub const Motion = union(enum) {
     last,
 };
 
-/// Remembers the selected row by name so refreshes and filter changes never
-/// move the selection onto a different service. When the selected row is
-/// hidden, nothing is highlighted until the user moves again.
 pub const Selection = struct {
-    /// Owned by the allocator passed to `move` / `track`; freed by `deinit`.
     name: ?[]u8 = null,
-    /// Last visible position of `name`, used to pick a nearby row after it is hidden.
     index: usize = 0,
 
-    /// Safe on the default empty value.
     pub fn deinit(self: *Selection, gpa: std.mem.Allocator) void {
         if (self.name) |name| gpa.free(name);
         self.* = .{};
     }
 
-    /// Returns the visible position of the selected row, or null when it is hidden.
     pub fn position(self: Selection, names: []const []const u8) ?usize {
         const name = self.name orelse return null;
         for (names, 0..) |candidate, i| {
@@ -34,8 +26,6 @@ pub const Selection = struct {
         return null;
     }
 
-    /// Selects the first row when nothing was ever selected, and records the
-    /// current position of a visible selection. A hidden selection is kept.
     pub fn track(self: *Selection, gpa: std.mem.Allocator, names: []const []const u8) !void {
         if (self.name == null) {
             if (names.len > 0) try self.select(gpa, names, 0);
@@ -44,9 +34,6 @@ pub const Selection = struct {
         if (self.position(names)) |i| self.index = i;
     }
 
-    /// Moves within the visible rows without wrapping. A hidden selection
-    /// lands on the row now at its last position, except that `first` and
-    /// `last` always go to the ends.
     pub fn move(self: *Selection, gpa: std.mem.Allocator, names: []const []const u8, motion: Motion) !void {
         if (names.len == 0) return;
         const end = names.len - 1;

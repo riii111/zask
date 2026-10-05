@@ -14,8 +14,6 @@ pub fn dataBase(gpa: std.mem.Allocator, environ: ?*const env.Map) ![]const u8 {
     return std.fs.path.join(gpa, &.{ try home(environ), ".local", "share", "zask" });
 }
 
-/// Follows the XDG rule that an empty or relative XDG_STATE_HOME is ignored:
-/// a relative base would resolve differently in each pane's directory.
 pub fn stateBase(gpa: std.mem.Allocator, environ: ?*const env.Map) ![]const u8 {
     if (env.get(environ, "XDG_STATE_HOME")) |value| {
         if (std.fs.path.isAbsolute(value)) return std.fs.path.join(gpa, &.{ value, "zask" });
@@ -37,7 +35,6 @@ pub fn exists(io: std.Io, path: []const u8) bool {
     return true;
 }
 
-/// Creates `path` and its parents, then restricts `path` itself to the owner.
 pub fn ensurePrivateDir(io: std.Io, path: []const u8) !void {
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
     var dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true, .follow_symlinks = false });

@@ -1,25 +1,13 @@
-//! Restarts services that exit abnormally. Runs in the `zask-watch` loop next
-//! to file watch, so recovery keeps going after the monitor closes or the
-//! client detaches and ends when `close` kills the session. Restarts use the
-//! same lifecycle start as `zask start`, under the service lock and the stop
-//! record shared with file watch. Each step is also left on the service pane
-//! as a recovery record for the monitor, and giving up is noted in the
-//! service log.
-
 const std = @import("std");
 const config = @import("../model/config.zig");
 const lifecycle = @import("lifecycle.zig");
 const observations = @import("../model/observations.zig");
 const recovery = @import("../model/recovery.zig");
 
-/// A failure this long after the last restart was not a crash loop, so it
-/// starts the retry count over.
 pub const stable_run_seconds: i64 = 30;
 
-/// What the service pane shows, combined with the stop record.
 pub const Observed = enum {
     running,
-    /// `zask stop`, `zask close`, or Ctrl-C in the window.
     stopped,
     window_closed,
     exited_cleanly,
@@ -28,10 +16,6 @@ pub const Observed = enum {
     tmux_unavailable,
 };
 
-/// The wrapper turns Ctrl-C into an idle shell, so a dead pane exited on its
-/// own, unless the service replaced the wrapper with `exec` and died from
-/// Ctrl-C. A stop record wins over the exit status because `zask stop` may
-/// race the exit it caused.
 pub fn observed(state: observations.PaneState, exit: observations.PaneExit, mark: observations.StopMarkObservation) Observed {
     return switch (state) {
         .busy => .running,
@@ -50,12 +34,9 @@ pub fn observed(state: observations.PaneState, exit: observations.PaneExit, mark
     };
 }
 
-/// One observation of a service pane, already reduced to what recovery needs.
 pub const Run = struct {
     state: observations.PaneState,
-    /// Meaningful only for dead panes.
     exit: observations.PaneExit = .clean,
-    /// Tells one run of the pane from the next.
     pid: ?i64 = null,
 };
 
@@ -63,7 +44,6 @@ pub const Supervisor = struct {
     gpa: std.mem.Allocator,
     services: std.ArrayList(Service),
 
-    /// A failure waiting `delay_ms` before its restart.
     const Pending = struct {
         pid: ?i64,
         failed_at_ns: i96,
@@ -72,24 +52,13 @@ pub const Supervisor = struct {
     const Service = struct {
         name: []const u8,
         policy: config.RestartOnFailure,
-        /// Restarts made for the current series of failures.
         restarts: u32 = 0,
-        /// Pid the pane had right after this supervisor's last restart: the new
-        /// run, or the failed one when the restart did not start anything. A
-        /// failure of any other run (a manual or file-change start) starts the
-        /// count over.
         restarted_pid: ?i64 = null,
-        /// Unix seconds of the last restart; the series ends once a failure
-        /// comes `stable_run_seconds` after it.
         restarted_at: i64 = 0,
         pending: ?Pending = null,
-        /// Pid of the dead run already reported as final (clean exit, retries
-        /// used up), so a pane that stays dead is reported once.
         reported_pid: ?i64 = null,
     };
 
-    /// Supervises every service with `restart_on_failure`. Call `deinit` on
-    /// the result. `cfg` must outlive the supervisor; names borrow from it.
     pub fn init(gpa: std.mem.Allocator, cfg: config.Config) !Supervisor {
         var self: Supervisor = .{ .gpa = gpa, .services = .empty };
         errdefer self.deinit();
@@ -115,15 +84,6 @@ pub const Supervisor = struct {
         try writer.flush();
     }
 
-    /// Observes every supervised service once and restarts those whose
-    /// failure has waited `delay_ms`. `ctx` provides `now() i96` (monotonic
-    /// ns), `nowSeconds() i64` (Unix seconds), `observeRun(name) Run`,
-    /// `stopMark(name)`, `recover(name, notice, record, writer) !StartOutcome`,
-    /// `recordFailedRun(name, record, note) !lifecycle.FailedRunRecord`, and
-    /// `clearRecovery(name) !void`. Restart failures are reported and count
-    /// as attempts; a restart that finds the service already started or
-    /// stopped by someone else does not. A record or note that cannot be
-    /// written is reported and does not stop recovery.
     pub fn tick(self: *Supervisor, ctx: anytype, writer: *std.Io.Writer) !void {
         for (self.services.items) |*service| {
             try self.check(service, ctx, writer);
@@ -165,8 +125,6 @@ pub const Supervisor = struct {
     fn handleFailure(self: *Supervisor, service: *Service, run: Run, ctx: anytype, writer: *std.Io.Writer) !void {
         if (reported(service, run.pid)) return;
         const now_ns = ctx.now();
-        // Another run (a manual or file-change start) failed before this tick
-        // saw it running; it gets its own delay and series.
         if (service.pending) |pending| {
             if (pending.pid != run.pid) service.pending = null;
         }
@@ -200,8 +158,6 @@ pub const Supervisor = struct {
                 break :failed .started;
             },
         };
-        // Someone else started or stopped the service under the lock first;
-        // that run is not part of this series.
         if (outcome == .skipped) return;
         service.restarts = attempt;
         service.restarted_at = ctx.nowSeconds();
@@ -209,11 +165,6 @@ pub const Supervisor = struct {
     }
 };
 
-/// A failure continues the series when the pane still holds the run this
-/// supervisor left there and it failed within `stable_run_seconds` of that
-/// restart. Measuring from the restart rather than the run start keeps a
-/// restart that started nothing in the series. An unknown pid counts as the
-/// same run, so the limit still holds.
 fn continuesSeries(service: Supervisor.Service, pid: ?i64, now_seconds: i64) bool {
     if (pid != null and service.restarted_pid != pid) return false;
     return now_seconds - service.restarted_at < stable_run_seconds;
@@ -223,8 +174,6 @@ fn reported(service: *const Supervisor.Service, pid: ?i64) bool {
     return pid != null and service.reported_pid == pid;
 }
 
-/// A run started since the failure was seen gets nothing; see
-/// Lifecycle.recordFailedRun.
 fn recordFailure(name: []const u8, record: recovery.Record, note: ?[]const u8, ctx: anytype, writer: *std.Io.Writer) !void {
     const result: lifecycle.FailedRunRecord = ctx.recordFailedRun(name, record, note) catch |err| switch (err) {
         error.OutOfMemory => return err,
@@ -253,18 +202,14 @@ const TestContext = struct {
     run: Run = .{ .state = .busy, .pid = 100 },
     mark: observations.StopMarkObservation = .not_stopped,
     fail_recover: bool = false,
-    /// A manual start that wins the service lock before the next recovery.
     started_elsewhere: ?i64 = null,
     next_pid: i64 = 200,
     recovers: std.ArrayList([]const u8) = .empty,
-    /// The record each recovery start left on the pane.
     recovered_records: std.ArrayList(?recovery.Record) = .empty,
-    /// The record on the pane; recordRecovery and recover replace it.
     record: ?recovery.Record = null,
     fail_record: bool = false,
     notes: std.ArrayList([]const u8) = .empty,
     fail_note: bool = false,
-    /// The service lock recordFailedRun takes cannot be held.
     fail_lock: bool = false,
 
     fn deinit(self: *TestContext) void {
@@ -333,7 +278,6 @@ const TestContext = struct {
         self.record = null;
     }
 
-    /// The current run dies `after_s` seconds from now.
     fn crash(self: *TestContext, after_s: i64, exit: observations.PaneExit) void {
         self.now_s += after_s;
         self.run.state = .dead;

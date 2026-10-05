@@ -13,33 +13,18 @@ pub const NewService = struct {
 };
 
 pub const AddedService = struct {
-    /// The whole config with the service inserted.
     bytes: []u8,
     group: []const u8,
-    /// Single-line form of the inserted entry, for display.
     summary: []u8,
 };
 
 pub const AddServiceResult = union(enum) {
     added: AddedService,
-    /// Name of the group that already holds a service with the same name.
     duplicate: []const u8,
-    /// The requested group does not exist; holds the existing group names.
     group_not_found: []const []const u8,
-    /// No group was requested and the config has more than one; holds the
-    /// existing group names.
     group_required: []const []const u8,
 };
 
-/// Inserts `service` into a group's `services` as text, keeping the rest of
-/// `bytes` unchanged, comments included. An array gets a detailed entry; a
-/// named object gets the shorthand string, or a detailed entry when a port is
-/// set. The entry goes after the last existing one and after any comment on
-/// that entry's line, so comments stay next to what they describe.
-///
-/// `source` must be `bytes` parsed as JSON or JSONC and must pass config
-/// validation. Every returned slice is allocated from `gpa` or borrowed from
-/// `source`; pass an arena.
 pub fn addService(gpa: std.mem.Allocator, bytes: []const u8, source: Value, group: ?[]const u8, service: NewService) !AddServiceResult {
     const groups = source.object.get(keys.groups).?.array.items;
     if (findServiceGroup(groups, service.name)) |holder| return .{ .duplicate = holder };
@@ -55,7 +40,6 @@ pub fn addService(gpa: std.mem.Allocator, bytes: []const u8, source: Value, grou
     const services_value = target.object.get(keys.services).?;
     const kind: ContainerKind = if (services_value == .array) .array else .object;
 
-    // Offsets found in `plain` point at the same bytes in `bytes`.
     const plain = try jsonc.withoutComments(gpa, bytes);
     const container = try locateServices(gpa, plain, index);
     const layout = try Layout.detect(gpa, bytes, plain, container);
@@ -78,7 +62,6 @@ pub fn addService(gpa: std.mem.Allocator, bytes: []const u8, source: Value, grou
         try out.appendSlice(gpa, entry);
         try out.appendSlice(gpa, bytes[trailing.end..]);
     } else {
-        // Comments inside an empty container stay ahead of the new entry.
         const comments_end = jsonc.skipComments(bytes, container.open + 1, false).end;
         try out.appendSlice(gpa, bytes[0..comments_end]);
         try out.append(gpa, '\n');
@@ -100,8 +83,6 @@ const ContainerKind = enum { array, object };
 
 const Span = struct { start: usize, end: usize };
 
-/// Byte offsets of a `services` container: `open` and `close` point at the
-/// brackets, and each span covers a whole entry (`"key": value` for objects).
 const Container = struct {
     open: usize,
     close: usize,
@@ -111,20 +92,14 @@ const Container = struct {
 
 const EntryStyle = union(enum) {
     single_line,
-    /// Object entries span lines; fields use `field_indent`, and the closing
-    /// brace returns to `close_indent`.
     multi_line: struct { field_indent: []const u8, close_indent: []const u8 },
 };
 
 const Layout = struct {
-    /// Entries sit on their own lines.
     multiline: bool,
     entry_indent: []const u8,
-    /// Indentation of fields inside a multi-line detailed entry.
     field_indent: []const u8,
 
-    /// `plain` is `bytes` with comments blanked; indentation inside comments
-    /// does not count toward the file's indent unit.
     fn detect(gpa: std.mem.Allocator, bytes: []const u8, plain: []const u8, container: Container) !Layout {
         const open_indent = lineIndent(bytes, container.open);
         if (container.first) |first| {
@@ -140,8 +115,6 @@ const Layout = struct {
                 .field_indent = try std.mem.concat(gpa, u8, &.{ entry_indent, unit }),
             };
         }
-        // An empty container gets the entry on its own line, one level deeper
-        // than the line that opens it.
         const unit = fileIndentUnit(plain);
         const entry_indent = try std.mem.concat(gpa, u8, &.{ open_indent, unit });
         return .{
@@ -151,8 +124,6 @@ const Layout = struct {
         };
     }
 
-    /// A detailed entry spans lines only when the last existing entry does,
-    /// or when it is the first entry of a container.
     fn entryStyle(self: Layout, bytes: []const u8, container: Container) EntryStyle {
         const spans_lines = if (container.last) |last|
             std.mem.indexOfScalar(u8, bytes[last.start..last.end], '\n') != null
@@ -203,7 +174,6 @@ fn scanContainer(gpa: std.mem.Allocator, scanner: *std.json.Scanner) !Container 
     }
 }
 
-/// Advances past object keys until `key`, leaving the scanner at its value.
 fn seekKey(gpa: std.mem.Allocator, scanner: *std.json.Scanner, key: []const u8) !void {
     while (true) {
         const token = try scanner.nextAlloc(gpa, .alloc_if_needed);
@@ -315,7 +285,6 @@ fn groupNames(gpa: std.mem.Allocator, groups: []const Value) ![]const []const u8
     return names;
 }
 
-/// Leading spaces and tabs of the line containing `pos`.
 fn lineIndent(bytes: []const u8, pos: usize) []const u8 {
     const line_start = if (std.mem.lastIndexOfScalar(u8, bytes[0..pos], '\n')) |newline| newline + 1 else 0;
     var end = line_start;
@@ -323,8 +292,6 @@ fn lineIndent(bytes: []const u8, pos: usize) []const u8 {
     return bytes[line_start..end];
 }
 
-/// The indentation of the first indented line that has content, or two
-/// spaces.
 fn fileIndentUnit(bytes: []const u8) []const u8 {
     var lines = std.mem.splitScalar(u8, bytes, '\n');
     while (lines.next()) |line| {
@@ -339,7 +306,6 @@ fn fileIndentUnit(bytes: []const u8) []const u8 {
 // Tests
 // -----------------------------------------------------------------------------
 
-/// Reads `bytes` as JSONC, which also accepts every JSON test input.
 fn testAdd(arena: *std.heap.ArenaAllocator, bytes: []const u8, group: ?[]const u8, service: NewService) !AddServiceResult {
     const gpa = arena.allocator();
     var syntax_error: jsonc.SyntaxError = undefined;

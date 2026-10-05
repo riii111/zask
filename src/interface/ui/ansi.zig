@@ -10,7 +10,6 @@ pub const yellow = "\x1b[33m";
 pub const blue = "\x1b[34m";
 pub const cyan = "\x1b[36m";
 pub const reverse = "\x1b[7m";
-// Alternate screen keeps the pane's previous contents intact after the monitor exits.
 pub const enter_screen = "\x1b[?1049h\x1b[?25l";
 pub const leave_screen = "\x1b[0m\x1b[?25h\x1b[?1049l";
 
@@ -45,8 +44,6 @@ pub fn writeRule(writer: *std.Io.Writer, left: []const u8, fill: []const u8, rig
     try writer.writeAll(right);
 }
 
-/// Cuts `text` to at most `width` terminal columns without splitting a UTF-8
-/// sequence. Returns a prefix of `text`.
 pub fn truncate(text: []const u8, width: usize) []const u8 {
     var columns: usize = 0;
     var i: usize = 0;
@@ -59,7 +56,6 @@ pub fn truncate(text: []const u8, width: usize) []const u8 {
     return text;
 }
 
-/// Terminal columns of plain text (no escape sequences).
 pub fn displayWidth(text: []const u8) usize {
     var columns: usize = 0;
     var i: usize = 0;
@@ -71,11 +67,6 @@ pub fn displayWidth(text: []const u8) usize {
     return columns;
 }
 
-/// Cuts every line to `width` visible columns so narrow panes do not wrap rows
-/// into each other. Escape sequences are kept up to the cut and do not count
-/// as columns; characters count by `charWidth`. A cut line ends with `reset`
-/// so a color opened before the cut does not bleed onward.
-/// Caller owns the returned slice.
 pub fn clipLines(gpa: std.mem.Allocator, text: []const u8, width: usize) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
@@ -115,8 +106,6 @@ const Char = struct {
     width: usize,
 };
 
-// Invalid UTF-8 bytes count as one column each so a corrupt log line still
-// gets cut instead of stalling the scan.
 fn nextChar(text: []const u8, start: usize) Char {
     const len = std.unicode.utf8ByteSequenceLength(text[start]) catch return .{ .end = start + 1, .width = 1 };
     if (start + len > text.len) return .{ .end = text.len, .width = 1 };
@@ -124,16 +113,10 @@ fn nextChar(text: []const u8, start: usize) Char {
     return .{ .end = start + len, .width = charWidth(code_point) };
 }
 
-/// Approximates UAX #11 as terminals apply it: East Asian Wide / Fullwidth
-/// characters and emoji take two columns, combining marks and zero-width
-/// characters take none. Ambiguous-width symbols (the monitor's icons and box
-/// drawing) take one, matching tmux's default.
 fn charWidth(code_point: u21) usize {
     const zero_width = [_][2]u21{
         .{ 0x0300, 0x036F }, .{ 0x200B, 0x200F }, .{ 0x20D0, 0x20FF }, .{ 0xFE00, 0xFE0F }, .{ 0xFE20, 0xFE2F },
     };
-    // East Asian Wide / Fullwidth blocks plus the emoji that terminals draw
-    // two columns wide (Emoji_Presentation in the BMP, pictograph blocks above).
     const wide = [_][2]u21{
         .{ 0x1100, 0x115F },   .{ 0x231A, 0x231B },   .{ 0x2329, 0x232A },   .{ 0x23E9, 0x23EC },
         .{ 0x23F0, 0x23F0 },   .{ 0x23F3, 0x23F3 },   .{ 0x25FD, 0x25FE },   .{ 0x2614, 0x2615 },

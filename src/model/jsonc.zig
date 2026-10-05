@@ -2,8 +2,6 @@ const std = @import("std");
 
 const Value = std.json.Value;
 
-/// Config syntax selected by file name. Only `.jsonc` accepts comments so a
-/// plain `.json` file stays valid for every JSON tool and editor mode.
 pub const Format = enum {
     json,
     jsonc,
@@ -20,16 +18,12 @@ pub const Format = enum {
     }
 };
 
-/// 1-based position of the first syntax problem. Columns count bytes.
 pub const SyntaxError = struct {
     line: u64,
     column: u64,
     message: []const u8,
 };
 
-/// Parses `bytes` into a `std.json.Value` allocated from `gpa` (use an arena).
-/// On `error.InvalidSyntax`, `syntax_error` describes the first problem.
-/// Trailing commas are rejected in both formats.
 pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, format: Format, syntax_error: *SyntaxError) !Value {
     const source = switch (try blankComments(gpa, bytes, format)) {
         .ok => |source| source,
@@ -52,10 +46,6 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, format: Format, syntax_e
     };
 }
 
-/// Returns `bytes` with every comment replaced by spaces, so byte offsets
-/// found in the result point at the same tokens in `bytes`. `bytes` must
-/// already parse as JSONC. The result is `bytes` itself when it has no
-/// comments; otherwise it is allocated from `gpa`.
 pub fn withoutComments(gpa: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     return switch (try blankComments(gpa, bytes, .jsonc)) {
         .ok => |source| source,
@@ -64,17 +54,10 @@ pub fn withoutComments(gpa: std.mem.Allocator, bytes: []const u8) ![]const u8 {
 }
 
 pub const CommentRun = struct {
-    /// Just past the last comment, or the start offset when none was found.
     end: usize,
-    /// The last comment runs to the end of its line, so anything placed at
-    /// `end` must start on a new line.
     line_comment: bool = false,
 };
 
-/// Skips whitespace and comments from `start`, which must sit outside any
-/// string or comment, and reports where the comments end. With `same_line`,
-/// only comments that begin on the line of `start` count; a block comment
-/// that begins there still counts as a whole even when it spans lines.
 pub fn skipComments(bytes: []const u8, start: usize, same_line: bool) CommentRun {
     var run: CommentRun = .{ .end = start };
     var i = start;
@@ -100,9 +83,6 @@ const BlankResult = union(enum) {
     err: struct { offset: usize, message: []const u8 },
 };
 
-/// Replaces comment bytes with spaces, keeping newlines, so std.json reports
-/// positions that match the original file. Returns `bytes` unchanged when no
-/// comment is present.
 fn blankComments(gpa: std.mem.Allocator, bytes: []const u8, format: Format) !BlankResult {
     var out: ?[]u8 = null;
     var in_string = false;
@@ -149,9 +129,6 @@ fn blankComments(gpa: std.mem.Allocator, bytes: []const u8, format: Format) !Bla
     return .{ .ok = out orelse bytes };
 }
 
-/// Returns the exclusive end of the comment starting at `start`. The outer
-/// null means the slash does not start a comment; the inner null means an
-/// unterminated block comment.
 fn commentEnd(bytes: []const u8, start: usize) ??usize {
     if (start + 1 >= bytes.len) return null;
     return switch (bytes[start + 1]) {

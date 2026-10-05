@@ -30,7 +30,6 @@ pub fn invokeMonitor(gpa: std.mem.Allocator, zask_path: []const u8, config_path:
     return invoke(gpa, zask_path, config_path, monitor_command);
 }
 
-/// Returns a shell command string owned by the caller.
 pub fn invokeWatch(gpa: std.mem.Allocator, zask_path: []const u8, config_path: []const u8) ![]const u8 {
     return invoke(gpa, zask_path, config_path, watch_command);
 }

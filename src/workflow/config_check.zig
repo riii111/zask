@@ -5,18 +5,11 @@ const diagnostics = @import("../model/diagnostics.zig");
 const configured_path = @import("configured_path.zig");
 const pathing = @import("pathing.zig");
 
-/// Records every configured path that `open` / `start` would reject, without
-/// stopping at the first one. `cfg` must already be validated. Diagnostic
-/// strings are allocated from `gpa`, so pass the same arena that owns `diags`.
-/// Labels follow the authored config, naming groups and services instead of
-/// array indexes because the normalized config no longer carries them.
 pub fn collectPathProblems(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, diags: *diagnostics.Diagnostics) !void {
     var checker: Checker = .{ .gpa = gpa, .io = io, .diags = diags, .reported = .init(gpa) };
     defer checker.reported.deinit();
 
     const project_root = try cfg.projectRoot(gpa);
-    // Every relative path below resolves under the root, so a missing root
-    // would repeat as one problem per entry.
     if (!try checker.check("project.root", project_root, .directory)) return;
 
     for (try cfg.services()) |service| {
@@ -55,7 +48,6 @@ pub fn collectPathProblems(gpa: std.mem.Allocator, io: std.Io, cfg: config.Confi
     }
 }
 
-/// Names a service the way it is authored, e.g. `groups[be].services[api]`.
 pub fn serviceLabel(gpa: std.mem.Allocator, service: std.json.Value) ![]const u8 {
     return std.fmt.allocPrint(gpa, "groups[{s}].services[{s}]", .{ config.Config.serviceGroup(service), try config.Config.serviceName(service) });
 }
@@ -64,8 +56,6 @@ const Checker = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     diags: *diagnostics.Diagnostics,
-    /// Inherited env files resolve to the same path for every service; report
-    /// each label/path pair once.
     reported: std.StringHashMap(void),
 
     fn check(self: *Checker, label: []const u8, path: []const u8, kind: configured_path.Kind) !bool {
@@ -82,7 +72,6 @@ const Checker = struct {
     }
 };
 
-// Mirrors Config.serviceEnvFilePath: absolute and `~` entries ignore the service dir.
 fn dependsOnServiceDir(env_file: config.Config.EnvFile) bool {
     if (env_file.base != .service) return false;
     return !std.fs.path.isAbsolute(env_file.path) and !std.mem.startsWith(u8, env_file.path, "~");

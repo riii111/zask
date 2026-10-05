@@ -1,10 +1,3 @@
-//! Keeps schema/zask.schema.json consistent with the config parser.
-//!
-//! The schema covers structure (keys, types, enums, required fields). References
-//! between groups, services, and aliases, duplicate names, reserved service
-//! names, path escapes, and watch pattern rules are checked only by the parser;
-//! the tests below fix that boundary.
-
 const std = @import("std");
 const config = @import("config.zig");
 const diagnostics = @import("diagnostics.zig");
@@ -19,9 +12,6 @@ const identifier_pattern = "^[A-Za-z0-9_][A-Za-z0-9_-]*$";
 // Tests
 // -----------------------------------------------------------------------------
 
-/// Validates instances against the subset of JSON Schema draft-07 that
-/// zask.schema.json uses. Unsupported keywords fail the test so the schema
-/// cannot grow constraints this checker silently ignores.
 const TestSchemaChecker = struct {
     root: Value,
 
@@ -252,7 +242,6 @@ test "config.schema: enum values match parser values" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const checker = try testLoadSchema(arena.allocator());
-    // An empty runtime means "no prefix" in the parser, so the schema lists it too.
     const runtimes = config.allowed_values.runtime ++ [_][]const u8{""};
     const cases = [_]struct {
         path: []const []const u8,

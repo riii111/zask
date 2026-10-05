@@ -5,18 +5,12 @@ const observations = @import("../model/observations.zig");
 const proc_runner = @import("../platform/runner.zig");
 const tmux_client = @import("../platform/tmux.zig");
 
-/// Read-only observation of configured services shared by every caller that
-/// reports service state. Probes run only for running panes, and nothing here
-/// starts, stops, or selects anything.
 pub const Observer = struct {
     gpa: std.mem.Allocator,
     runner: proc_runner.Runner,
     tmux: tmux_client.Client,
     docker: docker_client.Compose,
 
-    /// Copy whose tmux, Docker, and probe commands are killed at `deadline_ms`
-    /// (Unix milliseconds). A command cut off this way is observed as
-    /// unavailable, so callers must check the deadline before reporting that.
     pub fn withDeadline(self: Observer, deadline_ms: i64) Observer {
         var bounded = self;
         bounded.runner.deadline_ms = deadline_ms;
@@ -25,7 +19,6 @@ pub const Observer = struct {
         return bounded;
     }
 
-    /// Caller owns the result and must deinit it with this observer's allocator.
     pub fn observeService(self: Observer, service: std.json.Value) !observations.ServiceObservation {
         const pane = self.tmux.observePane(try config.Config.serviceName(service));
         errdefer pane.deinit(self.gpa);
@@ -39,9 +32,6 @@ pub const Observer = struct {
         return result;
     }
 
-    /// Observation with the given pane and no probe run, for callers that know
-    /// the pane without asking tmux (e.g. the session is not running). Takes
-    /// ownership of `pane`; deinit the result, not the pane.
     pub fn unprobedService(self: Observer, service: std.json.Value, pane: observations.PaneObservation) observations.ServiceObservation {
         const port = config.Config.servicePort(service);
         const http_configured = port != null and std.mem.eql(u8, config.Config.serviceHealthcheckType(service), "http");
@@ -54,7 +44,6 @@ pub const Observer = struct {
         };
     }
 
-    /// Caller owns the result and must deinit it with this observer's allocator.
     pub fn observeDocker(self: Observer) observations.DockerObservation {
         const pane = self.tmux.observePane("docker");
         const compose = if (pane.running()) self.docker.observe() else observations.ComposeObservation.empty(.empty);
@@ -64,8 +53,6 @@ pub const Observer = struct {
     fn probeListen(self: Observer, port: i64) !observations.ProbeObservation {
         const port_text = try std.fmt.allocPrint(self.gpa, "{d}", .{port});
         defer self.gpa.free(port_text);
-        // `-w 1` bounds the probe like curl's `--max-time 1`, so callers with a
-        // deadline (e.g. `wait`) cannot be held by a connect that never returns.
         return self.probe(&.{ "nc", "-z", "-w", "1", "localhost", port_text });
     }
 
@@ -75,8 +62,6 @@ pub const Observer = struct {
         return self.probe(&.{ "curl", "-sf", "--max-time", "1", url });
     }
 
-    /// A probe that cannot be spawned is `unavailable`, not `failed`: a missing
-    /// `nc` / `curl` must not read as a service that is not ready.
     fn probe(self: Observer, argv: []const []const u8) observations.ProbeObservation {
         const result = proc_runner.captured(self.runner.run(argv, .{}) catch return .unavailable);
         defer self.runner.gpa.free(result.stdout);

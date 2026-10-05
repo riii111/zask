@@ -13,8 +13,6 @@ pub const WindowObservation = enum {
     unavailable,
 };
 
-/// Whether the user asked zask to stop a service. Survives the shutdown window
-/// in which the pane still looks busy.
 pub const StopMarkObservation = enum {
     stopped,
     not_stopped,
@@ -34,13 +32,8 @@ pub const PaneObservation = struct {
     exit_code: []const u8 = "",
     pid: []const u8 = "",
     command: []const u8 = "",
-    /// How the pane process ended. Meaningful only for `dead` panes.
     exit: PaneExit = .clean,
-    /// Unix seconds recorded when zask last spawned the pane process. null means
-    /// the start is unknown (e.g. a session opened by an older zask), not "never".
     started_at: ?i64 = null,
-    /// The recovery record on the pane; describes this run only as
-    /// recovery.view decides.
     recovery: recovery.RecordObservation = .none,
 
     pub fn empty(state: PaneState) PaneObservation {
@@ -69,8 +62,6 @@ pub const PaneObservation = struct {
         return self.state == .busy;
     }
 
-    /// The pane process id; tmux keeps reporting it after the process exits,
-    /// so it tells one run of a pane from the next. Null when unparseable.
     pub fn processId(self: PaneObservation) ?i64 {
         return std.fmt.parseInt(i64, self.pid, 10) catch null;
     }
@@ -81,8 +72,6 @@ pub const PaneObservation = struct {
             .tmux_unavailable => .unknown,
             .busy => {
                 const started_at = self.started_at orelse return .unknown;
-                // A start in the future means the clock moved; report unknown
-                // rather than a made-up elapsed time.
                 if (started_at > now) return .unknown;
                 return .{ .seconds = now - started_at };
             },
@@ -90,11 +79,8 @@ pub const PaneObservation = struct {
     }
 };
 
-/// SIGINT is 2 on every platform zask supports.
 const sigint = 2;
 
-/// Classifies tmux's process status and signal separately: an ordinary
-/// exit 130 is a failure; a process terminated by SIGINT was interrupted.
 pub fn paneExit(status: []const u8, signal: []const u8) PaneExit {
     const code = std.fmt.parseInt(u32, status, 10) catch
         return if (isInterruptSignal(signal)) .interrupted else .killed;
@@ -104,8 +90,6 @@ pub fn paneExit(status: []const u8, signal: []const u8) PaneExit {
     };
 }
 
-/// tmux prints the name from `sys_signame` where the libc has it (`int` on
-/// macOS) and the number otherwise (`2` on glibc).
 fn isInterruptSignal(signal: []const u8) bool {
     if (std.ascii.eqlIgnoreCase(signal, "int") or std.ascii.eqlIgnoreCase(signal, "sigint")) return true;
     const number = std.fmt.parseInt(u32, signal, 10) catch return false;
@@ -113,15 +97,9 @@ fn isInterruptSignal(signal: []const u8) bool {
 }
 
 pub const PaneExit = union(enum) {
-    /// Exit status 0.
     clean,
-    /// SIGINT, distinct from a command that returns status 130.
     interrupted,
-    /// Non-zero exit status. The service wrapper exits with 128+N when the
-    /// service dies from signal N.
     failed: u32,
-    /// The pane process itself died from a signal other than SIGINT, or
-    /// tmux did not report how it ended.
     killed,
 };
 
@@ -167,10 +145,6 @@ pub const ComposeObservation = struct {
     }
 };
 
-/// One readiness probe (port listen or HTTP). `not_configured` and
-/// `not_observed` keep "nothing to check" and "skipped because the process is
-/// not running" apart from a real result; `unavailable` means the probe command
-/// itself could not run.
 pub const ProbeObservation = enum {
     not_configured,
     not_observed,
@@ -190,11 +164,9 @@ pub const HealthObservation = enum {
 
 pub const ServiceObservation = struct {
     pane: PaneObservation,
-    /// Configured port, independent of whether anything listens on it.
     port: ?i64,
     listen: ProbeObservation,
     http: ProbeObservation,
-    /// Unix seconds when the observation was taken; uptime is measured to here.
     observed_at: i64,
 
     pub fn deinit(self: ServiceObservation, gpa: std.mem.Allocator) void {
@@ -229,8 +201,6 @@ fn serviceHealth(pane: PaneState, listen: ProbeObservation, http: ProbeObservati
     return switch (pane) {
         .idle, .dead, .window_missing => .not_running,
         .tmux_unavailable => .unavailable,
-        // A running pane always gets its configured probes run, so
-        // `not_observed` here would mean a skipped probe; treat it as unknown.
         .busy => switch (listen) {
             .not_configured => .no_check,
             .failed => .waiting,

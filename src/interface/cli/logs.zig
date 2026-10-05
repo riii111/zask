@@ -3,11 +3,8 @@ const Context = @import("context.zig").Context;
 
 pub const Options = struct {
     service: []const u8,
-    /// Set by `--tail <n>`: print the last n lines instead of focusing the window.
     tail: ?u32 = null,
-    /// Set by `--saved`: read the saved log instead of the tmux pane.
     saved: bool = false,
-    /// Set by `--path`: print where the saved log is kept, and nothing else.
     path: bool = false,
 
     pub fn parse(args: []const []const u8) !Options {
@@ -47,7 +44,6 @@ pub const Options = struct {
 pub fn run(ctx: *Context, opts: Options) !void {
     const rt = try ctx.runtime();
     if (!opts.path and !opts.saved and opts.tail == null) return rt.logs(opts.service, ctx.writer);
-    // Diagnostics go to stderr so stdout carries nothing but log lines or the path.
     var stderr_buffer: [512]u8 = undefined;
     var stderr_writer: std.Io.File.Writer = .init(.stderr(), rt.io, &stderr_buffer);
     const diag = &stderr_writer.interface;

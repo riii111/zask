@@ -31,8 +31,6 @@ pub fn run(ctx: *Context, opts: Options) !void {
         error.InvalidConfig => {
             const config_path = if (ctx.base.error_context) |err_ctx| err_ctx.config_path else null;
             try writeProblems(ctx.writer, config_path, diags.*);
-            // Path and environment checks need a normalized config, which only
-            // exists once validation passes.
             try ctx.writer.writeAll("Path and environment checks were skipped; fix the problems above and run check again.\n");
             return error.CheckFailed;
         },

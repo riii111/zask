@@ -69,8 +69,6 @@ pub fn run(ctx: *Context, opts: Options) !void {
     defer validation_arena.deinit();
     _ = try config.Config.parse(validation_arena.allocator(), json, try paths.home(ctx.base.environ));
 
-    // The config references the schema copy, so install it first: a failure
-    // then leaves no new config and keeps an existing one under --force.
     try config_schema.install(ctx.base.gpa, io, ctx.base.environ);
     const config_dir = std.fs.path.dirname(config_path) orelse return error.InvalidPath;
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, config_dir, @enumFromInt(0o755));
@@ -90,7 +88,6 @@ pub fn run(ctx: *Context, opts: Options) !void {
 const DetectedOptions = struct {
     opts: Options,
     service: ?init_inference.DetectedService = null,
-    /// Borrowed; the caller keeps the import allocation alive until rendering ends.
     procfile: ?ProcfileImport = null,
     compose_file: ?[]const u8 = null,
 
@@ -112,7 +109,6 @@ const DetectedOptions = struct {
 const ProcfileImport = struct {
     source: []const u8,
     services: []const procfile.Service,
-    /// Null when the Procfile sits in the project root, so `service.dir` stays omitted.
     dir: ?[]const u8 = null,
 };
 
@@ -164,16 +160,12 @@ fn resolveRootFromCwd(gpa: std.mem.Allocator, cwd: []const u8, root: []const u8)
 
 fn applyDetections(gpa: std.mem.Allocator, io: std.Io, cwd: []const u8, opts: Options) !DetectedOptions {
     const detected = try init_inference.detect(gpa, io, cwd, .{
-        // Procfile services replace the package script guess instead of joining it.
         .infer_service = opts.from == null,
         .infer_compose_file = true,
     });
     return DetectedOptions.fromOwnedDetectionResult(opts, detected);
 }
 
-/// Reads and parses the Procfile without running any command. Problems are
-/// printed with their `<path>:<line>` before `error.InvalidProcfile`, so no
-/// config is written. Results are allocated in `arena`.
 fn importProcfile(
     arena: std.mem.Allocator,
     io: std.Io,
@@ -215,8 +207,6 @@ fn importProcfile(
     };
 }
 
-/// Procfile commands run from the Procfile's directory. Inside the root it
-/// becomes a relative `dir`; outside it stays absolute, which config accepts.
 fn serviceDirFromRoot(gpa: std.mem.Allocator, cwd: []const u8, root: []const u8, procfile_dir: []const u8) !?[]const u8 {
     const relative = try std.fs.path.relativePosix(gpa, cwd, root, procfile_dir);
     if (relative.len == 0) return null;

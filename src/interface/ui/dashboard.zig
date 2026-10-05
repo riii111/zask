@@ -12,8 +12,6 @@ const tmux_client = @import("../../platform/tmux.zig");
 const RenderContext = @import("context.zig").RenderContext;
 const Runtime = @import("../../workflow/runtime.zig").Runtime;
 
-/// The launcher is a one-shot summary followed by the user's shell; the
-/// monitor pane next to it keeps observing.
 pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env.Map, cfg: config.Config, writer: *std.Io.Writer) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -24,8 +22,6 @@ pub fn runLauncher(gpa: std.mem.Allocator, io: std.Io, environ: ?*const env.Map,
     try writer.writeAll(ansi.clear_screen);
     try writer.print("{s}Opening {s}...{s}\n", .{ ansi.dim, try cfg.projectName(), ansi.reset });
     try writer.flush();
-    // The wait can last as long as nobody attaches, so it polls with a freeing
-    // allocator instead of the process arena behind `gpa`.
     const poll_runner: proc_runner.Runner = .{ .gpa = std.heap.smp_allocator, .io = io };
     waitForAttachedClient(.{ .gpa = std.heap.smp_allocator, .runner = poll_runner, .session = try cfg.projectName() }, poll_runner);
     ctx.runner.sleep(attach_resize_settle);
@@ -49,16 +45,10 @@ pub fn runMonitor(runtime: Runtime, writer: *std.Io.Writer) !void {
 
 const default_width = 80;
 const client_poll_interval: std.Io.Duration = .fromMilliseconds(250);
-/// Attaching resizes the window and re-applies the dashboard layout after the
-/// client appears; measuring the pane before that reads the detached size.
 const attach_resize_settle: std.Io.Duration = .fromMilliseconds(500);
 const max_name_width = 16;
 const min_name_width = 4;
 
-/// `open` creates this pane first and attaches only after starting services,
-/// so the first attached client marks the end of startup. Rendering earlier
-/// would always report the placeholder windows as stopped. A session nobody
-/// attaches to keeps waiting, so the summary is taken when someone first looks.
 fn waitForAttachedClient(tmux: tmux_client.Client, runner: proc_runner.Runner) void {
     while (true) {
         const clients = tmux.listClients() catch return;
@@ -76,7 +66,6 @@ const EntryState = enum {
     stopped,
     running,
 
-    /// Severity order used for the attention list and the count line.
     const display_order = [_]EntryState{ .exited, .degraded, .unknown, .waiting, .running, .stopped };
 
     fn needsAttention(self: EntryState) bool {
@@ -130,8 +119,6 @@ const Snapshot = struct {
     entries: []const Entry,
 };
 
-/// Everything is allocated in `gpa` and never freed individually; pass an
-/// arena. Entry names borrow from `cfg`.
 fn observeSnapshot(gpa: std.mem.Allocator, cfg: config.Config, observer: service_observation.Observer) !Snapshot {
     var entries: std.ArrayList(Entry) = .empty;
     const observed_at = observer.runner.nowSeconds();
@@ -150,8 +137,6 @@ fn observeSnapshot(gpa: std.mem.Allocator, cfg: config.Config, observer: service
 
 fn serviceState(observation: observations.ServiceObservation) EntryState {
     return switch (observation.health()) {
-        // Health folds a crashed pane into not_running; the dead pane state is
-        // what separates "exited" from a service that was never started.
         .not_running => if (observation.pane.state == .dead) .exited else .stopped,
         .no_check, .ready => .running,
         .waiting => .waiting,
@@ -173,7 +158,6 @@ fn dockerState(observation: observations.DockerObservation) EntryState {
     };
 }
 
-/// What the workspace needs next; chooses the message and the suggested actions.
 const Situation = enum {
     no_services,
     not_started,
@@ -230,11 +214,9 @@ const common_actions = [_]Action{
 const Layout = struct {
     project: []const u8,
     width: usize,
-    /// null when local time is unavailable; the header then omits the time.
     observed_time: ?clock.ClockTime,
 };
 
-/// Allocates into `gpa` without freeing; pass an arena.
 fn renderLauncher(gpa: std.mem.Allocator, layout: Layout, snapshot: Snapshot, writer: *std.Io.Writer) !void {
     const situation = situationFor(snapshot.entries);
     try writeHeader(layout, writer);
@@ -310,8 +292,6 @@ fn writeAttention(gpa: std.mem.Allocator, layout: Layout, entries: []const Entry
     }
 }
 
-/// Row layout: "  <icon> <name> <state>  <hint>". The hint is dropped first
-/// and the name truncated next so a narrow pane keeps one row per entry.
 fn writeAttentionRow(gpa: std.mem.Allocator, layout: Layout, entry: Entry, name_width: usize, state_width: usize, writer: *std.Io.Writer) !void {
     const state_text = try stateText(gpa, entry);
     const hint = try windowHint(gpa, entry);
@@ -337,8 +317,6 @@ fn stateText(gpa: std.mem.Allocator, entry: Entry) ![]const u8 {
     return entry.state.label();
 }
 
-/// Points at the window to inspect. Docker has no `logs` target, so it names
-/// the window instead.
 fn windowHint(gpa: std.mem.Allocator, entry: Entry) ![]const u8 {
     return switch (entry.kind) {
         .service => std.fmt.allocPrint(gpa, "zask logs {s}", .{entry.name}),
@@ -358,9 +336,6 @@ fn writeNames(gpa: std.mem.Allocator, layout: Layout, entries: []const Entry, st
     try writeFlow(writer, layout.width, label_width, label_width, spans.items, ", ");
 }
 
-/// Row layout: "  <keys>  <description>" with descriptions aligned. A row
-/// that does not fit aligned drops the alignment, and one that still does not
-/// fit moves the description to its own indented line instead of cutting it.
 fn writeAction(layout: Layout, action: Action, keys_width: usize, writer: *std.Io.Writer) !void {
     try writer.print("  {s}{s}{s}", .{ ansi.green, action.keys, ansi.reset });
     const aligned = 2 + keys_width + 2 + action.description.len <= layout.width;
@@ -393,9 +368,6 @@ const Span = struct {
     color: []const u8 = "",
 };
 
-/// Writes spans joined by `separator`, starting at column `start`. A span that
-/// would cross `width` moves to a new line indented by `indent`, and a span
-/// wider than that line is cut.
 fn writeFlow(writer: *std.Io.Writer, width: usize, indent: usize, start: usize, spans: []const Span, separator: []const u8) !void {
     var column = start;
     const line_room = if (width > indent) width - indent else 0;
@@ -421,7 +393,6 @@ fn writeFlow(writer: *std.Io.Writer, width: usize, indent: usize, start: usize, 
     try writer.writeByte('\n');
 }
 
-/// Word-wraps plain text to `width`. Words longer than a line are kept whole.
 fn writeWrappedText(writer: *std.Io.Writer, width: usize, text: []const u8) !void {
     var words = std.mem.tokenizeScalar(u8, text, ' ');
     var column: usize = 0;

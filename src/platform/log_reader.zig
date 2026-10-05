@@ -1,10 +1,5 @@
 const std = @import("std");
 
-/// Writes the bytes of `path` as they were when it was opened, or only its last
-/// `max_lines` lines when set. A last line without a newline (a run cut off
-/// mid-line) is completed with one, so the output always ends at a line end.
-/// Returns error.FileNotFound when the file does not exist; the file is never
-/// held in memory as a whole.
 pub fn writeLines(io: std.Io, path: []const u8, max_lines: ?u32, out: *std.Io.Writer) !void {
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
@@ -22,8 +17,6 @@ pub fn writeLines(io: std.Io, path: []const u8, max_lines: ?u32, out: *std.Io.Wr
     if (last[0] != '\n') try out.writeByte('\n');
 }
 
-/// Returns false only when the file is known to be absent; other failures are
-/// left to the read that follows.
 pub fn exists(io: std.Io, path: []const u8) bool {
     _ = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| return err != error.FileNotFound;
     return true;
@@ -31,9 +24,6 @@ pub fn exists(io: std.Io, path: []const u8) bool {
 
 const chunk_size = 64 * 1024;
 
-/// Scans backwards from the end, reading one chunk at a time, for the newline
-/// that ends the line before the last `max_lines` lines. The newline ending the
-/// file belongs to its last line, so it is not counted.
 fn lastLinesStart(io: std.Io, file: std.Io.File, size: u64, max_lines: u32) !u64 {
     if (max_lines == 0) return size;
     var buffer: [chunk_size]u8 = undefined;

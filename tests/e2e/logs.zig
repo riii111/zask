@@ -30,7 +30,6 @@ test "logs: saved log is read without a tmux session" {
         try ws.tmp.dir.createDirPath(io, "home/.local/state/zask/demo/logs");
         try ws.tmp.dir.writeFile(io, .{ .sub_path = "home/.local/state/zask/demo/logs/api.log", .data = saved_log });
 
-        // An empty directory as PATH makes any tmux call fail, so success proves none is needed.
         var res = try harness.spawnZask(gpa, io, .{
             .cwd = ws.project,
             .xdg_config_home = ws.xdg,

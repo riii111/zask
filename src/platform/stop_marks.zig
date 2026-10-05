@@ -1,38 +1,23 @@
-//! Records which services the user stopped, so the file watcher leaves them
-//! stopped even while a stopping process still keeps its pane busy. Each mark
-//! is an empty file named after the service under `<base>/<project>.stopped/`,
-//! next to a `<service>.lock` file that orders marking against the watcher's
-//! check-and-start. Service names are identifiers, so neither name collides.
-
 const std = @import("std");
 const observations = @import("../model/observations.zig");
 const paths = @import("paths.zig");
 
 pub const StopMarks = struct {
     io: std.Io,
-    /// Absolute directory holding the marks. Borrowed; must outlive this value.
     dir: []const u8,
 
-    /// Marks shared by every zask process of a session. The base ignores
-    /// XDG_RUNTIME_DIR because the CLI and the tmux server that runs the
-    /// watcher can see different values; only the uid scopes it. Free `.dir`
-    /// with `gpa`.
     pub fn forSession(gpa: std.mem.Allocator, io: std.Io, project: []const u8) !StopMarks {
         const base = try paths.runtimeBase(gpa, null);
         defer gpa.free(base);
         return init(gpa, io, base, project);
     }
 
-    /// Returns the directory path owned by the caller in `.dir`; free it with
-    /// `gpa` when the marks are no longer used.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, runtime_base: []const u8, project: []const u8) !StopMarks {
         const name = try std.fmt.allocPrint(gpa, "{s}.stopped", .{project});
         defer gpa.free(name);
         return .{ .io = io, .dir = try std.fs.path.join(gpa, &.{ runtime_base, name }) };
     }
 
-    /// Waits for a watcher holding the service lock, so a start it already
-    /// decided on finishes first and the caller's stop then sees it.
     pub fn mark(self: StopMarks, gpa: std.mem.Allocator, service: []const u8) !void {
         const held = try self.hold(gpa, service);
         defer held.release();
@@ -50,7 +35,6 @@ pub const StopMarks = struct {
         };
     }
 
-    /// `unavailable` covers lookup failures other than a missing mark.
     pub fn observe(self: StopMarks, gpa: std.mem.Allocator, service: []const u8) observations.StopMarkObservation {
         const path = self.markPath(gpa, service) catch return .unavailable;
         defer gpa.free(path);
@@ -61,9 +45,6 @@ pub const StopMarks = struct {
         return .stopped;
     }
 
-    /// Blocks until the service lock is free. Hold it across reading the mark
-    /// and starting the service; call `release` on the result. The OS drops
-    /// the lock if the process dies, so a crash cannot block later stops.
     pub fn hold(self: StopMarks, gpa: std.mem.Allocator, service: []const u8) !Held {
         try paths.ensurePrivateDir(self.io, self.dir);
         const name = try std.fmt.allocPrint(gpa, "{s}.lock", .{service});

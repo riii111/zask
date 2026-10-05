@@ -16,7 +16,6 @@ pub const Shell = enum {
 };
 
 pub const Options = struct {
-    /// Null prints the setup guide instead of a script.
     shell: ?Shell = null,
 
     pub fn parse(args: []const []const u8) !Options {

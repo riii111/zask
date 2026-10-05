@@ -9,8 +9,6 @@ pub const dashboard_layout = "main-vertical";
 pub const docker_window = "docker";
 pub const docker_placeholder_title = "Docker Services";
 
-/// Prefixed so a service named `watch` keeps its own window. Listed in
-/// `config.reserved_service_names` so no service can take the name.
 pub const watch_window = "zask-watch";
 
 // -----------------------------------------------------------------------------

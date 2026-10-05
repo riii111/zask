@@ -1,20 +1,5 @@
 const std = @import("std");
 
-/// Readies `path` for appending without truncating it: creates the parent
-/// directory, moves an existing file of at least `rotate_at` bytes to
-/// `rotated_path` (replacing what was there), and creates the file when
-/// missing. Opening the file for writing here is the writability check, so a
-/// log that cannot be written fails before the caller relies on it. Returns
-/// the size of the file left at `path`.
-///
-/// Logs may hold secrets, so the directory, the log, and the rotated log are
-/// set to owner-only even when they already existed with wider modes.
-///
-/// Calls for the same `path` from any process are serialized by an exclusive
-/// advisory lock on `<path>.lock`, held only while this function runs: the
-/// second caller sees the log the first one left, so one generation is
-/// rotated once and never replaced by a fresh log. Whatever the caller does
-/// with the log afterwards (starting a writer) is not covered by this lock.
 pub fn prepareAppend(io: std.Io, path: []const u8, rotated_path: []const u8, rotate_at: u64) !u64 {
     const cwd = std.Io.Dir.cwd();
     if (std.fs.path.dirname(path)) |dir| try ensurePrivateDir(io, dir);
@@ -31,15 +16,6 @@ pub fn prepareAppend(io: std.Io, path: []const u8, rotated_path: []const u8, rot
     return file.length(io);
 }
 
-/// Appends `text` to the log at `path`, on a line of its own when earlier
-/// output was cut off mid-line, creating the log owner-only when missing. The
-/// same `<path>.lock` as prepareAppend serializes it with rotation, so the
-/// text lands in the log that holds the output before it.
-///
-/// A pane pipe may still append to the log (`>>`), outside the lock. The text
-/// is written with O_APPEND in one write, so it never overwrites that output;
-/// std.Io has no append mode, hence the libc call. Output the pipe writes
-/// later still lands after the text.
 pub fn appendText(gpa: std.mem.Allocator, io: std.Io, path: []const u8, text: []const u8) !void {
     const cwd = std.Io.Dir.cwd();
     if (std.fs.path.dirname(path)) |dir| try ensurePrivateDir(io, dir);
@@ -70,16 +46,11 @@ pub fn appendText(gpa: std.mem.Allocator, io: std.Io, path: []const u8, text: []
 
 fn ensurePrivateDir(io: std.Io, path: []const u8) !void {
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
-    // An iterable handle, unlike the default path-only handle on Linux, can
-    // change permissions.
     var dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
     defer dir.close(io);
     try dir.setPermissions(io, private_dir_permissions);
 }
 
-/// Only a regular file is changed. Anything else at a log path is reported as
-/// error.NotRegularFile: a directory would lose its search permission, and
-/// following a symlink would change the mode of an unrelated file.
 fn restrictExisting(io: std.Io, path: []const u8) !void {
     const stat = std.Io.Dir.cwd().statFile(io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return,

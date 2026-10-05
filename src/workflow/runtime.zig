@@ -46,10 +46,7 @@ pub const Runtime = struct {
     validate_configured_dirs: bool = true,
     emit_env_file_tips: bool = true,
     lock_probe: lock.Probe = .system,
-    /// See Lifecycle.service_log_dir.
     service_log_dir: ?[]const u8 = null,
-    /// Shared by stop commands and the `zask-watch` loop so the watcher sees
-    /// user stops. Null disables recording.
     stop_marks: ?stop_marks_mod.StopMarks = null,
 
     pub fn status(self: Runtime, writer: *std.Io.Writer) !void {
@@ -75,8 +72,6 @@ pub const Runtime = struct {
         }
     }
 
-    /// Read-only service observation for callers outside the monitor; it shares
-    /// this runtime's tmux session and compose project.
     pub fn observer(self: Runtime) service_observation.Observer {
         return .{ .gpa = self.gpa, .runner = self.runner(), .tmux = self.tmux(), .docker = self.docker() };
     }
@@ -114,9 +109,6 @@ pub const Runtime = struct {
         if (!try self.inTmux()) try self.attach(writer);
     }
 
-    /// Writes only the service's recent pane lines to `out`; it never selects a
-    /// window or attaches. Every failure is explained on `diag` and returned as
-    /// an error, so an empty `out` on success always means an empty log.
     pub fn logsTail(self: Runtime, service: []const u8, max_lines: u32, out: *std.Io.Writer, diag: *std.Io.Writer) !void {
         try self.requireLoggedService(service, diag);
         switch (self.tmux().observeSession()) {
@@ -149,11 +141,6 @@ pub const Runtime = struct {
         try out.flush();
     }
 
-    /// Writes the saved log of the service (see service_log) to `out`, or only
-    /// its last `max_lines` lines. It never touches tmux, so it reads the output
-    /// of earlier runs after `close` as well as while the session runs. Every
-    /// failure, including a service that has not saved output yet, is explained
-    /// on `diag` and returned as an error.
     pub fn logsSaved(self: Runtime, service: []const u8, max_lines: ?u32, out: *std.Io.Writer, diag: *std.Io.Writer) !void {
         try self.requireLoggedService(service, diag);
         const path = try self.savedLogPath(service);
@@ -174,8 +161,6 @@ pub const Runtime = struct {
         try out.flush();
     }
 
-    /// Writes only the saved log path of the service to `out`, whether or not
-    /// the log exists yet, so it can be handed to an editor or `grep`.
     pub fn logsPath(self: Runtime, service: []const u8, out: *std.Io.Writer, diag: *std.Io.Writer) !void {
         try self.requireLoggedService(service, diag);
         const path = try self.savedLogPath(service);
@@ -184,9 +169,6 @@ pub const Runtime = struct {
         try out.flush();
     }
 
-    /// Pages the recent lines of `window` in a tmux popup over the caller's
-    /// client and returns once it closes. The caller (the monitor) keeps its
-    /// own pane; nothing is selected, attached, or started.
     pub fn showLogPopup(self: Runtime, window: []const u8, label: []const u8) !log_popup.Outcome {
         const scratch_dir = try paths.runtimeBase(self.gpa, self.environ);
         defer self.gpa.free(scratch_dir);
@@ -367,11 +349,6 @@ pub const Runtime = struct {
         try self.lifecycle().restartTarget(target, writer);
     }
 
-    /// Restarts services when their watched files change or when they exit
-    /// abnormally. Runs in the `zask-watch` window until `close` or `re` kills
-    /// the session with it. One loop runs both, so a file-change restart and a
-    /// recovery never act on a service at the same time. `gpa` must free
-    /// memory: the loop runs for the life of the session.
     pub fn watch(self: Runtime, gpa: std.mem.Allocator, writer: *std.Io.Writer) !void {
         var file_supervisor = try watch_restart.Supervisor.init(gpa, self.io, self.cfg);
         defer file_supervisor.deinit();
@@ -392,9 +369,6 @@ pub const Runtime = struct {
         }
     }
 
-    /// Service-only start / stop / restart for callers that already hold a
-    /// service name, such as the monitor: a group, alias, or `docker` sharing
-    /// the name is never picked up.
     pub fn startService(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
         try self.lifecycle().startServiceTarget(service, writer);
     }
@@ -407,8 +381,6 @@ pub const Runtime = struct {
         return self.lifecycle().restartServiceTarget(service, writer);
     }
 
-    /// `stop docker` / `restart docker` that also report whether the stop
-    /// finished, which the CLI only prints as a warning.
     pub fn stopDocker(self: Runtime, writer: *std.Io.Writer) !Outcome {
         return self.lifecycle().stopDockerTarget(writer);
     }
@@ -417,9 +389,6 @@ pub const Runtime = struct {
         return self.lifecycle().restartDockerTarget(writer);
     }
 
-    /// Switches the session to `window` without attaching, so a caller running
-    /// inside the session (the monitor) keeps its own pane. Unlike `logs`, it
-    /// never attaches from outside tmux.
     pub fn showWindow(self: Runtime, window: []const u8) !void {
         const tx = self.tmux();
         switch (tx.observeWindow(window)) {
@@ -430,9 +399,6 @@ pub const Runtime = struct {
         try tx.selectWindow(window);
     }
 
-    /// Copy whose tmux, Docker, and lifecycle allocations go to `gpa`, so a
-    /// long-running loop can release them with a per-iteration arena instead
-    /// of growing the CLI arena.
     pub fn withAllocator(self: Runtime, gpa: std.mem.Allocator) Runtime {
         var copy = self;
         copy.gpa = gpa;
@@ -455,14 +421,11 @@ pub const Runtime = struct {
         };
     }
 
-    /// Caller owns the returned path.
     fn savedLogPath(self: Runtime, service: []const u8) ![]const u8 {
         const dir = self.service_log_dir orelse return error.SavedLogUnavailable;
         return service_log.servicePath(self.gpa, dir, service);
     }
 
-    /// Points to the saved log when the pane cannot be read but earlier output
-    /// was saved; it writes nothing when there is no saved log to point to.
     fn pointToSavedLog(self: Runtime, service: []const u8, writer: *std.Io.Writer) !void {
         const dir = self.service_log_dir orelse return;
         const path = try service_log.servicePath(self.gpa, dir, service);
@@ -546,8 +509,6 @@ pub const Runtime = struct {
         }
     }
 
-    /// Workspaces opened before a `watch` or `restart_on_failure` setting was
-    /// added get the window on the next `open`.
     fn ensureWatchWindow(self: Runtime, scratch: std.mem.Allocator) !void {
         if (!try self.cfg.anyServiceSupervised()) return;
         const tx = self.tmux();
@@ -657,8 +618,6 @@ pub const Runtime = struct {
     }
 };
 
-/// Runs each watch- or failure-triggered lifecycle step on its own arena over
-/// `gpa`.
 const WatchRestarter = struct {
     runtime: Runtime,
     gpa: std.mem.Allocator,
@@ -2181,8 +2140,6 @@ const test_api_json =
 
 const testSavedLog = "=== zask: api started at 2026-09-21T14:13:20Z ===\nlistening\nboom\nexit 1\n";
 
-/// A runtime whose service logs live in a temporary directory, holding the
-/// given saved `api.log` (none when null).
 const TestSavedLogFixture = struct {
     arena: std.heap.ArenaAllocator,
     threaded: std.Io.Threaded,

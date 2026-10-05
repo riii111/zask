@@ -2,10 +2,7 @@ const std = @import("std");
 
 pub const Key = union(enum) {
     char: u8,
-    /// Ctrl plus a letter, as the lowercase letter (Ctrl+N is 'n').
     ctrl: u8,
-    /// Alt (Meta) plus a printable character. Terminals send it as ESC
-    /// followed by the character, so it is the character after the ESC.
     alt: u8,
     up,
     down,
@@ -16,17 +13,11 @@ pub const Key = union(enum) {
     unknown,
 };
 
-/// Buffers raw terminal reads and yields keys. One read can hold several keys
-/// (key repeat, paste), and one escape sequence can arrive split across reads,
-/// so an incomplete sequence stays pending until more bytes arrive or the
-/// caller gives up waiting and calls `flush`.
 pub const Decoder = struct {
     buffer: [64]u8 = undefined,
     len: usize = 0,
 
-    /// Free space for the next read; pass the byte count to `commit`.
     pub fn space(self: *Decoder) []u8 {
-        // A pending sequence that fills the buffer can never complete.
         if (self.len == self.buffer.len) self.len = 0;
         return self.buffer[self.len..];
     }
@@ -39,7 +30,6 @@ pub const Decoder = struct {
         return self.len > 0;
     }
 
-    /// Returns null when no bytes remain or only an incomplete sequence is pending.
     pub fn next(self: *Decoder) ?Key {
         if (self.len == 0) return null;
         const decoded = decode(self.buffer[0..self.len]) orelse return null;
@@ -47,8 +37,6 @@ pub const Decoder = struct {
         return decoded.key;
     }
 
-    /// Decodes a pending incomplete sequence as-is: a lone ESC is the Escape key,
-    /// a cut-off CSI / SS3 sequence is unknown.
     pub fn flush(self: *Decoder) ?Key {
         if (self.len == 0) return null;
         const key: Key = if (self.len == 1) .escape else .unknown;
@@ -67,7 +55,6 @@ const Decoded = struct {
     len: usize,
 };
 
-/// Returns null when `bytes` ends inside an escape sequence.
 fn decode(bytes: []const u8) ?Decoded {
     const byte = bytes[0];
     return switch (byte) {
@@ -79,11 +66,6 @@ fn decode(bytes: []const u8) ?Decoded {
     };
 }
 
-// CSI (`ESC [`) and SS3 (`ESC O`) cover arrow keys in both normal and
-// application cursor modes. Other sequences are consumed whole so their
-// parameter bytes are not misread as separate key presses. ESC before any
-// other printable character is Alt with that character, so Alt+[ and Alt+O
-// read as the start of a sequence instead.
 fn decodeEscape(bytes: []const u8) ?Decoded {
     if (bytes.len < 2) return null;
     if (bytes[1] != '[' and bytes[1] != 'O') return switch (bytes[1]) {

@@ -95,9 +95,6 @@ const CommandSpec = struct {
     show_in_help: bool = true,
 };
 
-/// Hidden entry for shell completion scripts: `zask __complete <words...>`,
-/// where the last word is the one under the cursor (empty for a new word).
-/// Selected before argv0 aliases and config selection so it works everywhere.
 const completion_command = "__complete";
 
 const command_specs = [_]CommandSpec{
@@ -237,9 +234,6 @@ pub fn runWithArgs(context: CommandContext, args: []const []const u8, writer: *s
     try command.run(&run_context);
 }
 
-/// Prints candidates for the last word. Config and argument problems only drop
-/// candidates, so a broken config never interrupts the user's shell; only
-/// output and allocation failures are returned.
 fn runCompletion(context: CommandContext, words: []const []const u8, writer: *std.Io.Writer) !void {
     var quiet = context;
     quiet.diagnostics = null;
@@ -276,14 +270,10 @@ const CompletionPosition = union(enum) {
     argument: struct {
         parsed: ParsedArgs,
         kind: complete.ArgKind,
-        /// The single typed word is also an existing named config, so the next
-        /// word may instead be a command (`zask <project> <command>`).
         or_project_command: bool = false,
     },
 };
 
-/// Mirrors `parseArgs` on the words before the cursor so completion uses the
-/// same command forms and config selection as a real invocation.
 fn completionPosition(context: CommandContext, typed: []const []const u8) CompletionPosition {
     if (typed.len == 0) return .{ .command = .top_level };
     if (std.mem.eql(u8, typed[0], "--config")) {
@@ -709,7 +699,6 @@ test "cli.open: prints usage for invalid profile" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Usage:\n  zask <command>") != null);
 }
 
-/// Runs `check` with PATH limited to `<tmp>/bin`, which holds fake `tools`.
 fn testRunCheck(gpa: std.mem.Allocator, io: std.Io, tmp: std.testing.TmpDir, tools: []const []const u8, config_path: []const u8, writer: *std.Io.Writer) !void {
     try tmp.dir.createDirPath(io, "bin");
     for (tools) |tool| {

@@ -71,15 +71,12 @@ pub const keys = struct {
     pub const group_overrides = "group_overrides";
 };
 
-/// Keys accepted in each authored config object. The JSON Schema must list the
-/// same properties; the schema consistency test compares them.
 pub const object_keys = struct {
     pub const root = [_][]const u8{ keys.schema, keys.project, keys.docker, keys.env_file, keys.startup_order, keys.prechecks, keys.start_profiles, keys.group_aliases, keys.groups };
     pub const project = [_][]const u8{ keys.name, keys.root };
     pub const docker = [_][]const u8{ keys.compose, keys.wait_timeout_seconds };
     pub const group = [_][]const u8{ keys.name, keys.env_file, keys.services };
     pub const service = [_][]const u8{keys.name} ++ named_service;
-    /// Detailed form inside a `services` object, where the key is the name.
     pub const named_service = [_][]const u8{ keys.dir, keys.runtime, keys.command, keys.external, keys.port, keys.healthcheck, keys.env_file, keys.watch, keys.restart_on_failure };
     pub const watch = [_][]const u8{ keys.paths, keys.include, keys.exclude, keys.debounce_ms };
     pub const restart_on_failure = [_][]const u8{ keys.max_retries, keys.delay_ms };
@@ -91,24 +88,16 @@ pub const object_keys = struct {
     pub const start_profile = [_][]const u8{ keys.profile, keys.label, keys.group_overrides };
 };
 
-/// Names of windows zask opens for itself. tmux addresses service windows by
-/// service name, so a service with one of these names would collide with them.
 pub const reserved_service_names = [_][]const u8{"zask-watch"};
 
-/// Values accepted for enumerated string keys. The JSON Schema `enum` lists
-/// must match; the schema consistency test compares them.
 pub const allowed_values = struct {
     pub const runtime = [_][]const u8{ "npm", "yarn", "pnpm", "bun", "cargo", "bacon" };
     pub const healthcheck_type = [_][]const u8{ "tcp", "http" };
     pub const on_fail = [_][]const u8{ "warn", "abort" };
 };
 
-/// A service's `restart_on_failure` setting.
 pub const RestartOnFailure = struct {
-    /// Restarts in a row before zask gives up; a failure long enough after
-    /// the last restart starts the count over.
     max_retries: u32,
-    /// Wait after the exit before each restart.
     delay_ms: u64,
 
     pub const default_max_retries = 3;
@@ -131,7 +120,6 @@ pub const Config = struct {
         return parseFormatWithDiagnostics(gpa, json, .json, home, diags);
     }
 
-    // On error.InvalidConfigSyntax, diags holds one entry with the position.
     pub fn parseFormatWithDiagnostics(gpa: std.mem.Allocator, bytes: []const u8, format: jsonc.Format, home: []const u8, diags: *diagnostics.Diagnostics) !Config {
         var syntax_error: jsonc.SyntaxError = undefined;
         const value = jsonc.parse(gpa, bytes, format, &syntax_error) catch |err| switch (err) {
@@ -240,7 +228,6 @@ pub const Config = struct {
         service,
     };
 
-    /// Where the entry was written: top-level, group, or service `env_file`.
     pub const EnvFileScope = enum {
         project,
         group,
@@ -293,8 +280,6 @@ pub const Config = struct {
         return config_value.optionalObjectString(healthcheck, "path", "/health");
     }
 
-    /// True when any service needs the `zask-watch` loop: file watch or
-    /// restart on failure.
     pub fn anyServiceSupervised(self: Config) !bool {
         for (try self.services()) |service| {
             if (service != .object) continue;
@@ -303,7 +288,6 @@ pub const Config = struct {
         return false;
     }
 
-    /// Returns null when the service has no `restart_on_failure`.
     pub fn serviceRestartOnFailure(service: Value) !?RestartOnFailure {
         const node = (if (service == .object) service.object.get(keys.restart_on_failure) else null) orelse return null;
         if (node != .object) return error.InvalidConfig;
@@ -316,8 +300,6 @@ pub const Config = struct {
         };
     }
 
-    /// Returns null when the service has no `watch`. Release the result with
-    /// `Spec.deinit`; its strings borrow from the config.
     pub fn serviceWatch(gpa: std.mem.Allocator, service: Value) !?watch.Spec {
         const node = (if (service == .object) service.object.get(keys.watch) else null) orelse return null;
         if (node != .object) return error.InvalidConfig;
@@ -335,9 +317,6 @@ pub const Config = struct {
         return .{ .paths = paths, .include = include, .exclude = exclude, .debounce_ms = @intCast(debounce_ms) };
     }
 
-    /// Resolves a `watch.paths` entry against the service directory. Returns a
-    /// caller-owned path unless the entry is an absolute path or bare `~`
-    /// already borrowed from config/home.
     pub fn serviceWatchPath(self: Config, gpa: std.mem.Allocator, service: Value, path: []const u8) ![]const u8 {
         if (std.fs.path.isAbsolute(path) or std.mem.startsWith(u8, path, "~"))
             return self.expandHome(gpa, path);
@@ -386,8 +365,6 @@ pub const Config = struct {
         return list.toOwnedSlice(gpa);
     }
 
-    /// Names `resolveGroup` accepts: groups with services in config order, then
-    /// `group_aliases` keys. Caller owns the outer slice; names borrow config strings.
     pub fn groupNames(self: Config, gpa: std.mem.Allocator) ![][]const u8 {
         var list: std.ArrayList([]const u8) = .empty;
         errdefer list.deinit(gpa);
@@ -406,8 +383,6 @@ pub const Config = struct {
         return list.toOwnedSlice(gpa);
     }
 
-    /// `start_profiles` keys that `resolveStartProfileOption` accepts as `--<key>`.
-    /// Caller owns the outer slice; keys borrow config strings.
     pub fn startProfileKeys(self: Config, gpa: std.mem.Allocator) ![][]const u8 {
         var list: std.ArrayList([]const u8) = .empty;
         errdefer list.deinit(gpa);
@@ -572,26 +547,19 @@ pub fn loadPathWithDiagnostics(gpa: std.mem.Allocator, io: std.Io, path: []const
 }
 
 pub const ConfigFile = struct {
-    /// The exact file content `cfg` was parsed from.
     bytes: []const u8,
     cfg: Config,
 };
 
-/// Like loadPathWithDiagnostics, but keeps the file content for editing.
-/// Both fields are allocated from `gpa`; pass an arena.
 pub fn loadFileWithDiagnostics(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []const u8, diags: *diagnostics.Diagnostics) !ConfigFile {
     const bytes = try readConfigBytes(gpa, io, path);
     return .{ .bytes = bytes, .cfg = try Config.parseFormatWithDiagnostics(gpa, bytes, jsonc.Format.fromPath(path), home, diags) };
 }
 
-/// Whether a config of `len` bytes can be loaded; the read limit counts a
-/// file that reaches it as too large.
 pub fn fitsLoadLimit(len: usize) bool {
     return len < max_config_bytes;
 }
 
-/// Returns the file content owned by the caller, with the same size limit
-/// and errors as loading a config.
 pub fn readConfigBytes(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
     return readFile(gpa, io, path) catch |err| switch (err) {
         error.FileNotFound => return error.ConfigNotFound,
@@ -670,8 +638,6 @@ fn normalizeServices(gpa: std.mem.Allocator, root: *std.json.ObjectMap, source: 
     try root.put(gpa, "services", .{ .array = services });
 }
 
-/// Expands a `services` object entry into the array form: a string is the
-/// command, and an object is a detailed service whose name is the key.
 fn namedServiceObject(gpa: std.mem.Allocator, name: []const u8, value: Value) !std.json.ObjectMap {
     var object: std.json.ObjectMap = .empty;
     errdefer object.deinit(gpa);
@@ -823,9 +789,6 @@ pub fn validateAll(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Di
     // Build the reference index before validating references: startup_order and
     // profile overrides may point at groups or aliases declared later in the file.
     try validateGroups(gpa, source, diags, &refs);
-    // Service windows share the session with zask's own windows (see
-    // workflow/session_layout.zig), so a service of the same name would share a
-    // tmux window and receive the other's start / stop keys.
     if (refs.services.contains(reserved_dashboard_window))
         try diags.add("groups", "service name 'dashboard' is reserved for the zask dashboard window");
     if (source.object.get(keys.docker) != null and refs.services.contains(keys.docker))
@@ -984,15 +947,11 @@ fn validateService(gpa: std.mem.Allocator, service: Value, path: []const u8, dia
     try validateServiceFields(gpa, service, path, diags);
 }
 
-// A `services` object entry: the key is the name, and the value is either the
-// command string or a detailed service without `name`.
 fn validateNamedService(gpa: std.mem.Allocator, name: []const u8, service: Value, path: []const u8, diags: *diagnostics.Diagnostics, refs: *ValidationIndex) !void {
     try checkServiceName(name, path, diags, refs);
     switch (service) {
         .string => {},
         .object => {
-            // `name` gets its own message instead of "unknown key" so it reads
-            // as a conflict with the key rather than a typo.
             try checkKeys(gpa, service, path, &object_keys.service, diags);
             if (service.object.get(keys.name) != null)
                 try diags.addFmt(try joinPath(gpa, path, keys.name), "must not be set; the key '{s}' is the service name", .{name});

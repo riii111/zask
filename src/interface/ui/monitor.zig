@@ -23,17 +23,10 @@ const monitor_status_width = 8;
 const monitor_recovery_width = 11;
 const monitor_log_width = 35;
 const refresh_interval_ms = 1000;
-// How long a lone ESC waits for the rest of an arrow-key sequence or an Alt
-// key, which terminals send as ESC and the key. Only a bare ESC is delayed by
-// this, and the monitor binds no action to it.
 const escape_timeout_ms = 250;
 const action_guide = "⏎ go  s start  x stop  r restart  l logs";
-// Line, page, and first/last moves; short enough for a 45-column pane.
 const key_guide = "C-n/p C-v/M-v M-</> move  f filter  q quit";
 
-/// Runs until `q` / Ctrl+C or the terminal closes. Leaving restores the
-/// terminal mode and screen; services change only through the operation keys,
-/// so quitting or detaching never stops them.
 pub fn run(runtime: Runtime, writer: *std.Io.Writer) !void {
     const gpa = runtime.gpa;
     const raw_mode = try terminal.RawMode.enter(terminal.stdin);
@@ -62,17 +55,13 @@ const Action = union(enum) {
     none,
     quit,
     select: selection_state.Motion,
-    /// A page is as many rows as the screen shows, known only when drawing.
     page: enum { up, down },
-    /// Ctrl+G: dismisses the notice. The monitor stays open, like Emacs
-    /// keyboard-quit; `q` leaves it.
     cancel,
     toggle_filter,
     show_logs,
     operate: Operation,
 };
 
-/// What an operation key does to the selected row.
 const Operation = enum {
     show,
     start,
@@ -146,18 +135,14 @@ const Monitor = struct {
     io: std.Io,
     cfg: config.Config,
     runtime: Runtime,
-    /// Owns `snapshot`; reset on every refresh.
     snapshot_arena: std.heap.ArenaAllocator,
-    /// Backs one operation's runtime work and output; reset before each operation.
     operation_arena: std.heap.ArenaAllocator,
     snapshot: Snapshot = .{},
     selection: Selection = .{},
-    /// Borrows a static string or `notice_buffer`.
     notice: ?[]const u8 = null,
     notice_buffer: [256]u8 = undefined,
     previous: []u8 = &.{},
     input: keys.Decoder = .{},
-    /// When the pending incomplete sequence in `input` started; null when none is pending.
     pending_since: ?std.Io.Timestamp = null,
 
     fn deinit(self: *Monitor) void {
@@ -167,8 +152,6 @@ const Monitor = struct {
         self.snapshot_arena.deinit();
     }
 
-    // Keys redraw from the last snapshot without re-observing, so selection
-    // stays responsive while health checks run once per refresh interval.
     fn loop(self: *Monitor, writer: *std.Io.Writer, interactive: bool) !void {
         try self.refresh();
         var refreshed_at = std.Io.Clock.awake.now(self.io);
@@ -177,8 +160,6 @@ const Monitor = struct {
             const elapsed = refreshed_at.untilNow(self.io, .awake).toMilliseconds();
             const remaining: i32 = @intCast(std.math.clamp(refresh_interval_ms - elapsed, 0, refresh_interval_ms));
             if (interactive) {
-                // A pending sequence waits on its own deadline, not the refresh
-                // timer; it is resolved only once poll reports no further bytes.
                 const escape_remaining = self.escapeRemaining();
                 const timeout = if (escape_remaining) |left| @min(remaining, left) else remaining;
                 switch (try terminal.waitReadable(terminal.stdin, timeout)) {
@@ -210,8 +191,6 @@ const Monitor = struct {
             decoded_any = true;
             if (try self.handleKey(writer, key) == .quit) return .quit;
         }
-        // Once a key was decoded, any bytes still pending start a new sequence
-        // and get a fresh deadline; otherwise the same sequence keeps waiting.
         if (!self.input.pending()) {
             self.pending_since = null;
         } else if (decoded_any or self.pending_since == null) {
@@ -220,8 +199,6 @@ const Monitor = struct {
         return .keep;
     }
 
-    /// Milliseconds left before a pending incomplete sequence is resolved as-is;
-    /// null when nothing is pending.
     fn escapeRemaining(self: Monitor) ?i32 {
         const since = self.pending_since orelse return null;
         const age = since.untilNow(self.io, .awake).toMilliseconds();
@@ -255,9 +232,6 @@ const Monitor = struct {
         self.notice = null;
     }
 
-    /// Runs `operation` on the selected row while the screen shows it in
-    /// progress. Keys typed meanwhile, including the rest of the read that held
-    /// this key, are dropped, so a repeated key runs the operation once.
     fn operate(self: *Monitor, writer: *std.Io.Writer, operation: Operation) !void {
         const target = selectedTarget(self.snapshot, self.selection) orelse {
             self.notice = "no service selected";
@@ -294,9 +268,6 @@ const Monitor = struct {
         self.notice = notice.buffered();
     }
 
-    /// Blocks while the popup is open; tmux restores this pane when it closes.
-    /// Keys typed before the popup took over, such as a repeated `l`, are
-    /// dropped so the popup does not reopen.
     fn showLogs(self: *Monitor) !void {
         const target = selectedTarget(self.snapshot, self.selection) orelse {
             self.notice = "no service selected";
@@ -330,7 +301,6 @@ const Monitor = struct {
         try self.refresh();
     }
 
-    /// Text that does not fit in `notice_buffer` is cut off.
     fn setNotice(self: *Monitor, comptime fmt: []const u8, args: anytype) void {
         var notice: std.Io.Writer = .fixed(&self.notice_buffer);
         notice.print(fmt, args) catch {};
@@ -427,7 +397,6 @@ const MonitorStatus = enum {
 };
 
 const RowKind = enum { service, docker };
-// ':' is excluded from service identifiers, so this key cannot collide.
 const docker_selection_key = ":docker";
 
 const MonitorRow = struct {
@@ -437,7 +406,6 @@ const MonitorRow = struct {
     exit_code: []const u8,
     command: []const u8,
     port: []const u8,
-    /// Last non-empty pane line; only captured for rows that are not live.
     log: []const u8 = "",
     recovery: recovery.View = .not_configured,
 
@@ -481,15 +449,11 @@ fn isVisible(row: MonitorRow, mode: tmux_options.DashMode) bool {
     };
 }
 
-/// The row an operation acts on. `name` borrows from the snapshot, which stays
-/// unchanged until the operation finishes.
 const Target = struct {
     name: []const u8,
     kind: RowKind,
 };
 
-/// Null when nothing is selected or the selected row is hidden by the filter,
-/// so an operation never falls back to a different row.
 fn selectedTarget(snapshot: Snapshot, selection: Selection) ?Target {
     const name = selection.name orelse return null;
     for (snapshot.rows) |row| {
@@ -499,9 +463,6 @@ fn selectedTarget(snapshot: Snapshot, selection: Selection) ?Target {
     return null;
 }
 
-/// Uses the same runtime steps as `zask start|stop|restart`; service rows go
-/// through the service-only variants so a group or alias sharing the name is
-/// never picked up.
 fn runOperation(runtime: Runtime, operation: Operation, target: Target, writer: *std.Io.Writer) !runtime_mod.Outcome {
     switch (target.kind) {
         .service => switch (operation) {
@@ -520,8 +481,6 @@ fn runOperation(runtime: Runtime, operation: Operation, target: Target, writer: 
     return .done;
 }
 
-/// Only the stop step makes an operation incomplete. A restart prints its
-/// start step after the stop warning, so the last line would not explain it.
 fn incompleteReason(operation: Operation, output: []const u8) []const u8 {
     return switch (operation) {
         .restart => "the previous process did not stop",
@@ -529,12 +488,9 @@ fn incompleteReason(operation: Operation, output: []const u8) []const u8 {
     };
 }
 
-/// The last line the operation printed, which carries the workflow's own
-/// error or warning; `fallback` when it printed nothing. Borrows from `output`.
 fn lastOutputLine(output: []const u8, fallback: []const u8) []const u8 {
     var lines = std.mem.splitBackwardsScalar(u8, output, '\n');
     while (lines.next()) |line| {
-        // Progress lines redraw themselves with `\r`; only the last redraw is visible.
         const visible = if (std.mem.lastIndexOfScalar(u8, line, '\r')) |i| line[i + 1 ..] else line;
         const trimmed = std.mem.trim(u8, visible, " \t");
         if (trimmed.len > 0) return trimmed;
@@ -542,7 +498,6 @@ fn lastOutputLine(output: []const u8, fallback: []const u8) []const u8 {
     return fallback;
 }
 
-/// Caller owns the returned slice; the keys borrow from `snapshot`.
 fn visibleNames(gpa: std.mem.Allocator, snapshot: Snapshot) ![]const []const u8 {
     var names: std.ArrayList([]const u8) = .empty;
     errdefer names.deinit(gpa);
@@ -627,8 +582,6 @@ fn writeFrame(gpa: std.mem.Allocator, writer: *std.Io.Writer, cfg: config.Config
     }
 }
 
-/// Separates frame lines without a trailing newline, so a frame of exactly
-/// the pane height does not scroll the first line away.
 const LineWriter = struct {
     writer: *std.Io.Writer,
     started: bool = false,
@@ -639,10 +592,6 @@ const LineWriter = struct {
     }
 };
 
-/// Chooses which fixed lines fit around the service rows. At least one row
-/// always stays so the selection is never pushed off screen; fixed lines are
-/// dropped from the lowest priority first: blank spacers, command forms,
-/// rule, title, notice, action guide, key guide.
 const Layout = struct {
     title: bool = true,
     title_gap: bool = true,
@@ -659,8 +608,6 @@ const Layout = struct {
         var budget: usize = @as(usize, rows) -| 1;
         const by_priority = [_]*bool{ &layout.guide, &layout.actions, &layout.notice_line, &layout.title, &layout.rule, &layout.commands, &layout.title_gap, &layout.notice_line };
         for (by_priority, 0..) |line, rank| {
-            // The notice slot ranks high only while it carries a message, such
-            // as the result of an operation.
             if (rank == 2 and !has_notice) continue;
             if (line.* or budget == 0) continue;
             line.* = true;
@@ -671,16 +618,12 @@ const Layout = struct {
     }
 };
 
-/// Rows one page moves: the rows that fit once the move clears the notice.
-/// Without a known height every row is shown, so a page reaches the end.
 fn pageRows(height: ?u16) usize {
     return Layout.fit(height, false).row_capacity;
 }
 
 const RowRange = struct { start: usize, end: usize };
 
-/// Picks the rows to draw so the selected one stays on screen; without a
-/// visible selection the list starts from the top.
 fn rowWindow(count: usize, selected: ?usize, capacity: usize) RowRange {
     if (count <= capacity) return .{ .start = 0, .end = count };
     const index = selected orelse 0;
@@ -746,8 +689,6 @@ fn dockerMonitorStatus(observation: observations.DockerObservation) MonitorStatu
     };
 }
 
-/// `recovery_column` is set when any row has `restart_on_failure`, so
-/// projects without it keep the narrower row.
 fn writeMonitorRow(writer: *std.Io.Writer, row: MonitorRow, selected: bool, recovery_column: bool) !void {
     const color = row.status.color();
     if (selected) try writer.print("{s}>{s} ", .{ ansi.bold, ansi.reset }) else try writer.writeAll("  ");
@@ -770,7 +711,6 @@ fn writeMonitorRow(writer: *std.Io.Writer, row: MonitorRow, selected: bool, reco
     if (row.log.len > 0) try writer.print(" {s}│{s} {s}", .{ ansi.dim, ansi.reset, ansi.truncate(row.log, monitor_log_width) });
 }
 
-/// Short enough for the log column, so the exit status is never cut off.
 fn restartReason(gpa: std.mem.Allocator, record: recovery.Record) ![]const u8 {
     return switch (record.exit) {
         .failed => |status| std.fmt.allocPrint(gpa, "restarted after exit {d}", .{status}),
@@ -780,9 +720,6 @@ fn restartReason(gpa: std.mem.Allocator, record: recovery.Record) ![]const u8 {
 
 const RecoveryCell = struct { text: []const u8, color: []const u8 };
 
-/// Counts are the restart attempt, as in the `zask-watch` messages and the
-/// notice the service log gets: `wait` is the attempt waiting for its delay,
-/// `limit` means zask gave up after that many. `text` borrows `buffer`.
 fn recoveryCell(view: recovery.View, buffer: []u8) RecoveryCell {
     return switch (view) {
         .not_configured => .{ .text = "", .color = "" },

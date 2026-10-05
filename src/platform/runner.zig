@@ -7,12 +7,7 @@ pub const Runner = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     recorder: ?*Recorder = null,
-    /// Wall-clock Unix milliseconds after which a captured run fails with
-    /// error.Timeout. The child is killed and reaped, so none is left behind.
-    /// Interactive runs ignore it.
     deadline_ms: ?i64 = null,
-    /// Applies to captured runs that do not set `RunOptions.timeout`, so a
-    /// caller can bound every probe made through adapters built on this runner.
     timeout: ?std.Io.Duration = null,
 
     pub fn run(self: Runner, argv: []const []const u8, options: RunOptions) !RunOutput {
@@ -71,21 +66,16 @@ pub const Runner = struct {
         std.Io.sleep(self.io, duration, .awake) catch {};
     }
 
-    /// Wall-clock Unix seconds; tests read the recorder's fixed `now_seconds`.
     pub fn nowSeconds(self: Runner) i64 {
         if (self.recorder) |recorder| return recorder.now_seconds;
         return std.Io.Clock.real.now(self.io).toSeconds();
     }
 
-    /// Wall-clock Unix milliseconds on the same clock as `deadline_ms`.
     pub fn nowMilliseconds(self: Runner) i64 {
         if (self.recorder) |recorder| return recorder.now_seconds * std.time.ms_per_s;
         return std.Io.Clock.real.now(self.io).toMilliseconds();
     }
 
-    /// Like std.process.run, but the deadline also bounds the exit wait:
-    /// std.process.run applies its timeout only while reading, so a child that
-    /// closes its output and keeps running would block it indefinitely.
     fn runUntilDeadline(self: Runner, argv: []const []const u8, cwd: ?[]const u8, deadline_ms: i64) !std.process.RunResult {
         var child = try std.process.spawn(self.io, .{
             .argv = argv,
@@ -94,12 +84,7 @@ pub const Runner = struct {
             .stdout = .pipe,
             .stderr = .pipe,
         });
-        // No-op once waitUntilDeadline has reaped the child; otherwise kills
-        // and reaps it.
         defer child.kill(self.io);
-        // Child.kill only sends SIGTERM and then waits without a limit, so a
-        // child ignoring SIGTERM would hold us past the deadline. SIGKILL first
-        // leaves Child.kill just reaping the already-dead child.
         errdefer if (child.id) |pid| {
             _ = std.c.kill(pid, .KILL);
         };
@@ -120,7 +105,6 @@ pub const Runner = struct {
         }
     };
 
-    /// Caller owns the returned output.
     fn readUntilDeadline(self: Runner, child: *std.process.Child, deadline_ms: i64) !CapturedOutput {
         var buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
         var multi_reader: std.Io.File.MultiReader = undefined;
@@ -134,7 +118,6 @@ pub const Runner = struct {
         while (true) {
             multi_reader.fill(64, timeout) catch |err| switch (err) {
                 error.EndOfStream => break,
-                // OS timers may wake before the requested wall-clock deadline.
                 error.Timeout => if (self.nowMilliseconds() < deadline_ms) continue else return error.Timeout,
                 else => |e| return e,
             };
@@ -148,9 +131,6 @@ pub const Runner = struct {
         return .{ .stdout = stdout, .stderr = try multi_reader.toOwnedSlice(1) };
     }
 
-    /// Polls for the exit instead of blocking in Child.wait. On success the
-    /// child is reaped here, and `child` is left as Child.kill expects of a
-    /// reaped child (no id, no open pipes).
     fn waitUntilDeadline(self: Runner, child: *std.process.Child, deadline_ms: i64) !std.process.Child.Term {
         const pid = child.id.?;
         while (true) {
@@ -207,7 +187,6 @@ pub const RunOptions = struct {
     check: bool = false,
     discard: bool = false,
     interactive: bool = false,
-    /// Captured runs only. Expiry returns error.Timeout.
     timeout: ?std.Io.Duration = null,
 };
 
@@ -243,8 +222,6 @@ pub const Recorder = struct {
     stderr: []const u8 = "",
     term: std.process.Child.Term = .{ .exited = 0 },
     now_seconds: i64 = 0,
-    /// Let deadline-based loops see time pass during sleeps and commands; off by
-    /// default so existing tests keep a fixed clock.
     advance_clock_on_sleep: bool = false,
     seconds_per_command: i64 = 0,
 

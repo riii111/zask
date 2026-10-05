@@ -1,8 +1,5 @@
 const std = @import("std");
 
-/// Saves a tmux byte stream through its run's completion marker. Only after
-/// every preceding byte was written does the acknowledgement become visible.
-/// Marker bytes are terminal control data, not service log contents.
 pub fn run(gpa: std.mem.Allocator, io: std.Io, path: []const u8, token: []const u8) !void {
     const marker = try std.fmt.allocPrint(gpa, "\x1b]9999;zask-output-done;{s}\x07", .{token});
     defer gpa.free(marker);
@@ -33,7 +30,6 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, path: []const u8, token: []const 
     }
 }
 
-/// Caller owns the path of a run's output-complete acknowledgement.
 pub fn completionPath(gpa: std.mem.Allocator, path: []const u8, token: []const u8) ![]const u8 {
     return std.fmt.allocPrint(gpa, "{s}.done-{s}", .{ path, token });
 }

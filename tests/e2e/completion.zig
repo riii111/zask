@@ -30,9 +30,6 @@ const special_names_config =
     \\}
 ;
 
-// Runs the real script's `_zask` for the word under the cursor, then evaluates
-// each reply as bash would once the line runs: inside the quote the user opened,
-// which readline closes after a unique match.
 const bash_driver =
     \\eval "$(zask completion bash)" || exit 1
     \\complete_word() {

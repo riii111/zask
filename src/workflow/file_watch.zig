@@ -1,6 +1,3 @@
-//! Detects changes to a service's watched files by comparing polled snapshots.
-//! See `platform/file_scan.zig` for supported OSes and why zask polls.
-
 const std = @import("std");
 const config = @import("../model/config.zig");
 const watch = @import("../model/watch.zig");
@@ -9,7 +6,6 @@ const file_scan = @import("../platform/file_scan.zig");
 const Value = std.json.Value;
 const Snapshot = file_scan.Snapshot;
 
-/// How often callers should call `Watcher.poll`.
 pub const poll_interval_ms = 500;
 
 pub const ChangeKind = enum {
@@ -31,15 +27,12 @@ pub const Event = union(enum) {
 pub const Watcher = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
-    /// Holds the spec slices and resolved roots for the watcher's lifetime.
     arena: std.heap.ArenaAllocator,
     spec: watch.Spec,
     roots: []const file_scan.Root,
     tracker: Tracker,
     last_failure: ?file_scan.Failure = null,
 
-    /// Returns null when the service has no `watch` setting. Call `deinit` on
-    /// the result. The watcher borrows strings from `cfg`, which must outlive it.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, service: Value) !?Watcher {
         var arena = std.heap.ArenaAllocator.init(gpa);
         errdefer arena.deinit();
@@ -68,9 +61,6 @@ pub const Watcher = struct {
         self.arena.deinit();
     }
 
-    /// Scans once and returns an event when debounced changes are ready or the
-    /// scan starts failing. `now_ns` must come from a monotonic clock. The
-    /// event borrows storage that stays valid until the next `poll` or `deinit`.
     pub fn poll(self: *Watcher, now_ns: i96) !?Event {
         if (self.last_failure) |failure| failure.deinit(self.gpa);
         self.last_failure = null;
@@ -93,16 +83,10 @@ pub const Watcher = struct {
     }
 };
 
-/// Debounces snapshots into change batches. Changes are reported once no new
-/// change has been seen for the debounce period, as the net difference from
-/// the last reported state; a file created and removed within one burst is
-/// not reported. Writes that never pause keep the batch pending.
 pub const Tracker = struct {
     debounce_ns: i96,
     baseline: ?Snapshot = null,
     pending: ?Snapshot = null,
-    /// The baseline before the last report. Deleted paths in the returned
-    /// changes borrow from it.
     reported: ?Snapshot = null,
     last_change_ns: i96 = 0,
     failure_reported: bool = false,
@@ -117,8 +101,6 @@ pub const Tracker = struct {
         return self.baseline != null;
     }
 
-    /// Takes ownership of `snapshot`. Returned changes stay valid until the
-    /// next `observe`, `observeFailure`, or `deinit`.
     pub fn observe(self: *Tracker, gpa: std.mem.Allocator, snapshot: Snapshot, now_ns: i96) !?[]const Change {
         var next = snapshot;
         self.releaseReported();
@@ -147,9 +129,6 @@ pub const Tracker = struct {
         return self.changes.items;
     }
 
-    /// Drops snapshots so the next successful scan starts a new baseline;
-    /// changes made while scanning fails are not reported. Returns true only
-    /// for the first failure after a successful scan.
     pub fn observeFailure(self: *Tracker) bool {
         self.dropSnapshots();
         if (self.failure_reported) return false;
@@ -179,7 +158,6 @@ fn sameEntries(a: []const file_scan.Entry, b: []const file_scan.Entry) bool {
     return true;
 }
 
-/// Both inputs must be sorted by path, as `file_scan.scan` returns them.
 fn diffEntries(gpa: std.mem.Allocator, before: []const file_scan.Entry, after: []const file_scan.Entry, out: *std.ArrayList(Change)) !void {
     var i: usize = 0;
     var j: usize = 0;

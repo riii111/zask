@@ -23,7 +23,6 @@ pub fn run(ctx: *Context, opts: Options) !void {
 }
 
 fn runJson(ctx: *Context) !void {
-    // Set before loading the config so config failures are rendered as JSON too.
     ctx.useJsonOutput();
     const rt = try ctx.runtime();
     try status_json.writeStatus(ctx.writer, try status_json.collect(rt.cfg, rt.observer()));

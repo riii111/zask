@@ -24,17 +24,10 @@ const zask_command = @import("zask_command.zig");
 /// can be respawned without re-observing them.
 pub const StartMode = enum { observe, prime };
 
-/// How a single-target stop or restart ended. `incomplete` follows a warning
-/// the workflow printed before returning normally, so the CLI still exits 0,
-/// but the target may not have reached the requested state.
 pub const Outcome = enum { done, incomplete };
 
-/// `skipped` means no new process: the service was already running or a
-/// recorded stop kept it stopped.
 pub const StartOutcome = enum { started, skipped };
 
-/// What recordFailedRun left. `run_gone` means the pane no longer holds the
-/// failed run (someone started or closed it), so nothing was written.
 pub const FailedRunRecord = struct {
     run_gone: bool = false,
     record_error: ?anyerror = null,
@@ -63,18 +56,10 @@ pub const Lifecycle = struct {
     validate_configured_dirs: bool = true,
     emit_env_file_tips: bool = false,
     command_hint: zask_command.InvocationHint,
-    /// Directory that receives each service's output; null leaves output only
-    /// in the tmux window (callers without a state directory, such as tests).
     service_log_dir: ?[]const u8 = null,
-    /// Printed in the service pane before the start command runs.
     launch_notice: ?[]const u8 = null,
-    /// Recovery record the start leaves on the pane; null clears any earlier
-    /// one, so the monitor never shows it for a run started another way.
     recovery_record: ?recovery.Record = null,
-    /// Records user stops for the file watcher. Null skips recording.
     stop_marks: ?stop_marks_mod.StopMarks = null,
-    /// Set for watcher restarts: start only if no stop is recorded, checked
-    /// under the service lock, and never clear a recorded stop.
     respect_stop_mark: bool = false,
 
     pub fn startAll(self: Lifecycle, profile: []const u8, writer: *std.Io.Writer, mode: StartMode) !void {
@@ -156,7 +141,6 @@ pub const Lifecycle = struct {
         } else |_| try self.startNamedService(target, writer);
     }
 
-    /// Starts exactly `service`, even when a group or alias shares its name.
     pub fn startServiceTarget(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !void {
         try self.ensureSessionActive(writer);
         try self.startNamedService(service, writer);
@@ -185,11 +169,9 @@ pub const Lifecycle = struct {
         } else |_| _ = try self.stopService(target, writer);
     }
 
-    /// Stops exactly `service`, even when a group or alias shares its name.
     pub fn stopServiceTarget(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !Outcome {
         switch (self.tmux.observeSession()) {
             .active => {},
-            // Both report and return an error, so the stop below never runs.
             .missing => try sessionNotRunning(writer),
             .unavailable => try waits.reportTmuxUnavailable(writer),
         }
@@ -211,18 +193,15 @@ pub const Lifecycle = struct {
         } else |_| _ = try self.restartNamedService(target, writer);
     }
 
-    /// Restarts exactly `service`, even when a group or alias shares its name.
     pub fn restartServiceTarget(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !Outcome {
         try self.ensureSessionActive(writer);
         return self.restartNamedService(service, writer);
     }
 
-    /// Same steps as `stop docker`.
     pub fn stopDockerTarget(self: Lifecycle, writer: *std.Io.Writer) !Outcome {
         return self.stopDocker(writer);
     }
 
-    /// Same steps as `restart docker`.
     pub fn restartDockerTarget(self: Lifecycle, writer: *std.Io.Writer) !Outcome {
         try self.ensureSessionActive(writer);
         const stopped = try self.stopDocker(writer);
@@ -232,19 +211,11 @@ pub const Lifecycle = struct {
         return stopped;
     }
 
-    /// Restart for a file change, with `notice` shown in the service pane so
-    /// its log records why it restarted. Unlike `restart <service>` it does not
-    /// record a stop, and it leaves the service stopped when the user stops it
-    /// while this restart waits for the old process to exit.
     pub fn restartServiceWithNotice(self: Lifecycle, service: []const u8, notice: []const u8, writer: *std.Io.Writer) !void {
         if (try self.ensureServiceStopped(service, writer) == .incomplete) return error.ServiceStopIncomplete;
         _ = try self.startServiceWithNotice(service, notice, null, writer);
     }
 
-    /// Start for an automatic recovery, with `notice` shown in the service
-    /// pane and `record` left on it for the monitor. It never clears a
-    /// recorded stop, so it leaves the service stopped when the user stops it
-    /// first, and does nothing if it is running again.
     pub fn startServiceWithNotice(self: Lifecycle, service: []const u8, notice: []const u8, record: ?recovery.Record, writer: *std.Io.Writer) !StartOutcome {
         var noticed = self;
         noticed.launch_notice = notice;
@@ -254,11 +225,6 @@ pub const Lifecycle = struct {
         return noticed.ensureServiceRunning(service, &progress, .observe);
     }
 
-    /// Leaves `record` on the pane of the failed run it names, and `note` in
-    /// the service log after that run's output, only while the pane still
-    /// holds that dead run. The check runs under the service lock that starts
-    /// take, so a start after the supervisor saw the failure gets neither.
-    /// A record or note that cannot be written is returned, not raised.
     pub fn recordFailedRun(self: Lifecycle, service: []const u8, record: recovery.Record, note: ?[]const u8) !FailedRunRecord {
         const held = try self.holdStopMark(service);
         defer if (held) |h| h.release();
@@ -281,9 +247,6 @@ pub const Lifecycle = struct {
         return result;
     }
 
-    /// The relay acknowledgement is written after the run's completion marker
-    /// and all preceding output. A timeout is a failed save, never permission
-    /// to write the note ahead of pending output. The service lock is held.
     fn noteAfterRun(self: Lifecycle, service: []const u8, log_dir: []const u8, text: []const u8) !void {
         const log_path = try service_log.servicePath(self.gpa, log_dir, service);
         defer self.gpa.free(log_path);
@@ -361,16 +324,11 @@ pub const Lifecycle = struct {
         return self.restartService(service, writer);
     }
 
-    /// Held across the stop-mark check and respawn so a concurrent `zask stop`
-    /// either lands first and prevents the start, or waits and then stops the
-    /// started process.
     fn holdStopMark(self: Lifecycle, service: []const u8) !?stop_marks_mod.StopMarks.Held {
         const marks = self.stop_marks orelse return null;
         return try marks.hold(self.gpa, service);
     }
 
-    /// Marks before signaling so the watcher sees the stop while the process is
-    /// still exiting. A failure only weakens file watch, so stopping continues.
     fn recordStop(self: Lifecycle, service: []const u8) bool {
         const marks = self.stop_marks orelse return true;
         marks.mark(self.gpa, service) catch return false;
@@ -453,8 +411,6 @@ pub const Lifecycle = struct {
         try writer.print("  {s}\n", .{command});
     }
 
-    /// A stop that did not finish leaves the pane busy, so the start that
-    /// follows finds it running and does not respawn it.
     fn restartService(self: Lifecycle, service: []const u8, writer: *std.Io.Writer) !Outcome {
         const stopped = try self.stopService(service, writer);
         try self.startService(service, writer, .observe);
@@ -546,8 +502,6 @@ pub const Lifecycle = struct {
         return .started;
     }
 
-    /// A log that cannot be written must not block the start: the output stays
-    /// in the tmux window, and the warning keeps the missing record visible.
     fn beginServiceLog(self: Lifecycle, service: []const u8, log_dir: []const u8, started_at: i64, progress: anytype) !?service_log.Recording {
         return service_log.begin(self.gpa, self.runner.io, log_dir, service, started_at) catch |err| switch (err) {
             error.OutOfMemory => return err,
@@ -558,8 +512,6 @@ pub const Lifecycle = struct {
         };
     }
 
-    /// Returned command is borrowed without a notice and owned by this
-    /// lifecycle allocator otherwise; callers do not free it individually.
     fn withLaunchNotice(self: Lifecycle, command: []const u8) ![]const u8 {
         const notice = self.launch_notice orelse return command;
         const quoted = try shell.quote(self.gpa, notice);
@@ -903,8 +855,6 @@ fn composeDiagnosticStateText(state: observations.ComposeState) []const u8 {
 // Tests
 // -----------------------------------------------------------------------------
 
-/// A group named after one of its services, so a service-only target can be
-/// told apart from the group.
 const test_shared_name_json =
     \\{
     \\  "project": {"name":"demo","root":"/tmp/demo"},

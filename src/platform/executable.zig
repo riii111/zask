@@ -1,21 +1,10 @@
 const std = @import("std");
 
-/// How `search_path` is applied, which differs between the two launchers.
 pub const Rule = enum {
-    /// A POSIX shell (service panes): an empty entry means the working
-    /// directory, and an unset PATH finds nothing.
     shell,
-    /// `std.process.spawn` (the Runner): empty entries are skipped, and an
-    /// unset PATH falls back to the standard library default.
     spawn,
 };
 
-/// Resolves `name` like `rule`'s launcher would before running it from `cwd`:
-/// names containing a slash are taken as paths, others are searched in the
-/// colon-separated `search_path`. Relative paths and PATH entries resolve
-/// under `cwd`. Returns a caller-owned path, or null when no executable regular
-/// file matches. Aliases, functions, and builtins are invisible here; callers
-/// decide which names to skip.
 pub fn find(gpa: std.mem.Allocator, io: std.Io, rule: Rule, search_path: ?[]const u8, cwd: []const u8, name: []const u8) !?[]const u8 {
     if (std.mem.indexOfScalar(u8, name, '/') != null) {
         const path = if (std.fs.path.isAbsolute(name)) try gpa.dupe(u8, name) else try std.fs.path.join(gpa, &.{ cwd, name });

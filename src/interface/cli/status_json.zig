@@ -4,23 +4,16 @@ const diagnostics = @import("../../model/diagnostics.zig");
 const observations = @import("../../model/observations.zig");
 const service_observation = @import("../../workflow/service_observation.zig");
 
-/// Machine-readable contract of `status --json`. stdout carries exactly one
-/// JSON document: `Status` with exit 0, or `ErrorDocument` with a non-zero
-/// exit. Bump `schema_version` only for breaking changes; added fields keep it.
-/// Tag names of the enums below are part of the contract, so they are mapped
-/// from the observation model explicitly instead of reusing its tags.
 pub const schema_version = 1;
 
 pub const Status = struct {
     schema_version: u32 = schema_version,
     project: []const u8,
     session: Session,
-    /// null when the config has no docker section.
     docker: ?Docker,
     services: []const Service,
 };
 
-/// tmux being unavailable is not a session state; it is reported as an error.
 pub const Session = enum {
     active,
     missing,
@@ -31,11 +24,9 @@ pub const Service = struct {
     group: []const u8,
     state: ProcessState,
     health: Health,
-    /// Configured port; whether anything listens on it is `listen`.
     port: ?i64,
     listen: Probe,
     http: Probe,
-    /// Set only for `exited`; null otherwise or when tmux gave no status.
     exit_code: ?i64,
     uptime: Uptime,
 };
@@ -82,7 +73,6 @@ pub const Compose = enum {
 
 pub const Uptime = struct {
     state: UptimeState,
-    /// Set only for `known`.
     seconds: ?i64,
 };
 
@@ -100,13 +90,11 @@ pub const ErrorDocument = struct {
 pub const ErrorBody = struct {
     code: []const u8,
     message: []const u8,
-    /// Resolved config path once selection succeeded.
     config: ?[]const u8,
     diagnostics: []const DiagnosticEntry,
 };
 
 pub const DiagnosticEntry = struct {
-    /// null for problems not tied to a config field.
     path: ?[]const u8,
     message: []const u8,
 };
@@ -122,10 +110,6 @@ pub const ErrorDetails = struct {
     diagnostics: []const diagnostics.Diagnostic = &.{},
 };
 
-/// Observes the session and every configured service. Returns
-/// error.TmuxUnavailable when tmux cannot answer whether the session exists.
-/// Slices in the result are allocated with the observer's allocator or borrowed
-/// from `cfg`; use an arena and keep `cfg` alive while the result is used.
 pub fn collect(cfg: config.Config, observer: service_observation.Observer) !Status {
     const session: Session = switch (observer.tmux.observeSession()) {
         .active => .active,
@@ -154,9 +138,6 @@ pub fn writeStatus(writer: *std.Io.Writer, status: Status) !void {
     try writeDocument(writer, status);
 }
 
-/// Writes the error document and returns the failure it describes. Errors
-/// without a stable code are reported as `unexpected`; the caller should
-/// propagate those so the trace still reaches stderr.
 pub fn writeError(gpa: std.mem.Allocator, writer: *std.Io.Writer, err: anyerror, details: ErrorDetails) !?Failure {
     const known = knownFailure(err);
     const entries = try gpa.alloc(DiagnosticEntry, details.diagnostics.len);
@@ -173,8 +154,6 @@ pub fn writeError(gpa: std.mem.Allocator, writer: *std.Io.Writer, err: anyerror,
     return known;
 }
 
-/// Stable codes for failures the CLI already reports; exit codes match the
-/// text output (1 runtime/environment, 2 usage/config).
 pub fn knownFailure(err: anyerror) ?Failure {
     return switch (err) {
         error.ConfigNotFound => .{ .code = "config_not_found", .message = "config not found", .exit_code = 2 },
@@ -216,8 +195,6 @@ fn dockerEntry(observer: service_observation.Observer, session: Session) Docker 
     defer observation.deinit(observer.gpa);
     return .{
         .state = processState(observation.pane.state, session),
-        // The observer leaves compose `empty` without asking Docker when the
-        // pane is not running; report that as not observed, not as empty.
         .compose = if (observation.pane.running()) compose(observation.compose.state) else .not_observed,
         .exit_code = exitCode(observation.pane),
         .uptime = uptime(observation.uptime()),

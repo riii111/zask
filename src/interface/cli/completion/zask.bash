@@ -1,6 +1,3 @@
-# bash completion for zask. Candidates come from `zask __complete` and are
-# escaped before insertion, so config names are never evaluated as code.
-# Written for bash 3.2 as well, which macOS ships as /bin/bash.
 
 _zask() {
     local -a args=()
@@ -30,10 +27,6 @@ _zask() {
     __zask_reply "$quote" < <(command zask __complete ${args[@]+"${args[@]}"} "$__zask_word" 2>/dev/null)
 }
 
-# Decodes quotes and backslashes the way bash passes the word to a command,
-# without eval, so typed words are never expanded. Sets __zask_word to the
-# value, __zask_quote to the quote still open at the end of the word, and
-# __zask_before_quote to the part of the value typed before that quote.
 __zask_unquote() {
     local word=$1 value= quote= before= char i
     for (( i = 0; i < ${#word}; i++ )); do
@@ -43,7 +36,6 @@ __zask_unquote() {
         elif [[ $char == '\' ]]; then
             i=$(( i + 1 ))
             char=${word:i:1}
-            # Inside double quotes a backslash only escapes $ ` " and itself.
             if [[ $quote == '"' ]]; then
                 case $char in
                     '$'|'`'|'"'|'\') ;;
@@ -68,10 +60,6 @@ __zask_unquote() {
     __zask_before_quote=$before
 }
 
-# Adds each input line to COMPREPLY, escaped for the quote the user opened.
-# readline inserts replies as typed text, so anything left unescaped would run
-# as shell syntax when the line is executed. Inside an open quote readline
-# replaces only the text after that quote, so the part typed before it is dropped.
 __zask_reply() {
     local line squote="'" bslash='\'
     while IFS= read -r line; do
@@ -80,8 +68,6 @@ __zask_reply() {
         case $1 in
             \')
                 line=${line//$squote/$squote$bslash$squote$squote}
-                # readline drops a leading quote equal to the one the user
-                # opened, which would leave the escape unbalanced.
                 [[ $line == "$squote"* ]] && line=$squote$line
                 ;;
             \")

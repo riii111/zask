@@ -5,46 +5,27 @@ const proc_runner = @import("../platform/runner.zig");
 const shell = @import("../platform/shell.zig");
 const tmux_client = @import("../platform/tmux.zig");
 
-/// Enough history to scroll back past a typical stack trace.
 pub const max_lines = 200;
 
 pub const Outcome = enum {
-    /// The popup was shown and has been closed.
     shown,
-    /// The window exists but has printed nothing yet.
     empty,
-    /// The caller does not run in a tmux pane, so no client is showing it.
     outside_tmux,
-    /// No attached client currently shows the caller's pane.
     no_client,
     window_missing,
     tmux_unavailable,
-    /// tmux refused the popup, e.g. tmux older than 3.3.
     popup_unavailable,
-    /// less is missing, or takes neither a lesskey source (582+) nor a file
-    /// compiled by `lesskey`, so the popup could not close with Ctrl+G; it is
-    /// not opened.
     pager_unavailable,
 };
 
 pub const Request = struct {
-    /// tmux window to capture.
     window: []const u8,
-    /// Shown in the popup title.
     label: []const u8,
-    /// The caller's own pane (`$TMUX_PANE`); the popup opens on the client
-    /// showing it. Null outside tmux.
     pane: ?[]const u8,
-    /// Absolute directory for the captured text; created private when missing.
     scratch_dir: []const u8,
-    /// The caller's PATH, where `less` and `lesskey` are looked up.
     search_path: ?[]const u8,
 };
 
-/// Captures the window's recent lines once and pages them in a popup, blocking
-/// until the popup closes. The text is a snapshot: output written while the
-/// popup is open, or after the service exits, is not added. The captured file
-/// is removed before returning, including when the popup is refused.
 pub fn show(gpa: std.mem.Allocator, io: std.Io, tmux: tmux_client.Client, request: Request) !Outcome {
     const pane = request.pane orelse return .outside_tmux;
     const lines = tmux.captureRecentLines(request.window, max_lines) catch |err| switch (err) {
@@ -65,7 +46,6 @@ pub fn show(gpa: std.mem.Allocator, io: std.Io, tmux: tmux_client.Client, reques
     defer gpa.free(name);
     const path = try std.fs.path.join(gpa, &.{ request.scratch_dir, name });
     defer gpa.free(path);
-    // Registered before writing so a partly written file is removed too.
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     try paths.writeFileMode(io, path, lines, paths.private_file_permissions);
     const keys_path = try std.fmt.allocPrint(gpa, "{s}.lesskey", .{path});
@@ -91,9 +71,6 @@ pub fn show(gpa: std.mem.Allocator, io: std.Io, tmux: tmux_client.Client, reques
     return .shown;
 }
 
-/// Emacs moves for the popup, in lesskey source form. less binds all but
-/// Ctrl+G this way already; listing them keeps them when the user's own
-/// lesskey rebinds them. Ctrl+G closes the popup, as it closes the window list.
 const emacs_keys =
     \\#command
     \\^N forw-line
@@ -106,19 +83,13 @@ const emacs_keys =
     \\
 ;
 
-/// How less gets `emacs_keys`; both paths borrow from the caller.
 const PagerKeys = union(enum) {
-    /// less 582+ reads the source with `--lesskey-src`.
     source: []const u8,
-    /// Older less reads a file compiled by `lesskey` with `-k`.
     compiled: []const u8,
 };
 
-/// Absolute paths, so the popup runs the less that was asked; the popup's
-/// shell starts with the tmux server's PATH, which may find another one.
 const Pager = struct {
     less: []const u8,
-    /// Null when no `lesskey` is installed.
     lesskey: ?[]const u8,
 
     fn deinit(self: Pager, gpa: std.mem.Allocator) void {
@@ -127,15 +98,12 @@ const Pager = struct {
     }
 };
 
-/// Caller owns the result; null when no less is installed.
 fn findPager(gpa: std.mem.Allocator, io: std.Io, search_path: ?[]const u8) !?Pager {
     const less = try findAbsolute(gpa, io, search_path, "less") orelse return null;
     errdefer gpa.free(less);
     return .{ .less = less, .lesskey = try findAbsolute(gpa, io, search_path, "lesskey") };
 }
 
-/// A relative PATH entry resolves under zask's working directory, which the
-/// popup does not share, so the result is made absolute.
 fn findAbsolute(gpa: std.mem.Allocator, io: std.Io, search_path: ?[]const u8, name: []const u8) !?[]const u8 {
     const found = try executable.find(gpa, io, .spawn, search_path, ".", name) orelse return null;
     if (std.fs.path.isAbsolute(found)) return found;
@@ -145,8 +113,6 @@ fn findAbsolute(gpa: std.mem.Allocator, io: std.Io, search_path: ?[]const u8, na
     return try gpa.dupe(u8, absolute);
 }
 
-/// Asks `pager.less` which form it takes, compiling the keys to
-/// `compiled_path` for an older less. Null when neither works.
 fn pagerKeys(runner: proc_runner.Runner, pager: Pager, keys_path: []const u8, compiled_path: []const u8) ?PagerKeys {
     var option_buffer: [std.fs.max_path_bytes + 16]u8 = undefined;
     const option = std.fmt.bufPrint(&option_buffer, "--lesskey-src={s}", .{keys_path}) catch return null;
@@ -163,10 +129,6 @@ fn succeeds(runner: proc_runner.Runner, argv: []const []const u8) bool {
     return result.term == .exited and result.term.exited == 0;
 }
 
-/// Caller owns the returned shell command. Starts at the end of the log and
-/// cancels LESS options that would quit at the end of the text (-E / -F) and
-/// so close the popup before it is read. The keys apply to this run only,
-/// never to the user's lesskey.
 fn pagerCommand(gpa: std.mem.Allocator, less: []const u8, path: []const u8, keys: PagerKeys) ![]const u8 {
     const quoted = try shell.quote(gpa, path);
     defer gpa.free(quoted);
@@ -195,7 +157,6 @@ const TestSetup = struct {
     recorder: proc_runner.Recorder,
     tmp: std.testing.TmpDir,
     scratch_dir: []const u8,
-    /// Holds stand-ins for `less` and `lesskey`; the recorder answers for them.
     bin_dir: []const u8,
 
     fn init(setup: *TestSetup) !void {
@@ -270,7 +231,6 @@ test "log_popup.show: reports why no popup was shown" {
         capture_status: u8 = 0,
         clients_stdout: ?[]const u8 = null,
         popup_stderr: ?[]const u8 = null,
-        /// Whether less takes the keys, once the popup gets that far.
         less_keys: bool = true,
         less_missing: bool = false,
         expected: Outcome,
@@ -330,7 +290,6 @@ test "log_popup.findPager: resolves a relative PATH entry to an absolute path" {
     defer tmp.cleanup();
     try tmp.dir.createDirPath(std.testing.io, "bin");
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "bin/less", .data = "#!/bin/sh\n", .flags = .{ .permissions = @enumFromInt(0o755) } });
-    // std.testing.tmpDir lives under the working directory at this path.
     const relative = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/bin", .{tmp.sub_path});
     defer std.testing.allocator.free(relative);
 

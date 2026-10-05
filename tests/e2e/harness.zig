@@ -22,7 +22,6 @@ pub const SpawnOptions = struct {
     cwd: []const u8,
     xdg_config_home: []const u8,
     home: []const u8,
-    /// Child PATH; unset means the child gets no PATH and the platform default applies.
     path: ?[]const u8 = null,
 };
 
@@ -103,8 +102,6 @@ pub const Workspace = struct {
         try project_dir.writeFile(io, .{ .sub_path = sub_path, .data = contents });
     }
 
-    /// Creates `<workspace>/bin` holding empty executables named `fakes` and
-    /// symlinks to the real `links`; returns the caller-owned bin path.
     pub fn toolDir(self: Workspace, gpa: std.mem.Allocator, io: std.Io, fakes: []const []const u8, links: []const []const u8) ![:0]u8 {
         try self.tmp.dir.createDirPath(io, "bin");
         var bin = try self.tmp.dir.openDir(io, "bin", .{});

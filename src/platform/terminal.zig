@@ -1,8 +1,3 @@
-//! Key input and size queries for the terminal the monitor runs in.
-//!
-//! termios, poll, and TIOCGWINSZ have no std.Io equivalent in Zig 0.16, so this
-//! adapter is the one place that calls std.posix / libc directly for them.
-
 const std = @import("std");
 const posix = std.posix;
 
@@ -17,17 +12,13 @@ pub const Size = struct {
 pub const Readiness = enum {
     input,
     timeout,
-    /// The terminal hung up or the descriptor is no longer readable.
     closed,
 };
 
-/// Non-canonical, no-echo, no-signal mode for single-key input.
 pub const RawMode = struct {
     fd: posix.fd_t,
     original: posix.termios,
 
-    /// Returns null when `fd` is not a terminal; callers then run without key input.
-    /// The returned mode must be released with `restore`.
     pub fn enter(fd: posix.fd_t) !?RawMode {
         const original = posix.tcgetattr(fd) catch |err| switch (err) {
             error.NotATerminal => return null,
@@ -36,7 +27,6 @@ pub const RawMode = struct {
         var raw = original;
         raw.lflag.ICANON = false;
         raw.lflag.ECHO = false;
-        // Ctrl+C arrives as a byte so the caller can restore the terminal before exiting.
         raw.lflag.ISIG = false;
         raw.lflag.IEXTEN = false;
         raw.iflag.IXON = false;
@@ -47,8 +37,6 @@ pub const RawMode = struct {
         return .{ .fd = fd, .original = original };
     }
 
-    /// Restores only the termios captured by `enter`. Screen contents, cursor
-    /// visibility, and the alternate screen are left to the caller.
     pub fn restore(self: RawMode) void {
         posix.tcsetattr(self.fd, .FLUSH, self.original) catch {};
     }
@@ -61,13 +49,10 @@ pub fn waitReadable(fd: posix.fd_t, timeout_ms: i32) !Readiness {
     return .closed;
 }
 
-/// Returns 0 at end of input.
 pub fn read(fd: posix.fd_t, buffer: []u8) !usize {
     return posix.read(fd, buffer);
 }
 
-/// Drops input already typed but not yet read, so keys pressed while the
-/// caller was blocked are not acted on afterwards.
 pub fn discardInput(fd: posix.fd_t) void {
     var buffer: [256]u8 = undefined;
     while (true) {
@@ -78,7 +63,6 @@ pub fn discardInput(fd: posix.fd_t) void {
     }
 }
 
-/// Returns null when `fd` is not a terminal or reports a zero size.
 pub fn size(fd: posix.fd_t) ?Size {
     var ws: posix.winsize = undefined;
     const request: c_int = @bitCast(@as(u32, @truncate(@as(usize, std.c.T.IOCGWINSZ))));
@@ -89,9 +73,6 @@ pub fn size(fd: posix.fd_t) ?Size {
 
 const builtin = @import("builtin");
 
-/// Column count of the terminal behind `file`. null means the width is unknown
-/// (not a terminal, unsupported platform, or a zero-sized report); callers
-/// choose their own fallback.
 pub fn columns(io: std.Io, file: std.Io.File) ?usize {
     if (builtin.os.tag == .windows) return null;
     var winsize: std.c.winsize = .{

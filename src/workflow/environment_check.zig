@@ -17,8 +17,6 @@ pub const default_precheck_timeout = std.Io.Duration.fromSeconds(10);
 pub const Severity = enum {
     problem,
     warning,
-    /// The check could not reach a verdict (compound shell command, probe
-    /// timeout, missing probe tool). Shown to the user but never fails `check`.
     unverified,
 };
 
@@ -41,14 +39,11 @@ pub const PrecheckResult = struct {
     name: []const u8,
     command: []const u8,
     status: PrecheckStatus,
-    /// `problem` for `on_fail: abort`, `warning` for `warn`; ignored when passed.
     severity: Severity,
     detail: []const u8 = "",
     hint: []const u8 = "",
 };
 
-/// Collected results. Strings are allocated from `gpa`; pass an arena, since
-/// `deinit` only drops the lists.
 pub const Report = struct {
     gpa: std.mem.Allocator,
     findings: std.ArrayList(Finding) = .empty,
@@ -64,7 +59,6 @@ pub const Report = struct {
         self.prechecks.deinit(self.gpa);
     }
 
-    /// Counts findings and failed prechecks with `severity`.
     pub fn count(self: Report, severity: Severity) usize {
         var total: usize = 0;
         for (self.findings.items) |finding| {
@@ -94,14 +88,9 @@ pub const Context = struct {
     runner: proc_runner.Runner,
     tmux: tmux_client.Client,
     docker: docker_client.Compose,
-    /// Colon-separated PATH used to look up tools and service commands.
     search_path: ?[]const u8,
 };
 
-/// Checks the tools, service commands, and ports that `open` relies on, and
-/// runs `prechecks` only when `options.run_prechecks` is set. Read-only toward
-/// the workspace: it never creates sessions, starts or stops services, or
-/// touches Docker containers. Every external probe is bounded by a timeout.
 pub fn collect(ctx: Context, options: Options, report: *Report) !void {
     var bounded = ctx;
     bounded.runner.timeout = options.probe_timeout;
@@ -171,8 +160,6 @@ fn checkDocker(ctx: Context, report: *Report) !void {
     }
 }
 
-/// The Runner starts bash inside each precheck and command step directory,
-/// where relative PATH entries resolve, so the lookup runs from each of them.
 fn checkBash(ctx: Context, report: *Report) !void {
     var missing_from: ?[]const u8 = null;
     var found_somewhere = false;
@@ -215,7 +202,6 @@ fn appendRunDir(gpa: std.mem.Allocator, dirs: *std.ArrayList([]const u8), projec
     try dirs.append(gpa, path);
 }
 
-/// Returns whether nc exists; port checks are skipped without it.
 fn checkNc(ctx: Context, report: *Report) !bool {
     const needed_by_wait_ports = hasWaitPorts(ctx.cfg);
     if (!needed_by_wait_ports and !try hasServicePort(ctx.cfg)) return true;
@@ -236,16 +222,12 @@ fn checkNc(ctx: Context, report: *Report) !bool {
 fn checkServiceCommands(ctx: Context, report: *Report) !void {
     for (try ctx.cfg.services()) |service| {
         const dir = try ctx.cfg.serviceDir(ctx.gpa, service);
-        // A missing dir is already a path problem, and relative commands
-        // cannot be resolved without it.
         if (try configured_path.inspect(ctx.io, dir, .directory) != null) continue;
         const subject = try std.fmt.allocPrint(ctx.gpa, "{s}.command", .{try config_check.serviceLabel(ctx.gpa, service)});
         const command = try config.Config.serviceStartCommand(ctx.gpa, service);
         switch (classifyCommand(command)) {
             .program => |name| {
                 const has_slash = std.mem.indexOfScalar(u8, name, '/') != null;
-                // The launch script applies env_file before the command, so a
-                // PATH it sets decides the lookup whether or not ours succeeds.
                 if (!has_slash and try envFilesSetPath(ctx, service)) {
                     try report.add(.{ .severity = .unverified, .subject = subject, .message = "env_file sets PATH; command not checked" });
                     continue;
@@ -259,8 +241,6 @@ fn checkServiceCommands(ctx: Context, report: *Report) !void {
     }
 }
 
-/// The pane shell resolves builtins itself, so a PATH miss on a builtin name
-/// is not a problem.
 fn missingProgramFinding(ctx: Context, subject: []const u8, name: []const u8, has_slash: bool) !Finding {
     if (!has_slash and isShellBuiltin(name)) return .{
         .severity = .unverified,
@@ -275,10 +255,6 @@ fn missingProgramFinding(ctx: Context, subject: []const u8, name: []const u8, ha
     };
 }
 
-/// Mirrors the key parsing of the launch script in lifecycle: blank lines and
-/// comments are skipped and a leading `export ` is dropped. Missing,
-/// non-regular, or unreadable files are already path problems and count as
-/// not setting PATH; a FIFO is never opened, so reading cannot block.
 fn envFilesSetPath(ctx: Context, service: std.json.Value) !bool {
     for (try config.Config.serviceEnvFiles(ctx.gpa, service)) |env_file| {
         const path = try ctx.cfg.serviceEnvFilePath(ctx.gpa, service, env_file);
@@ -419,7 +395,6 @@ fn observePortUse(ctx: Context, port: i64) !PortUse {
 
 const PortOwner = enum { own_service, other, unknown };
 
-/// A port held by this project's running service is not a conflict.
 fn observePortOwner(ctx: Context, session: observations.SessionObservation, service: []const u8, port: i64) !PortOwner {
     switch (session) {
         .active => {},
@@ -462,8 +437,6 @@ const CommandShape = union(enum) {
     shell_syntax,
 };
 
-/// bash builtins and keywords plus common zsh-only builtins, since the pane
-/// runs the user's login shell.
 const shell_builtins = [_][]const u8{
     ".",        ":",         "[",        "[[",        "alias",  "autoload", "bg",      "bind",     "bindkey",
     "break",    "builtin",   "caller",   "case",      "cd",     "command",  "compgen", "complete", "compopt",
@@ -484,8 +457,6 @@ fn isShellBuiltin(name: []const u8) bool {
     return false;
 }
 
-/// Only a plain `name args...` command can be resolved without running a
-/// shell; anything else is reported as unverified instead of guessed.
 fn classifyCommand(command: []const u8) CommandShape {
     const trimmed = std.mem.trim(u8, command, " \t\r\n");
     if (std.mem.indexOfAny(u8, trimmed, ";&|\n`()") != null) return .compound;
@@ -495,8 +466,6 @@ fn classifyCommand(command: []const u8) CommandShape {
     return .{ .program = name };
 }
 
-/// Matches how the Runner spawns `name` from `cwd`; tools started without a
-/// cwd run from zask's own working directory (".").
 fn findTool(ctx: Context, cwd: []const u8, name: []const u8) !bool {
     return try executable.find(ctx.gpa, ctx.io, .spawn, ctx.search_path, cwd, name) != null;
 }
@@ -516,8 +485,6 @@ fn hasServicePort(cfg: config.Config) !bool {
     return false;
 }
 
-/// Formats command output for the terminal, replacing control bytes so a
-/// precheck cannot inject escape sequences into the report.
 fn displayText(text: []const u8) DisplayText {
     return .{ .text = text };
 }
@@ -597,7 +564,6 @@ fn testExpectFindings(expected: []const Finding, actual: []const Finding) !void 
     }
 }
 
-/// Built-in checks only observe; these commands would change the workspace.
 fn testExpectNoWorkspaceChanges(recorder: *const proc_runner.Recorder) !void {
     const forbidden = [_][]const u8{ "new-session", "new-window", "respawn-pane", "send-keys", "kill-session", "kill-server", "up", "down", "stop", "start" };
     for (recorder.commands.items) |command| {

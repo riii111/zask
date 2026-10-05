@@ -18,8 +18,6 @@ pub const RenderContext = struct {
             .docker = .{
                 .gpa = self.gpa,
                 .runner = self.runner,
-                // UI panes run from the project root, so the compose dir is the
-                // subdir under root; dockerDir would prepend root again.
                 .dir = self.cfg.dockerSubdir(),
                 .file = self.cfg.dockerComposeFile(),
             },

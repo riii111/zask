@@ -3,28 +3,20 @@ const env = @import("../platform/env.zig");
 const log_file = @import("../platform/log_file.zig");
 const paths = @import("../platform/paths.zig");
 
-/// Each start appends to `<service>.log`, so a restart never erases the output
-/// of the run that failed before it. A log that reached this size moves to
-/// `<service>.log.1` at the next start, replacing the older generation, which
-/// keeps the pair bounded while the previous runs stay readable.
 pub const rotate_at_bytes: u64 = 8 * 1024 * 1024;
 
-/// Caller owns the returned path: `<XDG state>/zask/<project>/logs`.
 pub fn directory(gpa: std.mem.Allocator, environ: ?*const env.Map, project: []const u8) ![]const u8 {
     const base = try paths.stateBase(gpa, environ);
     defer gpa.free(base);
     return std.fs.path.join(gpa, &.{ base, project, "logs" });
 }
 
-/// Caller owns the returned path.
 pub fn servicePath(gpa: std.mem.Allocator, dir: []const u8, service: []const u8) ![]const u8 {
     const name = try std.fmt.allocPrint(gpa, "{s}.log", .{service});
     defer gpa.free(name);
     return std.fs.path.join(gpa, &.{ dir, name });
 }
 
-/// One start's log: where the output goes and the header line that marks
-/// where this start begins in it. Free both with `deinit`.
 pub const Recording = struct {
     path: []const u8,
     header: []const u8,
@@ -37,21 +29,10 @@ pub const Recording = struct {
     }
 };
 
-/// Readies the service log for a start at `started_at` (Unix seconds), rotating
-/// it first when it reached rotate_at_bytes. Earlier output is never truncated.
-/// Fails when the log cannot be written; the caller owns the result.
-///
-/// Concurrent calls for one service, even from separate zask processes, are
-/// serialized only while the log is prepared (see log_file.prepareAppend), so
-/// rotation never loses a generation. Two starts that both get here still
-/// each set up their own pipe; keeping one start per service from pane
-/// observation through respawn is the caller's lock to hold.
 pub fn begin(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, service: []const u8, started_at: i64) !Recording {
     return beginRotatingAt(gpa, io, dir, service, started_at, rotate_at_bytes);
 }
 
-/// Appends a zask line about `service` to its log: `text` is written as one
-/// line. Output a pane pipe writes meanwhile is kept, but may land after it.
 pub fn appendNote(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, service: []const u8, text: []const u8) !void {
     const path = try servicePath(gpa, dir, service);
     defer gpa.free(path);
@@ -74,8 +55,6 @@ fn beginRotatingAt(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, service:
     return .{ .path = path, .header = header, .token = token };
 }
 
-/// A blank line separates the header from earlier output, which may not end
-/// with a newline when the previous run was cut off mid-line.
 fn startHeader(gpa: std.mem.Allocator, service: []const u8, started_at: i64, follows_output: bool) ![]const u8 {
     const seconds = std.time.epoch.EpochSeconds{ .secs = @intCast(@max(started_at, 0)) };
     const year_day = seconds.getEpochDay().calculateYearDay();

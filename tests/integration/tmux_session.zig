@@ -238,7 +238,6 @@ test "cli.logs: tail returns whole lines that wrap in a narrow pane" {
     defer tmp.cleanup();
     const project = try writeServiceProject(gpa, io, tmp.dir, session);
     const ready_channel = try std.fmt.allocPrint(gpa, "{s}-resized", .{session});
-    // Each line is 80 columns, so a 20-column pane wraps it over four rows.
     const command = try std.fmt.allocPrint(gpa, "{s} wait-for {s}; for i in $(seq -w 1 20); do printf '%s%078d\\n' \"$i\" 0; done; sleep 60", .{ build_options.tmux_path, ready_channel });
 
     client.killSession() catch {};
@@ -610,7 +609,6 @@ test "runtime.observer: start marker follows start and restart" {
     try std.testing.expectEqual(zask.observations.HealthObservation.no_check, started.health());
     try std.testing.expect(started.uptime().seconds < 60);
 
-    // Age the marker so the restart below must replace it, not keep it.
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "set-option", "-p", "-t", api_target, "@zask_started_at", "1000" });
     const aged = try observer.observeService(service);
     try std.testing.expect(aged.uptime().seconds > 1_000_000);
@@ -640,8 +638,6 @@ test "runtime.start: service log keeps output past the pane history across resta
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     const log_dir = try std.fs.path.join(gpa, &.{ root, "state", "logs" });
-    // The first run overflows a 100-line history and dies right after its
-    // last line; the second run marks where the restart begins.
     try tmp.dir.writeFile(io, .{ .sub_path = "serve.sh", .data =
         \\if [ -e started ]; then echo second run; exec sleep 60; fi
         \\touch started
@@ -763,8 +759,6 @@ const ServiceProject = struct {
     env_map: std.process.Environ.Map,
 };
 
-/// Writes a one-service `api` config whose project name is `session`, and an
-/// environment that discovers it from `root` with the built tmux first on PATH.
 fn writeServiceProject(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, session: []const u8) !ServiceProject {
     const config_json = try std.fmt.allocPrint(gpa,
         \\{{
@@ -788,8 +782,6 @@ fn writeServiceProject(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sess
     return .{ .root = root, .env_map = env_map };
 }
 
-/// Runs the built zask binary from the project root; any exit status is
-/// returned so callers can assert failures.
 fn runZask(gpa: std.mem.Allocator, io: std.Io, project: ServiceProject, args: []const []const u8) !std.process.RunResult {
     const argv = try std.mem.concat(gpa, []const u8, &.{ &.{build_options.zask_path}, args });
     return std.process.run(gpa, io, .{
@@ -829,7 +821,6 @@ test "monitor: keys move selection, toggle the filter, and quit restores the ter
     const config_path = try std.fs.path.join(gpa, &.{ project_root, "zask.json" });
     const stty_path = try std.fs.path.join(gpa, &.{ project_root, "stty.txt" });
     const stderr_path = try std.fs.path.join(gpa, &.{ project_root, "monitor-stderr.txt" });
-    // The tmux server may run without HOME (as in CI), which config loading needs.
     const command = try std.fmt.allocPrint(gpa, "HOME={s} XDG_STATE_HOME={s} {s} --config {s} monitor 2> {s}; stty -a > {s}; sleep 60", .{
         try zask.shell.quote(gpa, project_root),
         try zask.shell.quote(gpa, project_root),
@@ -850,7 +841,6 @@ test "monitor: keys move selection, toggle the filter, and quit restores the ter
         .zask_path = build_options.zask_path,
         .config_path = config_path,
     });
-    // Busy with a closed port, api stays `waiting` and shows its last log line.
     try client.newWindowAfter("dashboard", "api", project_root, "printf '🚀🚀🚀🚀🚀🚀🚀🚀ログ日本語日本語日本語日本語\\n'; exec sleep 60");
     const target = try std.fmt.allocPrint(gpa, "{s}:dashboard", .{session});
 
@@ -862,15 +852,12 @@ test "monitor: keys move selection, toggle the filter, and quit restores the ter
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "Up" });
     try waitForSelectedRow(gpa, io, target, "api");
 
-    // Arrow keys whose bytes reach the monitor in two reads still move once,
-    // including when the gap spans a refresh (repeated past the 1s interval).
     for (0..4) |_| {
         try sendSplitArrow(gpa, io, target, "[B");
         try waitForSelectedRow(gpa, io, target, "web");
         try sendSplitArrow(gpa, io, target, "[A");
         try waitForSelectedRow(gpa, io, target, "api");
     }
-    // The ESC of the next arrow can share a read with the end of the previous one.
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "-H", "1b" });
     try std.Io.sleep(io, .fromMilliseconds(150), .awake);
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "-H", "5b", "42", "1b" });
@@ -937,8 +924,6 @@ test "monitor: l pages recent logs in a popup and returns to the monitor" {
     const config_path = try std.fs.path.join(gpa, &.{ project_root, "zask.json" });
     const runtime_dir = try std.fs.path.join(gpa, &.{ project_root, "run" });
     const scratch_dir = try std.fs.path.join(gpa, &.{ runtime_dir, "zask" });
-    // Only the monitor's PATH has this less, which logs its arguments and runs
-    // the real one; the popup's shell starts with the tmux server's PATH.
     const real_less = try zask.executable.find(gpa, io, .spawn, if (std.c.getenv("PATH")) |path| std.mem.span(path) else null, ".", "less") orelse return error.LessMissing;
     const less_log = try std.fs.path.join(gpa, &.{ project_root, "less-calls.txt" });
     try tmp.dir.createDirPath(io, "pager");
@@ -947,8 +932,6 @@ test "monitor: l pages recent logs in a popup and returns to the monitor" {
         .data = try std.fmt.allocPrint(gpa, "#!/bin/sh\necho \"$*\" >> {s}\nexec {s} \"$@\"\n", .{ try zask.shell.quote(gpa, less_log), try zask.shell.quote(gpa, real_less) }),
         .flags = .{ .permissions = @enumFromInt(0o755) },
     });
-    // The monitor runs from a subdirectory with a relative PATH entry that
-    // does not resolve from the popup's working directory.
     try tmp.dir.createDirPath(io, "sub");
     const command = try std.fmt.allocPrint(gpa, "cd sub && HOME={s} XDG_RUNTIME_DIR={s} PATH=../pager:\"$PATH\" {s} --config {s} monitor; sleep 60", .{
         try zask.shell.quote(gpa, project_root),
@@ -960,12 +943,10 @@ test "monitor: l pages recent logs in a popup and returns to the monitor" {
     client.killSession() catch {};
     try client.newSession("dashboard", project_root, command);
     defer client.killSession() catch {};
-    // More lines than the popup captures (the last 200) or shows at once.
     try client.newWindowAfter("dashboard", "api", project_root, "seq -f 'line-%03g' 1 300; exec sleep 60");
     const target = try std.fmt.allocPrint(gpa, "{s}:dashboard", .{session});
     try waitForSelectedRow(gpa, io, target, "api");
 
-    // Detached sessions have no client to draw a popup on.
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "l" });
     try waitForPaneText(gpa, io, target, "log popup unavailable");
 
@@ -976,10 +957,8 @@ test "monitor: l pages recent logs in a popup and returns to the monitor" {
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "l" });
     _ = try waitForScratchFile(gpa, io, scratch_dir, "line-300\n");
     try expectPopupOpen(gpa, io, target);
-    // The popup runs the less whose keys the monitor checked.
     _ = try waitForFileText(gpa, io, std.Io.Dir.cwd(), less_log, "+G");
 
-    // The popup opens at the end; each Emacs move shifts the first line shown.
     const end_top = try waitForPopupTop(gpa, io, terminal, null);
     try terminal.press(gpa, io, &.{"10"});
     _ = try waitForPopupTop(gpa, io, terminal, end_top - 1);
@@ -994,11 +973,8 @@ test "monitor: l pages recent logs in a popup and returns to the monitor" {
     try terminal.press(gpa, io, &.{ "1b", "3e" });
     _ = try waitForPopupTop(gpa, io, terminal, end_top);
     try std.testing.expect(paged_up < end_top - 2);
-    // Ctrl+G closes the popup and returns to the monitor.
     try terminal.press(gpa, io, &.{"07"});
     try waitForScratchDirEmpty(io, scratch_dir);
-    // The notice clears on the redraw after the monitor drops the keys typed
-    // while it waited, so later keys are acted on again.
     try waitForPaneTextGone(gpa, io, target, "log popup unavailable");
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "j" });
     try waitForSelectedRow(gpa, io, target, "web");
@@ -1046,13 +1022,11 @@ test "monitor: Emacs keys move by line, page, and to either end" {
     try waitForSelectedRow(gpa, io, target, "svc-01");
     try sendKeys(gpa, io, target, &.{"C-p"});
     try waitForSelectedRow(gpa, io, target, "svc-00");
-    // Several keys in one read each move once.
     try sendKeys(gpa, io, target, &.{ "-H", "0e", "0e", "0e" });
     try waitForSelectedRow(gpa, io, target, "svc-03");
     try sendKeys(gpa, io, target, &.{"M-<"});
     try waitForSelectedRow(gpa, io, target, "svc-00");
 
-    // 10 rows leave room for 3 service rows, so a page is 3 rows.
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "resize-window", "-t", target, "-x", "80", "-y", "10" });
     try sendKeys(gpa, io, target, &.{"C-v"});
     try waitForSelectedRow(gpa, io, target, "svc-03");
@@ -1060,7 +1034,6 @@ test "monitor: Emacs keys move by line, page, and to either end" {
     try waitForSelectedRow(gpa, io, target, "svc-06");
     try sendKeys(gpa, io, target, &.{"M-v"});
     try waitForSelectedRow(gpa, io, target, "svc-03");
-    // An Alt key whose ESC and character reach the monitor in two reads.
     try sendKeys(gpa, io, target, &.{ "-H", "1b" });
     try std.Io.sleep(io, .fromMilliseconds(150), .awake);
     try sendKeys(gpa, io, target, &.{ "-l", "v" });
@@ -1071,12 +1044,10 @@ test "monitor: Emacs keys move by line, page, and to either end" {
     try std.Io.sleep(io, .fromMilliseconds(300), .awake);
     try waitForSelectedRow(gpa, io, target, "svc-11");
 
-    // A taller pane shows every row, so one page reaches the end.
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "resize-window", "-t", target, "-x", "80", "-y", "24" });
     try sendKeys(gpa, io, target, &.{ "M-<", "C-v" });
     try waitForSelectedRow(gpa, io, target, "svc-11");
 
-    // Ctrl+G dismisses a notice and leaves the monitor running.
     try sendKeys(gpa, io, target, &.{"l"});
     try waitForPaneText(gpa, io, target, "window not found");
     try sendKeys(gpa, io, target, &.{"C-g"});
@@ -1120,7 +1091,6 @@ test "window list: Emacs keys page and jump only in zask sessions" {
     defer terminal.close(gpa, io);
     _ = try waitForClient(gpa, io, session);
 
-    // Keys reach tmux as a terminal sends them: Alt as ESC and the key.
     try openWindowList(gpa, io, session);
     try terminal.press(gpa, io, &.{ "16", "0d" });
     const paged = try waitForListClosed(gpa, io, session);
@@ -1134,7 +1104,6 @@ test "window list: Emacs keys page and jump only in zask sessions" {
     try terminal.press(gpa, io, &.{ "1b", "3e", "0d" });
     try std.testing.expectEqual(@as(usize, 30), try waitForListClosed(gpa, io, session));
 
-    // Alt+< goes to the session row at the top; Ctrl+N then reaches window 0.
     try openWindowList(gpa, io, session);
     try terminal.press(gpa, io, &.{ "1b", "3c", "0e", "0d" });
     try std.testing.expectEqual(@as(usize, 0), try waitForListClosed(gpa, io, session));
@@ -1143,19 +1112,16 @@ test "window list: Emacs keys page and jump only in zask sessions" {
     try terminal.press(gpa, io, &.{ "0e", "0e", "0e", "0d" });
     try std.testing.expectEqual(@as(usize, 3), try waitForListClosed(gpa, io, session));
 
-    // Ctrl+G closes the list without switching windows.
     try openWindowList(gpa, io, session);
     try terminal.press(gpa, io, &.{ "16", "07" });
     try std.testing.expectEqual(@as(usize, 3), try waitForListClosed(gpa, io, session));
 
-    // Another session on the same server gets the raw bytes unchanged.
     try other_client.newSession("main", root, try std.fmt.allocPrint(gpa, "stty raw -echo; dd bs=1 count=3 2>/dev/null | od -An -tx1 > {s}; sleep 60", .{try zask.shell.quote(gpa, keys_path)}));
     defer other_client.killSession() catch {};
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "switch-client", "-t", other });
     try std.Io.sleep(io, .fromMilliseconds(300), .awake);
     try terminal.press(gpa, io, &.{ "16", "1b", "76" });
     const received = try waitForFileText(gpa, io, std.Io.Dir.cwd(), keys_path, "76");
-    // od pads its columns differently on macOS and Linux.
     var bytes = std.mem.tokenizeAny(u8, received, " \t\r\n");
     for ([_][]const u8{ "16", "1b", "76" }) |want| try std.testing.expectEqualStrings(want, bytes.next() orelse return error.MissingByte);
     try std.testing.expectEqual(@as(?[]const u8, null), bytes.next());
@@ -1166,7 +1132,6 @@ fn sendKeys(gpa: std.mem.Allocator, io: std.Io, target: []const u8, keys: []cons
     try runDiscard(gpa, io, argv);
 }
 
-/// The lowest `line-NNN` the terminal shows, which is the popup's first line.
 fn popupTop(gpa: std.mem.Allocator, io: std.Io, terminal: Terminal) !?u32 {
     const screen = try run(gpa, io, &.{ build_options.tmux_path, "-L", terminal.socket, "capture-pane", "-p", "-t", "term" });
     var lowest: ?u32 = null;
@@ -1180,7 +1145,6 @@ fn popupTop(gpa: std.mem.Allocator, io: std.Io, terminal: Terminal) !?u32 {
     return lowest;
 }
 
-/// Waits until the popup's first line is `expected`, or any line when null.
 fn waitForPopupTop(gpa: std.mem.Allocator, io: std.Io, terminal: Terminal, expected: ?u32) !u32 {
     for (0..service_state_attempts) |_| {
         if (try popupTop(gpa, io, terminal)) |top| {
@@ -1207,10 +1171,6 @@ fn waitForPopupTopAbove(gpa: std.mem.Allocator, io: std.Io, terminal: Terminal, 
     return error.PopupTopTimeout;
 }
 
-/// A terminal for a real client: a pane of a separate tmux server runs
-/// `attach-session`, and `press` writes bytes to that pane in one write, as a
-/// terminal emulator sends a key press (Alt as ESC and the key). `script`
-/// cannot stand in here: on macOS it delivers ESC < as two key presses.
 const Terminal = struct {
     socket: []const u8,
 
@@ -1231,15 +1191,12 @@ const Terminal = struct {
     }
 };
 
-/// Lists only `session`, so moves to the ends stay within it while other
-/// tests' sessions share the server.
 fn openWindowList(gpa: std.mem.Allocator, io: std.Io, session: []const u8) !void {
     const only = try std.fmt.allocPrint(gpa, "#{{==:#{{session_name}},{s}}}", .{session});
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "choose-tree", "-Zw", "-f", only, "-t", session });
     try waitForPaneMode(gpa, io, session, "tree-mode");
 }
 
-/// Returns the active window index once the window list has closed.
 fn waitForListClosed(gpa: std.mem.Allocator, io: std.Io, session: []const u8) !usize {
     try waitForPaneMode(gpa, io, session, "");
     const result = try run(gpa, io, &.{ build_options.tmux_path, "display-message", "-p", "-t", session, "#{window_index}" });
@@ -1265,8 +1222,6 @@ fn waitForClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) ![]con
     return error.ClientTimeout;
 }
 
-/// Returns the captured text the monitor handed to the open popup once it
-/// holds `needle`; the file can be seen between its creation and the write.
 fn waitForScratchFile(gpa: std.mem.Allocator, io: std.Io, dir_path: []const u8, needle: []const u8) ![]const u8 {
     for (0..service_state_attempts) |_| {
         if (std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true })) |opened| {
@@ -1300,16 +1255,12 @@ fn waitForScratchDirEmpty(io: std.Io, dir_path: []const u8) !void {
     return error.ScratchFileLeft;
 }
 
-/// The monitor waits on the popup, so it ignores keys sent to its pane until
-/// the popup closes.
 fn expectPopupOpen(gpa: std.mem.Allocator, io: std.Io, target: []const u8) !void {
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "j" });
     try std.Io.sleep(io, .fromMilliseconds(300), .awake);
     try waitForSelectedRow(gpa, io, target, "api");
 }
 
-/// Returns the file once it contains `needle`; the pane pipe writes it
-/// asynchronously.
 fn waitForFileText(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sub_path: []const u8, needle: []const u8) ![]const u8 {
     for (0..pane_ready_attempts) |_| {
         const contents = dir.readFileAlloc(io, sub_path, gpa, .limited(1024 * 1024)) catch |err| switch (err) {
@@ -1337,8 +1288,6 @@ test "runtime.watch: restarts running service, skips stopping one, and ends with
     try tmp.dir.createDirPath(io, "src");
     try tmp.dir.writeFile(io, .{ .sub_path = "src/main.txt", .data = "1" });
     const project_root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-    // The service takes 2s to exit after Ctrl-C, so its pane stays busy while
-    // `zask stop` is still waiting.
     const config_json = try std.fmt.allocPrint(gpa,
         \\{{
         \\  "project": {{"name":"{s}","root":"{s}"}},
@@ -1381,10 +1330,6 @@ test "runtime.watch: restarts running service, skips stopping one, and ends with
     defer std.Io.Dir.cwd().deleteTree(io, runtime.stop_marks.?.dir) catch {};
     var buffer: [4096]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    // The stop command below runs with its own XDG_RUNTIME_DIR, unlike the
-    // watcher started by the tmux server; both must still share stop marks.
-    // A tmux server started by the test runner may lack HOME, which zask needs
-    // to load a config.
     const quoted_root = try zask.shell.quote(gpa, project_root);
     const watch_command = try std.fmt.allocPrint(gpa, "HOME={s} XDG_STATE_HOME={s} {s}", .{ quoted_root, quoted_root, try zask.zask_command.invokeWatch(gpa, build_options.zask_path, config_path) });
 
@@ -1443,8 +1388,6 @@ test "monitor: operation keys act only on the selected service" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    // The group shares the first service's name, and the second service's
-    // name starts with it, so a loose target would reach the wrong pane.
     const json = try std.fmt.allocPrint(gpa,
         \\{{
         \\  "project": {{"name":"{s}","root":"."}},
@@ -1508,7 +1451,6 @@ test "monitor: operation keys act only on the selected service" {
     try waitForPaneText(gpa, io, target, "started api");
     try waitForPaneState(client, gpa, io, "api", .busy);
 
-    // The stop key arrives with or right after the restart key, so it is dropped.
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "-l", "rx" });
     try waitForPaneText(gpa, io, target, "restarted api");
     try std.Io.sleep(io, .fromMilliseconds(1500), .awake);
@@ -1519,7 +1461,6 @@ test "monitor: operation keys act only on the selected service" {
     try waitForPaneText(gpa, io, target, "opened api");
     try expectActiveWindow(gpa, io, session, "api");
 
-    // With its window gone, restart recreates `api` instead of reaching `api-worker`.
     const api_target = try std.fmt.allocPrint(gpa, "{s}:=api", .{session});
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "kill-window", "-t", api_target });
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "r" });
@@ -1652,7 +1593,6 @@ test "runtime.watch: restarts failed services up to the limit and leaves stopped
 
     try waitForWatchPaneText(gpa, io, session, window, "api exited with status 3 after 2 restarts in a row; not restarting.");
     try waitForPaneState(client, gpa, io, "api", .dead);
-    // The login shell may scroll the notice off screen, so read the history.
     const api_history = try run(gpa, io, &.{ build_options.tmux_path, "capture-pane", "-p", "-J", "-S", "-", "-t", try std.fmt.allocPrint(gpa, "{s}:api", .{session}) });
     try std.testing.expect(std.mem.indexOf(u8, api_history.stdout, "zask: restarting api after it exited with status 3 (2/2)") != null);
     try waitForWatchPaneText(gpa, io, session, window, "job exited with status 0; not restarting");
@@ -1666,7 +1606,6 @@ test "runtime.watch: restarts failed services up to the limit and leaves stopped
     try waitForPaneState(client, gpa, io, "worker", .busy);
 
     try runtime.start("web", &writer);
-    // Send SIGINT after the service has started, rather than during shell initialization.
     _ = try waitForFileText(gpa, io, tmp.dir, "web.runs", "run");
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", try std.fmt.allocPrint(gpa, "{s}:web", .{session}), "C-c" });
 
@@ -1702,7 +1641,6 @@ test "runtime.watch: leaves recovery results for the monitor and the saved log" 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const project_root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-    // api fails until `ok` appears, then keeps running.
     const config_json = try std.fmt.allocPrint(gpa,
         \\{{
         \\  "project": {{"name":"{s}","root":"{s}"}},
@@ -1890,8 +1828,6 @@ test "lifecycle.startService: retries after Ctrl-C interrupts spawn preparation"
     try std.testing.expectEqualStrings("run\n", try tmp.dir.readFileAlloc(io, "api.runs", gpa, .limited(4096)));
 }
 
-/// Keeps tmux started from an explicit environment on the isolated server
-/// build.zig chose; without it tmux falls back to the user's own server.
 fn putTmuxTmpdir(map: *std.process.Environ.Map) !void {
     if (std.c.getenv("TMUX_TMPDIR")) |dir| try map.put("TMUX_TMPDIR", std.mem.span(dir));
 }
@@ -1951,10 +1887,6 @@ fn expectWindowOrder(gpa: std.mem.Allocator, io: std.Io, session: []const u8, ex
     try std.testing.expect(lines.next() == null);
 }
 
-/// These tests create sessions and bind server-wide keys. Anywhere but the
-/// directory `zig build test-tmux` creates for them, tmux could reach the
-/// user's own server (through $TMUX, the default socket, or a shared
-/// TMUX_TMPDIR), so the tests stop instead.
 fn requireIsolatedTmux() void {
     if (std.c.getenv("TMUX") != null) @panic("tmux tests must not run with TMUX set; run them with zig build test-tmux");
     const dir = std.mem.span(std.c.getenv("TMUX_TMPDIR") orelse @panic("tmux tests need TMUX_TMPDIR; run them with zig build test-tmux"));
@@ -2085,8 +2017,6 @@ fn waitForFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8
     return error.FileTimeout;
 }
 
-// `alternate_on|cursor_flag`: the monitor draws on the alternate screen with a
-// hidden cursor and must give both back when it exits.
 fn expectPaneFlags(gpa: std.mem.Allocator, io: std.Io, target: []const u8, expected: []const u8) !void {
     for (0..service_state_attempts) |_| {
         const result = try run(gpa, io, &.{ build_options.tmux_path, "display-message", "-p", "-t", target, "#{alternate_on}|#{cursor_flag}" });
@@ -2099,8 +2029,6 @@ fn expectPaneFlags(gpa: std.mem.Allocator, io: std.Io, target: []const u8, expec
     return error.PaneFlagsTimeout;
 }
 
-// A wrapped log would put its tail on a line of its own, without the row's
-// `│` separator.
 fn expectWideLogClipped(gpa: std.mem.Allocator, io: std.Io, target: []const u8) !void {
     const result = try run(gpa, io, &.{ build_options.tmux_path, "capture-pane", "-p", "-t", target });
     defer gpa.free(result.stdout);
@@ -2119,7 +2047,6 @@ fn sendSplitArrow(gpa: std.mem.Allocator, io: std.Io, target: []const u8, tail: 
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "-l", tail });
 }
 
-// Printed on timeouts so CI logs show what the monitor actually drew.
 fn dumpPane(gpa: std.mem.Allocator, io: std.Io, target: []const u8) !void {
     const result = try run(gpa, io, &.{ build_options.tmux_path, "capture-pane", "-p", "-t", target });
     defer gpa.free(result.stdout);

@@ -1,25 +1,12 @@
-//! Snapshots of watched files for change detection by polling.
-//!
-//! zask supports macOS and Linux and compares stat snapshots on both instead of
-//! using kqueue, FSEvents, or inotify: kqueue needs one descriptor per file,
-//! FSEvents needs the CoreServices framework, and inotify is Linux only. A scan
-//! records kind, inode, size, and mtime without following symlinks, so in-place
-//! writes, atomic saves that rename a new file over the old one, creation, and
-//! deletion all change the snapshot.
-
 const std = @import("std");
 const watch = @import("../model/watch.zig");
 
 const Dir = std.Io.Dir;
 
-/// Upper bound on watched files per scan. Larger trees need `exclude` patterns;
-/// scanning them on every poll would cost more than the restart saves.
 pub const max_entries = 100_000;
 
 pub const Root = struct {
-    /// Absolute path to scan.
     path: []const u8,
-    /// Prefix for reported paths. `.` reports paths relative to the root.
     label: []const u8,
 };
 
@@ -37,7 +24,6 @@ pub const Entry = struct {
 
 pub const Snapshot = struct {
     arena: std.heap.ArenaAllocator,
-    /// Sorted by path without duplicates. Borrowed from `arena`.
     entries: []const Entry,
 
     pub fn deinit(self: *Snapshot) void {
@@ -54,7 +40,6 @@ pub const FailureReason = enum {
 
 pub const Failure = struct {
     reason: FailureReason,
-    /// Absolute path where scanning stopped. Owned; release with `deinit`.
     path: []const u8,
 
     pub fn deinit(self: Failure, gpa: std.mem.Allocator) void {
@@ -62,9 +47,6 @@ pub const Failure = struct {
     }
 };
 
-/// What to do when a watched path does not exist. Before the first snapshot
-/// a missing path is usually a config mistake; afterwards it is a deletion,
-/// including the brief gap while an editor replaces a watched file.
 pub const MissingRoot = enum {
     fail,
     empty,
@@ -80,8 +62,6 @@ pub const Result = union(enum) {
     failed: Failure,
 };
 
-/// Directories excluded by `spec` are not descended into. Directories
-/// themselves are not recorded: creating an empty directory is not a change.
 pub fn scan(gpa: std.mem.Allocator, io: std.Io, roots: []const Root, spec: watch.Spec, options: Options) error{OutOfMemory}!Result {
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
@@ -119,7 +99,6 @@ const Scanner = struct {
             else => return self.fail(reasonFor(err), root.path),
         };
         self.root_path = root.path;
-        // A path named in `paths` skips `include` but still honors excludes.
         if (rootExcluded(self.spec, root.label)) return;
         if (stat.kind != .directory) return self.append(try self.arena.dupe(u8, root.label), stat);
 
@@ -148,7 +127,6 @@ const Scanner = struct {
             try self.rel_path.appendSlice(self.arena, item.name);
             const rel = self.rel_path.items;
 
-            // Entries can vanish between listing and stat while files are saved.
             const stat = dir.statFile(self.io, item.name, .{ .follow_symlinks = false }) catch |err| switch (err) {
                 error.FileNotFound => continue,
                 else => return self.failAt(err, root),
@@ -194,8 +172,6 @@ const Scanner = struct {
     }
 };
 
-// `.` and `..` name the starting point rather than a file, so patterns such as
-// `.*` must not exclude the whole tree.
 fn rootExcluded(spec: watch.Spec, label: []const u8) bool {
     const name = std.mem.trimEnd(u8, label, "/");
     const base = std.fs.path.basenamePosix(name);
@@ -216,7 +192,6 @@ fn displayPath(arena: std.mem.Allocator, label: []const u8, rel: []const u8) ![]
     return std.fmt.allocPrint(arena, "{s}/{s}", .{ std.mem.trimEnd(u8, label, "/"), rel });
 }
 
-// Overlapping roots such as `.` and `src` report the same file twice.
 fn sortUnique(entries: []Entry) []const Entry {
     std.mem.sort(Entry, entries, {}, lessThanPath);
     var len: usize = 0;
@@ -349,7 +324,6 @@ test "file_scan.scan: missing root fails before the first snapshot" {
 test "file_scan.scan: reports unreadable directories as access denied" {
     var tree = try TestTree.init();
     defer tree.deinit();
-    // Root bypasses permission checks, so the scan cannot fail there.
     if (std.c.geteuid() == 0) return error.SkipZigTest;
     try tree.write("locked/secret.txt", "");
     try tree.tmp.dir.setFilePermissions(std.testing.io, "locked", @enumFromInt(0o000), .{});

@@ -48,8 +48,6 @@ pub fn bindControlKeys(gpa: std.mem.Allocator, tx: tmux_client.Client) !void {
     try bindTreeNavigation(gpa, tx);
 }
 
-/// Window list (choose-tree) moves that tmux itself lacks; Ctrl+N / Ctrl+P
-/// move and Ctrl+G closes there already.
 const tree_moves = [_]struct { key: []const u8, tree_key: []const u8 }{
     .{ .key = "C-v", .tree_key = "NPage" },
     .{ .key = "M-v", .tree_key = "PPage" },
@@ -57,14 +55,8 @@ const tree_moves = [_]struct { key: []const u8, tree_key: []const u8 }{
     .{ .key = "M->", .tree_key = "End" },
 };
 
-/// The window list of a zask session: only zask sets this session option.
 const zask_tree_condition = "#{&&:#{==:#{pane_mode},tree-mode},#{" ++ tmux_options.zask_path ++ "}}";
 
-/// tmux keys cannot be bound for one mode or session, so these root-table
-/// bindings are server-wide: each acts only in the window list of a zask
-/// session and otherwise sends the key on unchanged, as if it were unbound.
-/// tmux skips the root table in copy mode, so copy-mode keys are untouched.
-/// A key the user already bound in the root table is left as it is.
 pub fn bindTreeNavigation(gpa: std.mem.Allocator, tx: tmux_client.Client) !void {
     for (tree_moves) |move| {
         if (try tx.rootKeyBinding(move.key)) |existing| {
@@ -77,9 +69,6 @@ pub fn bindTreeNavigation(gpa: std.mem.Allocator, tx: tmux_client.Client) !void 
     }
 }
 
-/// Flips the same session option as the Ctrl+q m binding, so both toggles agree.
-/// The current value is re-read because the binding may have changed it since
-/// the caller last looked.
 pub fn toggleDashMode(tx: tmux_client.Client) !tmux_options.DashMode {
     const current = try tx.showOption(tmux_options.dash_mode);
     defer if (current) |value| tx.gpa.free(value);

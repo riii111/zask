@@ -28,7 +28,6 @@ test "wait: exit codes separate usage errors from runtime failures" {
         defer ws.deinit(gpa);
         try ws.writeProjectFile(io, "config.json", config_json);
 
-        // An empty directory as PATH keeps tmux from being spawned on any host.
         var res = try harness.spawnZask(gpa, io, .{
             .cwd = ws.project,
             .xdg_config_home = ws.xdg,
@@ -49,14 +48,12 @@ test "wait: a tmux call that never returns fails at the deadline" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    // exec keeps the hung process the direct child, so the deadline kill reaches it.
     const cases = [_]struct {
         name: []const u8,
         script: []const u8,
     }{
         .{ .name = "output open", .script = "#!/bin/sh\nexec /bin/sleep 30\n" },
         .{ .name = "output closed", .script = "#!/bin/sh\nexec /bin/sleep 30 >/dev/null 2>&1\n" },
-        // An ignored signal stays ignored across exec.
         .{ .name = "SIGTERM ignored", .script = "#!/bin/sh\ntrap '' TERM\nexec /bin/sleep 30\n" },
     };
 

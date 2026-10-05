@@ -6,7 +6,6 @@ pub const Options = struct {
     targets: []const []const u8,
     timeout_seconds: u32 = readiness_wait.default_timeout_seconds,
 
-    /// `--timeout <seconds>` may come before or after the targets.
     pub fn parse(args: []const []const u8) !Options {
         var targets = args;
         var timeout_seconds: u32 = readiness_wait.default_timeout_seconds;
@@ -35,8 +34,6 @@ pub fn run(ctx: *Context, opts: Options) !void {
 }
 
 fn parseTimeout(arg: []const u8) !u32 {
-    // Zero is rejected: every check is cut off at the deadline, so no check
-    // could ever finish.
     const seconds = std.fmt.parseUnsigned(u32, arg, 10) catch return error.InvalidArguments;
     if (seconds == 0) return error.InvalidArguments;
     return seconds;

@@ -1,8 +1,3 @@
-//! Restarts services when their watched files change. The `zask-watch` window
-//! runs this loop for the life of the session, so it keeps going after the
-//! monitor closes or the client detaches and ends when `close` kills the
-//! session. Restarts use the same lifecycle steps as `zask restart`.
-
 const std = @import("std");
 const config = @import("../model/config.zig");
 const observations = @import("../model/observations.zig");
@@ -17,11 +12,6 @@ pub const RestartDecision = enum {
     tmux_unavailable,
 };
 
-/// A stop mark means the user ran `zask stop` (or `close`), possibly while the
-/// process is still exiting and its pane looks busy. An idle pane means the
-/// service was stopped (including Ctrl-C in the pane) or was not started by the
-/// open profile. Neither may be started by a file change. A dead pane exited
-/// on its own; restarting it lets a fix bring the service back.
 pub fn restartDecision(state: observations.PaneState, mark: observations.StopMarkObservation) RestartDecision {
     switch (mark) {
         .not_stopped => {},
@@ -36,36 +26,23 @@ pub fn restartDecision(state: observations.PaneState, mark: observations.StopMar
     };
 }
 
-/// A batch this long after a watch restart, beyond the debounce period, most
-/// likely came from the restarted service writing into its own watched files
-/// (logs, build output).
 pub const loop_settle_ns: i96 = 3 * std.time.ns_per_s;
-/// Restarts in a row, each starting within the loop window of the previous
-/// one finishing, before restarts pause.
 pub const loop_limit: u8 = 3;
 
-/// Batches are reported only after `debounce_ms` without changes, so the loop
-/// window must include it or a long debounce would hide every loop.
 pub fn loopWindowNs(debounce_ms: u64) i96 {
     return loop_settle_ns + @as(i96, debounce_ms) * std.time.ns_per_ms;
 }
 
-/// Stops restart loops caused by a service changing its own watched files.
-/// Restarts pause after `limit` quick restarts in a row and resume with the
-/// first batch that follows `window_ns` without changes.
 pub const LoopGuard = struct {
     window_ns: i96,
     limit: u8 = loop_limit,
     quick_restarts: u8 = 0,
     last_restart_ns: ?i96 = null,
-    /// Time of the latest batch while paused; null when not paused.
     paused_batch_ns: ?i96 = null,
 
     pub const Verdict = enum {
         restart,
-        /// Restarts pause from this batch on.
         pause,
-        /// Restarts were already paused and changes have not stopped yet.
         paused,
     };
 
@@ -74,7 +51,6 @@ pub const LoopGuard = struct {
             self.paused_batch_ns = now_ns;
             if (now_ns - last < self.window_ns) return .paused;
             self.paused_batch_ns = null;
-            // One more quick batch after resuming means the loop is back.
             self.quick_restarts = self.limit - 1;
             return .restart;
         }
@@ -91,8 +67,6 @@ pub const LoopGuard = struct {
         return .restart;
     }
 
-    /// `now_ns` is taken after the restart finishes, so time spent stopping
-    /// and starting does not count toward the loop window.
     pub fn restarted(self: *LoopGuard, now_ns: i96) void {
         self.last_restart_ns = now_ns;
     }
@@ -108,8 +82,6 @@ pub const Supervisor = struct {
         guard: LoopGuard,
     };
 
-    /// Watches every service with a `watch` setting. Call `deinit` on the
-    /// result. `cfg` must outlive the supervisor; watchers borrow its strings.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config) !Supervisor {
         var self: Supervisor = .{ .gpa = gpa, .services = .empty };
         errdefer self.deinit();
@@ -145,10 +117,6 @@ pub const Supervisor = struct {
         try writer.flush();
     }
 
-    /// Polls every watcher once and restarts services whose changes are ready.
-    /// `ctx` provides `now() i96` (monotonic ns), `paneState(name)`,
-    /// `stopMark(name)`, and `restart(name, notice, writer)`. Restart failures
-    /// are reported and watching continues.
     pub fn tick(self: *Supervisor, ctx: anytype, writer: *std.Io.Writer) !void {
         for (self.services.items) |*service| {
             const now_ns = ctx.now();
@@ -190,7 +158,6 @@ pub const Supervisor = struct {
     }
 };
 
-/// Formats a batch as its first change plus a count of the rest.
 pub const ChangeSummary = struct {
     changes: []const file_watch.Change,
 
@@ -216,7 +183,6 @@ fn failureText(reason: file_scan.FailureReason) []const u8 {
     };
 }
 
-/// Rounds up so the printed wait is never shorter than the real one.
 fn secondsText(ns: i96) i96 {
     return @divFloor(ns + std.time.ns_per_s - 1, std.time.ns_per_s);
 }
@@ -457,7 +423,6 @@ test "watch_restart.Supervisor: pauses restarts when the service keeps changing 
 
     const growing = "xxxxxxxxxx";
     for (0..loop_limit + 2) |index| {
-        // A new size marks each write as a change even within one mtime tick.
         try project.write("main.zig", growing[0 .. index + 2]);
         ctx.now_ns += 1;
         try supervisor.tick(&ctx, &writer);
@@ -520,8 +485,6 @@ test "watch_restart.Supervisor: pauses restart loops behind a long debounce" {
 
     const growing = "xxxxxxxxxx";
     for (0..loop_limit + 2) |index| {
-        // The service rewrites its file right after each restart; the batch
-        // is reported once the 3.5s debounce passes.
         try project.write("main.zig", growing[0 .. index + 2]);
         ctx.now_ns += std.time.ns_per_ms;
         try supervisor.tick(&ctx, &writer);

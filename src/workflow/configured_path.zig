@@ -41,10 +41,6 @@ pub fn ensureFile(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, pr
     try ensure(gpa, io, writer, problem, .file);
 }
 
-/// Returns null when `path` exists with the expected kind. Errors other than a
-/// missing entry stay errors so callers do not report them as config mistakes.
-/// Pass the configured path, not a display form: lexical `..` cleanup can
-/// point at a different entry when a component is a symlink.
 pub fn inspect(io: std.Io, path: []const u8, kind: Kind) !?Issue {
     const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return .not_found,

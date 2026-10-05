@@ -3,12 +3,9 @@ const std = @import("std");
 pub const dash_mode = "@zask_dash_mode";
 pub const zask_path = "@zask_path";
 pub const config_path = "@zask_config_path";
-// Pane option holding the Unix seconds of the last zask spawn of that pane.
 pub const starting = "@zask_starting";
 pub const log_run = "@zask_log_run";
 pub const started_at = "@zask_started_at";
-// Pane option holding what automatic recovery last did to that pane; see
-// model/recovery.zig.
 pub const recovery = "@zask_recovery";
 
 // "bad" hides live rows, "all" shows every row; centralized so the monitor and
@@ -20,7 +17,6 @@ pub const DashMode = enum {
     all,
     bad,
 
-    /// Unset or unknown values read as `all` so a stale option never hides rows.
     pub fn parse(value: ?[]const u8) DashMode {
         const text = value orelse return .all;
         return if (std.mem.eql(u8, text, dash_mode_bad)) .bad else .all;

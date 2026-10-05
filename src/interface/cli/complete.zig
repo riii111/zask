@@ -2,8 +2,6 @@ const std = @import("std");
 const config = @import("../../model/config.zig");
 const completion = @import("completion.zig");
 
-/// Argument shape each command accepts. Completion offers only words the
-/// command's own `Options.parse` and runtime target resolution accept.
 pub const ArgKind = enum {
     none,
     open_profile,
@@ -13,7 +11,6 @@ pub const ArgKind = enum {
     init_options,
     shell,
 
-    /// Whether candidates for this argument come from the selected config.
     pub fn needsConfig(self: ArgKind) bool {
         return switch (self) {
             .open_profile, .start_target, .restart_target, .service => true,
@@ -22,9 +19,6 @@ pub const ArgKind = enum {
     }
 };
 
-/// Candidates matching the word under the cursor, one per output line.
-/// Values passed to `add` are borrowed and must outlive `write`; `deinit`
-/// frees the list and every value built by `addOption`.
 pub const Candidates = struct {
     arena: std.heap.ArenaAllocator,
     prefix: []const u8,
@@ -38,15 +32,12 @@ pub const Candidates = struct {
         self.arena.deinit();
     }
 
-    /// Adds `--<name>`.
     pub fn addOption(self: *Candidates, name: []const u8) !void {
         try self.add(try std.fmt.allocPrint(self.arena.allocator(), "--{s}", .{name}));
     }
 
     pub fn add(self: *Candidates, value: []const u8) !void {
         if (!std.mem.startsWith(u8, value, self.prefix)) return;
-        // The output is line based; a value with control bytes cannot be
-        // represented and would split into words the user never configured.
         if (!isPrintable(value)) return;
         for (self.items.items) |item| {
             if (std.mem.eql(u8, item, value)) return;
@@ -59,8 +50,6 @@ pub const Candidates = struct {
     }
 };
 
-/// Adds candidates for the next argument after `typed_args`. `cfg` is null when
-/// the config is missing or invalid; only static candidates are offered then.
 pub fn collectArguments(kind: ArgKind, typed_args: []const []const u8, cfg: ?config.Config, candidates: *Candidates) !void {
     switch (kind) {
         .none => {},
@@ -105,8 +94,6 @@ fn collectConfigTargets(kind: ArgKind, cfg: config.Config, candidates: *Candidat
     }
 }
 
-/// start / stop / restart `Options.parse` reject `--` targets other than
-/// `--all`, so an alias spelled like an option is never a usable target.
 fn addTarget(name: []const u8, candidates: *Candidates) !void {
     if (std.mem.startsWith(u8, name, "--")) return;
     try candidates.add(name);

@@ -1,35 +1,20 @@
-//! What automatic recovery last did to a service pane, as the `zask-watch`
-//! supervisor records it in the pane option `tmux_options.recovery`, and how
-//! the monitor reads it back. The option lives on the pane, so `close` removes
-//! it with the session, and every respawn sets or clears it in the same tmux
-//! invocation, so a record never outlives the run it describes.
-
 const std = @import("std");
 const observations = @import("observations.zig");
 
 pub const Kind = enum {
-    /// The run `pid` failed; restart `attempt` waits for its delay.
     waiting,
-    /// The pane holds the run restart `attempt` started. Written with the
-    /// respawn itself, so it carries no pid.
     restarted,
-    /// The run `pid` failed after `attempt` restarts in a row; zask leaves it.
     gave_up,
-    /// The run `pid` failed, but whether the user stopped it could not be read,
-    /// so zask leaves it without knowing which applies.
     unconfirmed,
 };
 
 pub const Record = struct {
     kind: Kind,
-    /// The failed run the record belongs to; null for `restarted`.
     pid: ?i64 = null,
     attempt: u32,
     max_retries: u32,
-    /// How the failed run ended: `failed` or `killed`.
     exit: observations.PaneExit,
 
-    /// Caller owns the returned option value.
     pub fn encode(self: Record, gpa: std.mem.Allocator) ![]const u8 {
         var out: std.Io.Writer.Allocating = .init(gpa);
         errdefer out.deinit();
@@ -44,17 +29,12 @@ pub const Record = struct {
     }
 };
 
-/// The pane option as read with the pane. `malformed` keeps a value zask
-/// cannot read apart from no record, so the monitor reports it as unknown
-/// rather than as a service that never needed recovery.
 pub const RecordObservation = union(enum) {
     none,
     malformed,
     record: Record,
 };
 
-/// Strict parse (zask writes this value itself; see Record.encode): any other
-/// shape is `malformed`, never a guessed record.
 pub fn parse(value: []const u8) RecordObservation {
     if (value.len == 0) return .none;
     var fields = std.mem.splitScalar(u8, value, ',');
@@ -75,25 +55,15 @@ pub fn parse(value: []const u8) RecordObservation {
 
 const killed_text = "killed";
 
-/// Recovery as the monitor shows it for one service.
 pub const View = union(enum) {
-    /// The service has no `restart_on_failure`.
     not_configured,
-    /// tmux or the record could not be read, or the supervisor could not tell
-    /// whether the user stopped the service.
     unknown,
-    /// Configured; recovery has not acted on the current run.
     none: u32,
     restarted: Record,
     waiting: Record,
     gave_up: Record,
 };
 
-/// A record counts only for the run it describes: `restarted` while that run
-/// is still running (respawns replace the record, so a busy pane holds the
-/// run it names), and the failed-run kinds while the pane still holds that
-/// dead run. Anything else is an earlier run's result and shows as `none`:
-/// a manual stop, a clean exit, or a newer start.
 pub fn view(max_retries: ?u32, pane: observations.PaneState, pane_pid: ?i64, record: RecordObservation) View {
     const max = max_retries orelse return .not_configured;
     if (pane == .tmux_unavailable) return .unknown;
@@ -116,7 +86,6 @@ pub fn view(max_retries: ?u32, pane: observations.PaneState, pane_pid: ?i64, rec
     };
 }
 
-/// "exited with status N" or "was killed", as the supervisor reports failures.
 pub const ExitText = struct {
     exit: observations.PaneExit,
 
