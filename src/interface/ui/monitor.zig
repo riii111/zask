@@ -6,10 +6,13 @@ const observations = @import("../../model/observations.zig");
 const proc_runner = @import("../../platform/runner.zig");
 const selection_state = @import("selection.zig");
 const service_observation = @import("../../workflow/service_observation.zig");
+const session_layout = @import("../../workflow/session_layout.zig");
 const terminal = @import("../../platform/terminal.zig");
 const tmux_options = @import("../../model/tmux_options.zig");
 const tmux_setup = @import("../../workflow/tmux_setup.zig");
 const RenderContext = @import("context.zig").RenderContext;
+const runtime_mod = @import("../../workflow/runtime.zig");
+const Runtime = runtime_mod.Runtime;
 const Selection = selection_state.Selection;
 
 const monitor_name_width = 12;
@@ -20,11 +23,14 @@ const refresh_interval_ms = 1000;
 // How long a lone ESC waits for the rest of an arrow-key sequence. Only a
 // bare ESC is delayed by this, and the monitor binds no action to it.
 const escape_timeout_ms = 250;
+const action_guide = "⏎ go  s start  x stop  r restart";
 const key_guide = "j/k ↑↓ select  f filter  q quit";
 
 /// Runs until `q` / Ctrl+C or the terminal closes. Leaving restores the
-/// terminal mode and screen; services are only observed, never stopped.
-pub fn run(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.Io.Writer) !void {
+/// terminal mode and screen; services change only through the operation keys,
+/// so quitting or detaching never stops them.
+pub fn run(runtime: Runtime, writer: *std.Io.Writer) !void {
+    const gpa = runtime.gpa;
     const raw_mode = try terminal.RawMode.enter(terminal.stdin);
     defer if (raw_mode) |mode| mode.restore();
     try writer.writeAll(ansi.enter_screen);
@@ -33,7 +39,14 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cfg: config.Config, writer: *std.
         writer.flush() catch {};
     }
 
-    var monitor: Monitor = .{ .gpa = gpa, .io = io, .cfg = cfg, .snapshot_arena = .init(gpa) };
+    var monitor: Monitor = .{
+        .gpa = gpa,
+        .io = runtime.io,
+        .cfg = runtime.cfg,
+        .runtime = runtime,
+        .snapshot_arena = .init(gpa),
+        .operation_arena = .init(gpa),
+    };
     defer monitor.deinit();
     try monitor.loop(writer, raw_mode != null);
 }
@@ -45,21 +58,61 @@ const Action = union(enum) {
     quit,
     select: selection_state.Direction,
     toggle_filter,
+    operate: Operation,
+};
+
+/// What an operation key does to the selected row.
+const Operation = enum {
+    show,
+    start,
+    stop,
+    restart,
+
+    fn running(self: Operation) []const u8 {
+        return switch (self) {
+            .show => "opening",
+            .start => "starting",
+            .stop => "stopping",
+            .restart => "restarting",
+        };
+    }
+
+    fn done(self: Operation) []const u8 {
+        return switch (self) {
+            .show => "opened",
+            .start => "started",
+            .stop => "stopped",
+            .restart => "restarted",
+        };
+    }
+
+    fn verb(self: Operation) []const u8 {
+        return switch (self) {
+            .show => "open",
+            .start => "start",
+            .stop => "stop",
+            .restart => "restart",
+        };
+    }
 };
 
 fn actionForKey(key: keys.Key) Action {
     return switch (key) {
         .up => .{ .select = .up },
         .down => .{ .select = .down },
+        .enter => .{ .operate = .show },
         .ctrl_c => .quit,
         .char => |char| switch (char) {
             'k' => .{ .select = .up },
             'j' => .{ .select = .down },
+            's' => .{ .operate = .start },
+            'x' => .{ .operate = .stop },
+            'r' => .{ .operate = .restart },
             'f' => .toggle_filter,
             'q' => .quit,
             else => .none,
         },
-        .left, .right, .enter, .escape, .unknown => .none,
+        .left, .right, .escape, .unknown => .none,
     };
 }
 
@@ -67,11 +120,16 @@ const Monitor = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     cfg: config.Config,
+    runtime: Runtime,
     /// Owns `snapshot`; reset on every refresh.
     snapshot_arena: std.heap.ArenaAllocator,
+    /// Backs one operation's runtime work and output; reset before each operation.
+    operation_arena: std.heap.ArenaAllocator,
     snapshot: Snapshot = .{},
     selection: Selection = .{},
+    /// Borrows a static string or `notice_buffer`.
     notice: ?[]const u8 = null,
+    notice_buffer: [256]u8 = undefined,
     previous: []u8 = &.{},
     input: keys.Decoder = .{},
     /// When the pending incomplete sequence in `input` started; null when none is pending.
@@ -80,6 +138,7 @@ const Monitor = struct {
     fn deinit(self: *Monitor) void {
         self.selection.deinit(self.gpa);
         self.gpa.free(self.previous);
+        self.operation_arena.deinit();
         self.snapshot_arena.deinit();
     }
 
@@ -98,12 +157,12 @@ const Monitor = struct {
                 const escape_remaining = self.escapeRemaining();
                 const timeout = if (escape_remaining) |left| @min(remaining, left) else remaining;
                 switch (try terminal.waitReadable(terminal.stdin, timeout)) {
-                    .input => if (try self.readKeys() == .quit) return,
+                    .input => if (try self.readKeys(writer) == .quit) return,
                     .closed => return,
                     .timeout => if (self.escapeRemaining() == 0) {
                         self.pending_since = null;
                         if (self.input.flush()) |key| {
-                            if (try self.handleKey(key) == .quit) return;
+                            if (try self.handleKey(writer, key) == .quit) return;
                         }
                     },
                 }
@@ -117,14 +176,14 @@ const Monitor = struct {
         }
     }
 
-    fn readKeys(self: *Monitor) !Control {
+    fn readKeys(self: *Monitor, writer: *std.Io.Writer) !Control {
         const len = try terminal.read(terminal.stdin, self.input.space());
         if (len == 0) return .quit;
         self.input.commit(len);
         var decoded_any = false;
         while (self.input.next()) |key| {
             decoded_any = true;
-            if (try self.handleKey(key) == .quit) return .quit;
+            if (try self.handleKey(writer, key) == .quit) return .quit;
         }
         // Once a key was decoded, any bytes still pending start a new sequence
         // and get a fresh deadline; otherwise the same sequence keeps waiting.
@@ -144,7 +203,7 @@ const Monitor = struct {
         return @intCast(std.math.clamp(escape_timeout_ms - age, 0, escape_timeout_ms));
     }
 
-    fn handleKey(self: *Monitor, key: keys.Key) !Control {
+    fn handleKey(self: *Monitor, writer: *std.Io.Writer, key: keys.Key) !Control {
         switch (actionForKey(key)) {
             .none => {},
             .quit => return .quit,
@@ -155,8 +214,55 @@ const Monitor = struct {
                 self.notice = null;
             },
             .toggle_filter => self.toggleFilter(),
+            .operate => |operation| try self.operate(writer, operation),
         }
         return .keep;
+    }
+
+    /// Runs `operation` on the selected row while the screen shows it in
+    /// progress. Keys typed meanwhile, including the rest of the read that held
+    /// this key, are dropped, so a repeated key runs the operation once.
+    fn operate(self: *Monitor, writer: *std.Io.Writer, operation: Operation) !void {
+        const target = selectedTarget(self.snapshot, self.selection) orelse {
+            self.notice = "no service selected";
+            return;
+        };
+        self.setNotice("{s} {s}...", .{ operation.running(), target.name });
+        try self.draw(writer);
+
+        _ = self.operation_arena.reset(.retain_capacity);
+        const scratch = self.operation_arena.allocator();
+        var output: std.Io.Writer.Allocating = .init(scratch);
+        const printed = &output.writer;
+        if (runOperation(self.runtime.withAllocator(scratch), operation, target, printed)) |outcome| switch (outcome) {
+            .done => self.setCompletedNotice(operation, target.name, printed.buffered()),
+            .incomplete => self.setNotice("{s} {s} incomplete: {s}", .{ operation.verb(), target.name, incompleteReason(operation, printed.buffered()) }),
+        } else |err| {
+            self.setNotice("{s} {s} failed: {s}", .{ operation.verb(), target.name, lastOutputLine(printed.buffered(), @errorName(err)) });
+        }
+
+        terminal.discardInput(terminal.stdin);
+        self.input = .{};
+        self.pending_since = null;
+        try self.refresh();
+    }
+
+    fn setCompletedNotice(self: *Monitor, operation: Operation, name: []const u8, output: []const u8) void {
+        var notice: std.Io.Writer = .fixed(&self.notice_buffer);
+        notice.print("{s} {s}", .{ operation.done(), name }) catch {};
+        var lines = std.mem.splitScalar(u8, output, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (std.mem.startsWith(u8, trimmed, "Warning:")) notice.print("; {s}", .{trimmed}) catch {};
+        }
+        self.notice = notice.buffered();
+    }
+
+    /// Text that does not fit in `notice_buffer` is cut off.
+    fn setNotice(self: *Monitor, comptime fmt: []const u8, args: anytype) void {
+        var notice: std.Io.Writer = .fixed(&self.notice_buffer);
+        notice.print(fmt, args) catch {};
+        self.notice = notice.buffered();
     }
 
     fn toggleFilter(self: *Monitor) void {
@@ -298,7 +404,68 @@ fn isVisible(row: MonitorRow, mode: tmux_options.DashMode) bool {
     };
 }
 
-/// Caller owns the returned slice; the names borrow from `snapshot`.
+/// The row an operation acts on. `name` borrows from the snapshot, which stays
+/// unchanged until the operation finishes.
+const Target = struct {
+    name: []const u8,
+    kind: RowKind,
+};
+
+/// Null when nothing is selected or the selected row is hidden by the filter,
+/// so an operation never falls back to a different row.
+fn selectedTarget(snapshot: Snapshot, selection: Selection) ?Target {
+    const name = selection.name orelse return null;
+    for (snapshot.rows) |row| {
+        if (!isVisible(row, snapshot.mode)) continue;
+        if (std.mem.eql(u8, row.selectionKey(), name)) return .{ .name = row.name, .kind = row.kind };
+    }
+    return null;
+}
+
+/// Uses the same runtime steps as `zask start|stop|restart`; service rows go
+/// through the service-only variants so a group or alias sharing the name is
+/// never picked up.
+fn runOperation(runtime: Runtime, operation: Operation, target: Target, writer: *std.Io.Writer) !runtime_mod.Outcome {
+    switch (target.kind) {
+        .service => switch (operation) {
+            .show => try runtime.showWindow(target.name),
+            .start => try runtime.startService(target.name, writer),
+            .stop => return runtime.stopService(target.name, writer),
+            .restart => return runtime.restartService(target.name, writer),
+        },
+        .docker => switch (operation) {
+            .show => try runtime.showWindow(session_layout.docker_window),
+            .start => try runtime.start(config.keys.docker, writer),
+            .stop => return runtime.stopDocker(writer),
+            .restart => return runtime.restartDocker(writer),
+        },
+    }
+    return .done;
+}
+
+/// Only the stop step makes an operation incomplete. A restart prints its
+/// start step after the stop warning, so the last line would not explain it.
+fn incompleteReason(operation: Operation, output: []const u8) []const u8 {
+    return switch (operation) {
+        .restart => "the previous process did not stop",
+        .show, .start, .stop => lastOutputLine(output, "see its window"),
+    };
+}
+
+/// The last line the operation printed, which carries the workflow's own
+/// error or warning; `fallback` when it printed nothing. Borrows from `output`.
+fn lastOutputLine(output: []const u8, fallback: []const u8) []const u8 {
+    var lines = std.mem.splitBackwardsScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        // Progress lines redraw themselves with `\r`; only the last redraw is visible.
+        const visible = if (std.mem.lastIndexOfScalar(u8, line, '\r')) |i| line[i + 1 ..] else line;
+        const trimmed = std.mem.trim(u8, visible, " \t");
+        if (trimmed.len > 0) return trimmed;
+    }
+    return fallback;
+}
+
+/// Caller owns the returned slice; the keys borrow from `snapshot`.
 fn visibleNames(gpa: std.mem.Allocator, snapshot: Snapshot) ![]const []const u8 {
     var names: std.ArrayList([]const u8) = .empty;
     errdefer names.deinit(gpa);
@@ -365,6 +532,10 @@ fn writeFrame(gpa: std.mem.Allocator, writer: *std.Io.Writer, cfg: config.Config
         try lines.begin();
         try writer.print("{s}───────────────────────────────────────────────────────────────{s}", .{ ansi.dim, ansi.reset });
     }
+    if (layout.actions) {
+        try lines.begin();
+        try writer.print("{s}{s}{s}", .{ ansi.dim, action_guide, ansi.reset });
+    }
     if (layout.guide) {
         try lines.begin();
         try writer.print("{s}{s}{s}", .{ ansi.dim, key_guide, ansi.reset });
@@ -390,23 +561,25 @@ const LineWriter = struct {
 /// Chooses which fixed lines fit around the service rows. At least one row
 /// always stays so the selection is never pushed off screen; fixed lines are
 /// dropped from the lowest priority first: blank spacers, command forms,
-/// rule, notice, title, key guide.
+/// rule, title, notice, action guide, key guide.
 const Layout = struct {
     title: bool = true,
     title_gap: bool = true,
     notice_line: bool = true,
     rule: bool = true,
+    actions: bool = true,
     guide: bool = true,
     commands: bool = true,
     row_capacity: usize = std.math.maxInt(usize),
 
     fn fit(height: ?u16, has_notice: bool) Layout {
         const rows = height orelse return .{};
-        var layout: Layout = .{ .title = false, .title_gap = false, .notice_line = false, .rule = false, .guide = false, .commands = false };
+        var layout: Layout = .{ .title = false, .title_gap = false, .notice_line = false, .rule = false, .actions = false, .guide = false, .commands = false };
         var budget: usize = @as(usize, rows) -| 1;
-        const by_priority = [_]*bool{ &layout.guide, &layout.title, &layout.notice_line, &layout.rule, &layout.commands, &layout.title_gap, &layout.notice_line };
+        const by_priority = [_]*bool{ &layout.guide, &layout.actions, &layout.notice_line, &layout.title, &layout.rule, &layout.commands, &layout.title_gap, &layout.notice_line };
         for (by_priority, 0..) |line, rank| {
-            // The notice slot ranks high only while it carries a message.
+            // The notice slot ranks high only while it carries a message, such
+            // as the result of an operation.
             if (rank == 2 and !has_notice) continue;
             if (line.* or budget == 0) continue;
             line.* = true;
@@ -561,6 +734,31 @@ fn testSelectedLine(body: []const u8) ?[]const u8 {
         if (std.mem.indexOf(u8, line, ansi.reverse) != null) return line;
     }
     return null;
+}
+
+fn testRuntime(gpa: std.mem.Allocator, recorder: *proc_runner.Recorder, json: []const u8) !Runtime {
+    const runner: proc_runner.Runner = .{ .gpa = gpa, .io = undefined, .recorder = recorder };
+    return .{
+        .gpa = gpa,
+        .io = undefined,
+        .cfg = try config.Config.parse(gpa, json, "/home/me"),
+        .config_path = "/tmp/demo/zask.json",
+        .zask_path = "zask",
+        .command_hint = .local,
+        .runner_impl = runner,
+        .tmux_impl = .{ .gpa = gpa, .runner = runner, .session = "demo" },
+        .docker_impl = .{ .gpa = gpa, .runner = runner, .dir = "/tmp/demo", .file = "compose.yaml" },
+        .validate_configured_dirs = false,
+        .emit_env_file_tips = false,
+    };
+}
+
+fn testStopAttempts() usize {
+    return @import("../../workflow/waits.zig").stopAttempts();
+}
+
+fn testSelection(name: []const u8) !Selection {
+    return .{ .name = try std.testing.allocator.dupe(u8, name) };
 }
 
 fn recordedCommandCount(recorder: *const proc_runner.Recorder, name: []const u8) usize {
@@ -829,12 +1027,15 @@ test "monitor.actionForKey: maps keys to monitor actions" {
         .{ .key = .down, .expected = .{ .select = .down } },
         .{ .key = .{ .char = 'k' }, .expected = .{ .select = .up } },
         .{ .key = .up, .expected = .{ .select = .up } },
+        .{ .key = .enter, .expected = .{ .operate = .show } },
+        .{ .key = .{ .char = 's' }, .expected = .{ .operate = .start } },
+        .{ .key = .{ .char = 'x' }, .expected = .{ .operate = .stop } },
+        .{ .key = .{ .char = 'r' }, .expected = .{ .operate = .restart } },
         .{ .key = .{ .char = 'f' }, .expected = .toggle_filter },
         .{ .key = .{ .char = 'q' }, .expected = .quit },
         .{ .key = .ctrl_c, .expected = .quit },
         .{ .key = .escape, .expected = .none },
-        .{ .key = .enter, .expected = .none },
-        .{ .key = .{ .char = 'x' }, .expected = .none },
+        .{ .key = .{ .char = 'z' }, .expected = .none },
     };
     for (cases) |case| try std.testing.expectEqualDeep(case.expected, actionForKey(case.key));
 }
@@ -866,6 +1067,7 @@ test "monitor.render: highlights only the selected row and shows the key guide" 
     try std.testing.expect(std.mem.indexOf(u8, selected, "web") != null);
     try std.testing.expect(std.mem.startsWith(u8, selected, ansi.bold ++ ">"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, ansi.reverse));
+    try std.testing.expect(std.mem.indexOf(u8, body, action_guide) != null);
     try std.testing.expect(std.mem.indexOf(u8, body, key_guide) != null);
 }
 
@@ -946,9 +1148,9 @@ test "monitor.render: short pane scrolls rows and keeps the footer" {
     defer arena.deinit();
     const rows = [_]MonitorRow{ testRow("svc-0", .live), testRow("svc-1", .live), testRow("svc-2", .live), testRow("svc-3", .live), testRow("svc-4", .live) };
 
-    const body = try testRender(arena.allocator(), .{ .rows = &rows }, .{ .selected = "svc-4", .size = .{ .cols = 80, .rows = 8 } });
+    const body = try testRender(arena.allocator(), .{ .rows = &rows }, .{ .selected = "svc-4", .size = .{ .cols = 80, .rows = 9 } });
 
-    try std.testing.expectEqual(@as(usize, 8), std.mem.count(u8, body, "\n") + 1);
+    try std.testing.expectEqual(@as(usize, 9), std.mem.count(u8, body, "\n") + 1);
     try std.testing.expect(std.mem.indexOf(u8, body, "svc-2") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "svc-3") != null);
     try std.testing.expect(std.mem.indexOf(u8, testSelectedLine(body) orelse return error.MissingSelectedRow, "svc-4") != null);
@@ -1002,12 +1204,12 @@ test "monitor.observeSnapshot: reads filter mode and captures logs only for rows
 test "monitor.Layout.fit: drops fixed lines before the selected row" {
     const cases = [_]struct { height: ?u16, notice: bool, expected: Layout }{
         .{ .height = null, .notice = false, .expected = .{} },
-        .{ .height = 24, .notice = false, .expected = .{ .row_capacity = 18 } },
-        .{ .height = 7, .notice = false, .expected = .{ .row_capacity = 1 } },
-        .{ .height = 4, .notice = false, .expected = .{ .title_gap = false, .notice_line = false, .commands = false, .row_capacity = 1 } },
-        .{ .height = 4, .notice = true, .expected = .{ .title_gap = false, .rule = false, .commands = false, .row_capacity = 1 } },
-        .{ .height = 2, .notice = false, .expected = .{ .title = false, .title_gap = false, .notice_line = false, .rule = false, .commands = false, .row_capacity = 1 } },
-        .{ .height = 1, .notice = false, .expected = .{ .title = false, .title_gap = false, .notice_line = false, .rule = false, .guide = false, .commands = false, .row_capacity = 1 } },
+        .{ .height = 24, .notice = false, .expected = .{ .row_capacity = 17 } },
+        .{ .height = 8, .notice = false, .expected = .{ .row_capacity = 1 } },
+        .{ .height = 4, .notice = false, .expected = .{ .title_gap = false, .notice_line = false, .rule = false, .commands = false, .row_capacity = 1 } },
+        .{ .height = 4, .notice = true, .expected = .{ .title = false, .title_gap = false, .rule = false, .commands = false, .row_capacity = 1 } },
+        .{ .height = 2, .notice = false, .expected = .{ .title = false, .title_gap = false, .notice_line = false, .rule = false, .actions = false, .commands = false, .row_capacity = 1 } },
+        .{ .height = 1, .notice = false, .expected = .{ .title = false, .title_gap = false, .notice_line = false, .rule = false, .actions = false, .guide = false, .commands = false, .row_capacity = 1 } },
     };
     for (cases) |case| try std.testing.expectEqualDeep(case.expected, Layout.fit(case.height, case.notice));
 }
@@ -1021,6 +1223,7 @@ test "monitor.render: tiny pane keeps the selected row within its height" {
 
     try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, body, "\n") + 1);
     try std.testing.expect(std.mem.indexOf(u8, testSelectedLine(body) orelse return error.MissingSelectedRow, "worker") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, action_guide) != null);
     try std.testing.expect(std.mem.indexOf(u8, body, key_guide) != null);
 }
 
@@ -1035,4 +1238,217 @@ test "monitor.render: wide log text stays within the pane width" {
 
     var lines = std.mem.splitScalar(u8, body, '\n');
     while (lines.next()) |line| try std.testing.expect(testVisibleColumns(line) <= 45);
+}
+
+test "monitor.selectedTarget: resolves only a visible selected row" {
+    var docker_row = testRow("docker", .live);
+    docker_row.kind = .docker;
+    const rows = [_]MonitorRow{ docker_row, testRow("api", .live), testRow("web", .dead) };
+    var api = try testSelection("api");
+    defer api.deinit(std.testing.allocator);
+    var docker = try testSelection(docker_selection_key);
+    defer docker.deinit(std.testing.allocator);
+
+    const all = selectedTarget(.{ .rows = &rows }, api) orelse return error.MissingTarget;
+    const hidden = selectedTarget(.{ .rows = &rows, .mode = .bad }, api);
+    const unselected = selectedTarget(.{ .rows = &rows }, .{});
+    const compose = selectedTarget(.{ .rows = &rows }, docker) orelse return error.MissingTarget;
+
+    try std.testing.expectEqualStrings("api", all.name);
+    try std.testing.expectEqual(RowKind.service, all.kind);
+    try std.testing.expectEqual(@as(?Target, null), hidden);
+    try std.testing.expectEqual(@as(?Target, null), unselected);
+    try std.testing.expectEqual(RowKind.docker, compose.kind);
+}
+
+test "monitor.lastOutputLine: picks the last visible output line" {
+    const cases = [_]struct { output: []const u8, expected: []const u8 }{
+        .{ .output = "Session not running. Run 'open' first.\n", .expected = "Session not running. Run 'open' first." },
+        .{ .output = "Stopping api...\r  api ... stopping.\r  api ... warning: may not have stopped completely\n\n", .expected = "api ... warning: may not have stopped completely" },
+        .{ .output = "", .expected = "WindowMissing" },
+    };
+    for (cases) |case| try std.testing.expectEqualStrings(case.expected, lastOutputLine(case.output, "WindowMissing"));
+}
+
+test "monitor.runOperation: restarts only the selected service when a group shares its name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|sleep\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    try recorder.enqueue("0||123|zsh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const runtime = try testRuntime(arena.allocator(), &recorder,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"api","services":[
+        \\    {"name":"api","dir":"api","command":"serve"},
+        \\    {"name":"api-worker","dir":"api","command":"work"}
+        \\  ]}]
+        \\}
+    );
+    var output: std.Io.Writer.Allocating = .init(arena.allocator());
+
+    const outcome = try runOperation(runtime, .restart, .{ .name = "api", .kind = .service }, &output.writer);
+
+    try std.testing.expectEqual(runtime_mod.Outcome.done, outcome);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "=demo:=api-worker") == null);
+    try proc_runner.expectCommandOrder(&recorder, "C-c", "respawn-pane");
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "monitor.runOperation: show selects the docker window for the docker row" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("%1\n", "", .{ .exited = 0 });
+    const runtime = try testRuntime(arena.allocator(), &recorder,
+        \\{"project": {"name":"demo","root":"/tmp/demo"}, "docker": {"compose": "compose.yaml"}, "groups": []}
+    );
+    var output: std.Io.Writer.Allocating = .init(arena.allocator());
+
+    _ = try runOperation(runtime, .show, .{ .name = "docker", .kind = .docker }, &output.writer);
+
+    const select = proc_runner.findCommandContaining(&recorder, "select-window") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArgv(select, &.{ "tmux", "select-window", "-t", "=demo:=docker" });
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "attach-session") == null);
+}
+
+test "monitor.runOperation: stop reports a missing session without signaling" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "can't find session: demo\n", .{ .exited = 1 });
+    const runtime = try testRuntime(arena.allocator(), &recorder,
+        \\{"project": {"name":"demo","root":"/tmp/demo"}, "groups": [{"name":"backend","services":[{"name":"api","command":"serve"}]}]}
+    );
+    var output: std.Io.Writer.Allocating = .init(arena.allocator());
+
+    const result = runOperation(runtime, .stop, .{ .name = "api", .kind = .service }, &output.writer);
+
+    try std.testing.expectError(error.SessionNotRunning, result);
+    try std.testing.expectEqualStrings("Session not running. Run 'open' first.", lastOutputLine(output.writer.buffered(), "SessionNotRunning"));
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "send-keys") == null);
+}
+
+test "monitor.selectedTarget: a service named docker stays apart from Compose" {
+    var compose_row = testRow("docker", .live);
+    compose_row.kind = .docker;
+    const rows = [_]MonitorRow{ compose_row, testRow("docker", .dead) };
+    var service = try testSelection("docker");
+    defer service.deinit(std.testing.allocator);
+    var compose = try testSelection(docker_selection_key);
+    defer compose.deinit(std.testing.allocator);
+
+    const service_target = selectedTarget(.{ .rows = &rows }, service) orelse return error.MissingTarget;
+    const compose_target = selectedTarget(.{ .rows = &rows }, compose) orelse return error.MissingTarget;
+    const compose_hidden = selectedTarget(.{ .rows = &rows, .mode = .bad }, compose);
+
+    try std.testing.expectEqual(RowKind.service, service_target.kind);
+    try std.testing.expectEqual(RowKind.docker, compose_target.kind);
+    try std.testing.expectEqual(@as(?Target, null), compose_hidden);
+}
+
+test "monitor.render: highlights the service named docker, not Compose" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var compose_row = testRow("docker", .live);
+    compose_row.kind = .docker;
+    compose_row.port = "compose";
+    const rows = [_]MonitorRow{ compose_row, testRow("docker", .dead) };
+
+    const body = try testRender(arena.allocator(), .{ .rows = &rows }, .{ .selected = "docker" });
+
+    const selected = testSelectedLine(body) orelse return error.MissingSelectedRow;
+    try std.testing.expect(std.mem.indexOf(u8, selected, "compose") == null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, ansi.reverse));
+}
+
+test "monitor.runOperation: reports an unfinished stop as incomplete" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|sleep\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    for (0..testStopAttempts()) |_| try recorder.enqueue("0||123|sleep\n", "", .{ .exited = 0 });
+    const runtime = try testRuntime(arena.allocator(), &recorder,
+        \\{"project": {"name":"demo","root":"/tmp/demo"}, "groups": [{"name":"backend","services":[{"name":"api","command":"serve"}]}]}
+    );
+    var output: std.Io.Writer.Allocating = .init(arena.allocator());
+
+    const outcome = try runOperation(runtime, .stop, .{ .name = "api", .kind = .service }, &output.writer);
+
+    try std.testing.expectEqual(runtime_mod.Outcome.incomplete, outcome);
+    try std.testing.expectEqualStrings("api ... warning: may not have stopped completely", lastOutputLine(output.writer.buffered(), ""));
+}
+
+test "monitor: completed start keeps log failure and readiness warnings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "blocked", .data = "not a directory" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+    var recorder = proc_runner.Recorder.init(gpa);
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("1|0|123|serve\n", "", .{ .exited = 0 });
+    var runtime = try testRuntime(gpa, &recorder,
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve"}]}]}
+    );
+    runtime.runner_impl.io = std.testing.io;
+    runtime.service_log_dir = try std.fs.path.join(gpa, &.{ root, "blocked", "logs" });
+    var output: std.Io.Writer.Allocating = .init(gpa);
+
+    const outcome = try runOperation(runtime, .start, .{ .name = "api", .kind = .service }, &output.writer);
+    var monitor: Monitor = undefined;
+    monitor.setCompletedNotice(.start, "api", output.writer.buffered());
+
+    try std.testing.expectEqual(runtime_mod.Outcome.done, outcome);
+    try std.testing.expect(std.mem.indexOf(u8, monitor.notice.?, "started api") != null);
+    try std.testing.expect(std.mem.indexOf(u8, monitor.notice.?, "has no port") != null);
+    try std.testing.expect(std.mem.indexOf(u8, monitor.notice.?, "output is not saved") != null);
+}
+
+test "monitor: completed stop keeps the warning that file watch may restart it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "blocked", .data = "not a directory" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+    var recorder = proc_runner.Recorder.init(gpa);
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|serve\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("0||123|sh\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    var runtime = try testRuntime(gpa, &recorder,
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve"}]}]}
+    );
+    runtime.stop_marks = .{
+        .io = std.testing.io,
+        .dir = try std.fs.path.join(gpa, &.{ root, "blocked", "marks" }),
+    };
+    var output: std.Io.Writer.Allocating = .init(gpa);
+
+    const outcome = try runOperation(runtime, .stop, .{ .name = "api", .kind = .service }, &output.writer);
+    var monitor: Monitor = undefined;
+    monitor.setCompletedNotice(.stop, "api", output.writer.buffered());
+
+    try std.testing.expectEqual(runtime_mod.Outcome.done, outcome);
+    try std.testing.expect(std.mem.indexOf(u8, monitor.notice.?, "stopped api") != null);
+    try std.testing.expect(std.mem.indexOf(u8, monitor.notice.?, "file watch may restart it") != null);
+    try proc_runner.expectNoRemainingResponses(&recorder);
 }

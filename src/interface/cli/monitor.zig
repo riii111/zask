@@ -16,7 +16,7 @@ pub const Options = struct {
 pub fn run(ctx: *Context, opts: Options) !void {
     _ = opts;
     const rt = try ctx.runtime();
-    try dashboard_ui.runMonitor(rt.gpa, rt.io, rt.cfg, ctx.writer);
+    try dashboard_ui.runMonitor(rt, ctx.writer);
 }
 
 // -----------------------------------------------------------------------------

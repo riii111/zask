@@ -7,7 +7,7 @@ const jsonc = @import("jsonc.zig");
 const watch = @import("watch.zig");
 
 const Value = std.json.Value;
-const max_config_bytes = 10 * 1024 * 1024;
+pub const max_config_bytes = 10 * 1024 * 1024;
 
 /// ユーザーが zask.json に書く公開キー名の単一定義。
 /// validate の許可リスト・normalize の入力読み取り・init の生成で共有する。
@@ -568,12 +568,36 @@ pub fn loadPath(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []co
 // Like loadPath, but records config validation problems into the caller's
 // collector. File and JSON-syntax failures stay as plain errors.
 pub fn loadPathWithDiagnostics(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []const u8, diags: *diagnostics.Diagnostics) !Config {
-    const bytes = readFile(gpa, io, path) catch |err| switch (err) {
+    return (try loadFileWithDiagnostics(gpa, io, path, home, diags)).cfg;
+}
+
+pub const ConfigFile = struct {
+    /// The exact file content `cfg` was parsed from.
+    bytes: []const u8,
+    cfg: Config,
+};
+
+/// Like loadPathWithDiagnostics, but keeps the file content for editing.
+/// Both fields are allocated from `gpa`; pass an arena.
+pub fn loadFileWithDiagnostics(gpa: std.mem.Allocator, io: std.Io, path: []const u8, home: []const u8, diags: *diagnostics.Diagnostics) !ConfigFile {
+    const bytes = try readConfigBytes(gpa, io, path);
+    return .{ .bytes = bytes, .cfg = try Config.parseFormatWithDiagnostics(gpa, bytes, jsonc.Format.fromPath(path), home, diags) };
+}
+
+/// Whether a config of `len` bytes can be loaded; the read limit counts a
+/// file that reaches it as too large.
+pub fn fitsLoadLimit(len: usize) bool {
+    return len < max_config_bytes;
+}
+
+/// Returns the file content owned by the caller, with the same size limit
+/// and errors as loading a config.
+pub fn readConfigBytes(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
+    return readFile(gpa, io, path) catch |err| switch (err) {
         error.FileNotFound => return error.ConfigNotFound,
         error.StreamTooLong => return error.ConfigTooLarge,
         else => return err,
     };
-    return Config.parseFormatWithDiagnostics(gpa, bytes, jsonc.Format.fromPath(path), home, diags);
 }
 
 pub fn parseJsonBytes(gpa: std.mem.Allocator, bytes: []const u8) !Value {
@@ -776,6 +800,8 @@ fn classifyStartupStep(step: Value) !StartupStepKind {
 // single source of config validation; normalizeConfig assumes validated input.
 // -----------------------------------------------------------------------------
 
+const reserved_dashboard_window = "dashboard";
+
 pub fn validateAll(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Diagnostics) !void {
     if (source != .object) {
         try diags.add("", "config must be a JSON object");
@@ -797,6 +823,13 @@ pub fn validateAll(gpa: std.mem.Allocator, source: Value, diags: *diagnostics.Di
     // Build the reference index before validating references: startup_order and
     // profile overrides may point at groups or aliases declared later in the file.
     try validateGroups(gpa, source, diags, &refs);
+    // Service windows share the session with zask's own windows (see
+    // workflow/session_layout.zig), so a service of the same name would share a
+    // tmux window and receive the other's start / stop keys.
+    if (refs.services.contains(reserved_dashboard_window))
+        try diags.add("groups", "service name 'dashboard' is reserved for the zask dashboard window");
+    if (source.object.get(keys.docker) != null and refs.services.contains(keys.docker))
+        try diags.add("groups", "service name 'docker' is reserved while docker is configured");
     try refs.collectAliases(source);
     try validateStartupOrder(gpa, source, diags, refs);
     try validatePrechecks(gpa, source, diags);
@@ -1866,6 +1899,37 @@ test "config.validateAll: rejects negative startup port wait timeout" {
     try std.testing.expectEqualStrings("must be >= 0", diags.slice()[0].message);
 }
 
+test "config.parse: rejects a service named dashboard" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"web","services":[{"name":"dashboard","command":"serve"}]}]
+        \\}
+    ));
+}
+
+test "config.parse: rejects a service named docker only while docker is configured" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "docker": {"compose": "compose.yaml"},
+        \\  "groups": [{"name":"infra","services":[{"name":"docker","command":"serve"}]}]
+        \\}
+    ));
+    _ = try parseTestConfig(&arena,
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"infra","services":[{"name":"docker","command":"serve"}]}]
+        \\}
+    );
+}
+
 test "config.parse: rejects duplicate groups and services" {
     const cases = [_][]const u8{
         \\{
@@ -2516,18 +2580,25 @@ test "config.validateAll: suggests close keys and references without guessing ti
     }
 }
 
-test "config.validateAll: rejects service names reserved for zask windows" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const value = try parseJsonBytes(arena.allocator(),
-        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"zask-watch","command":"serve"}]}]}
-    );
-    var diags = diagnostics.Diagnostics.init(arena.allocator());
-    defer diags.deinit();
+test "config.validateAll: rejects reserved names in every service form" {
+    const cases = [_]struct { services: []const u8, path: []const u8 }{
+        .{ .services = "[{\"name\":\"zask-watch\",\"command\":\"serve\"}]", .path = "groups[0].services[0].name" },
+        .{ .services = "{\"zask-watch\":\"serve\"}", .path = "groups[0].services.zask-watch" },
+        .{ .services = "{\"zask-watch\":{\"command\":\"serve\"}}", .path = "groups[0].services.zask-watch" },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const gpa = arena.allocator();
+        const json = try std.fmt.allocPrint(gpa, "{{\"project\":{{\"name\":\"demo\",\"root\":\"/tmp\"}},\"groups\":[{{\"name\":\"backend\",\"services\":{s}}}]}}", .{case.services});
+        const value = try parseJsonBytes(gpa, json);
+        var diags = diagnostics.Diagnostics.init(gpa);
+        defer diags.deinit();
 
-    try validateAll(arena.allocator(), value, &diags);
+        try validateAll(gpa, value, &diags);
 
-    try std.testing.expectEqual(@as(usize, 1), diags.slice().len);
-    try std.testing.expectEqualStrings("groups[0].services[0].name", diags.slice()[0].path);
-    try std.testing.expectEqualStrings("'zask-watch' is reserved by zask", diags.slice()[0].message);
+        try std.testing.expectEqual(@as(usize, 1), diags.slice().len);
+        try std.testing.expectEqualStrings(case.path, diags.slice()[0].path);
+        try std.testing.expectEqualStrings("'zask-watch' is reserved by zask", diags.slice()[0].message);
+    }
 }
