@@ -321,6 +321,7 @@ const Monitor = struct {
             .window_missing => self.setNotice("logs {s}: window not found", .{target.name}),
             .tmux_unavailable => self.notice = "log popup failed: tmux unavailable",
             .popup_unavailable => self.notice = "log popup unavailable: needs tmux 3.3+",
+            .pager_keys_unavailable => self.notice = "log popup unavailable: needs less 582+ or lesskey",
         }
 
         terminal.discardInput(terminal.stdin);

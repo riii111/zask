@@ -158,7 +158,7 @@ completion and validation.
 ## Requirements
 
 - tmux (3.3 or newer for log popups)
-- `less` for log popups (582 or newer for Ctrl+G to close them)
+- `less` for log popups (582 or newer, or `lesskey` for older versions)
 - Zig 0.16.0 to build from source
 - Docker with Docker Compose, when the config has a `docker` section
 

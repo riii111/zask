@@ -85,10 +85,10 @@ pub fn build(b: *std.Build) void {
     // server of their own instead of the one in $TMUX or the default socket.
     // A path under /tmp keeps the socket within the macOS length limit; the
     // checkout hash keeps runs from separate worktrees apart.
-    // tmux silently uses the default socket when TMUX_TMPDIR does not exist,
-    // so the directory is created first.
-    const tmux_tmpdir = b.graph.environ_map.get("TMUX_TMPDIR") orelse
-        b.fmt("/tmp/zask-tmux-test-{x}", .{std.hash.Wyhash.hash(0, b.build_root.path orelse "")});
+    // An inherited TMUX_TMPDIR (even /tmp) may lead back to the user's server,
+    // so it is always replaced. tmux silently uses the default socket when
+    // TMUX_TMPDIR does not exist, so the directory is created first.
+    const tmux_tmpdir = b.fmt("/tmp/zask-tmux-test-{x}", .{std.hash.Wyhash.hash(0, b.build_root.path orelse "")});
     const make_tmux_tmpdir = b.addSystemCommand(&.{ "mkdir", "-p", tmux_tmpdir });
     run_tmux_integration_tests.step.dependOn(&make_tmux_tmpdir.step);
     run_tmux_integration_tests.removeEnvironmentVariable("TMUX");

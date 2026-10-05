@@ -947,7 +947,8 @@ test "monitor: l pages recent logs in a popup and returns to the monitor" {
     client.killSession() catch {};
     try client.newSession("dashboard", project_root, command);
     defer client.killSession() catch {};
-    try client.newWindowAfter("dashboard", "api", project_root, "printf 'booting\\npanic: boom\\n'; exec sleep 60");
+    // More lines than the popup captures (the last 200) or shows at once.
+    try client.newWindowAfter("dashboard", "api", project_root, "seq -f 'line-%03g' 1 300; exec sleep 60");
     const target = try std.fmt.allocPrint(gpa, "{s}:dashboard", .{session});
     try waitForSelectedRow(gpa, io, target, "api");
 
@@ -960,14 +961,25 @@ test "monitor: l pages recent logs in a popup and returns to the monitor" {
     _ = try waitForClient(gpa, io, session);
 
     try runDiscard(gpa, io, &.{ build_options.tmux_path, "send-keys", "-t", target, "l" });
-    _ = try waitForScratchFile(gpa, io, scratch_dir, "booting\npanic: boom\n");
+    _ = try waitForScratchFile(gpa, io, scratch_dir, "line-300\n");
     try expectPopupOpen(gpa, io, target);
 
-    // Emacs moves page the popup without closing it; Ctrl+G closes it.
-    try terminal.press(gpa, io, &.{ "0e", "10", "16", "1b", "76", "1b", "3c", "1b", "3e" });
-    try std.Io.sleep(io, .fromMilliseconds(300), .awake);
-    _ = try waitForScratchFile(gpa, io, scratch_dir, "booting\npanic: boom\n");
-    try expectPopupOpen(gpa, io, target);
+    // The popup opens at the end; each Emacs move shifts the first line shown.
+    const end_top = try waitForPopupTop(gpa, io, terminal, null);
+    try terminal.press(gpa, io, &.{"10"});
+    _ = try waitForPopupTop(gpa, io, terminal, end_top - 1);
+    try terminal.press(gpa, io, &.{ "1b", "76" });
+    const paged_up = try waitForPopupTopBelow(gpa, io, terminal, end_top - 2);
+    try terminal.press(gpa, io, &.{ "1b", "3c" });
+    _ = try waitForPopupTop(gpa, io, terminal, 101);
+    try terminal.press(gpa, io, &.{"16"});
+    const paged_down = try waitForPopupTopAbove(gpa, io, terminal, 102);
+    try terminal.press(gpa, io, &.{"0e"});
+    _ = try waitForPopupTop(gpa, io, terminal, paged_down + 1);
+    try terminal.press(gpa, io, &.{ "1b", "3e" });
+    _ = try waitForPopupTop(gpa, io, terminal, end_top);
+    try std.testing.expect(paged_up < end_top - 2);
+    // Ctrl+G closes the popup and returns to the monitor.
     try terminal.press(gpa, io, &.{"07"});
     try waitForScratchDirEmpty(io, scratch_dir);
     // The notice clears on the redraw after the monitor drops the keys typed
@@ -1137,6 +1149,47 @@ test "window list: Emacs keys page and jump only in zask sessions" {
 fn sendKeys(gpa: std.mem.Allocator, io: std.Io, target: []const u8, keys: []const []const u8) !void {
     const argv = try std.mem.concat(gpa, []const u8, &.{ &.{ build_options.tmux_path, "send-keys", "-t", target }, keys });
     try runDiscard(gpa, io, argv);
+}
+
+/// The lowest `line-NNN` the terminal shows, which is the popup's first line.
+fn popupTop(gpa: std.mem.Allocator, io: std.Io, terminal: Terminal) !?u32 {
+    const screen = try run(gpa, io, &.{ build_options.tmux_path, "-L", terminal.socket, "capture-pane", "-p", "-t", "term" });
+    var lowest: ?u32 = null;
+    var rest = screen.stdout;
+    while (std.mem.indexOf(u8, rest, "line-")) |at| {
+        rest = rest[at + "line-".len ..];
+        if (rest.len < 3) break;
+        const number = std.fmt.parseInt(u32, rest[0..3], 10) catch continue;
+        lowest = if (lowest) |current| @min(current, number) else number;
+    }
+    return lowest;
+}
+
+/// Waits until the popup's first line is `expected`, or any line when null.
+fn waitForPopupTop(gpa: std.mem.Allocator, io: std.Io, terminal: Terminal, expected: ?u32) !u32 {
+    for (0..service_state_attempts) |_| {
+        if (try popupTop(gpa, io, terminal)) |top| {
+            if (expected == null or expected.? == top) return top;
+        }
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    return error.PopupTopTimeout;
+}
+
+fn waitForPopupTopBelow(gpa: std.mem.Allocator, io: std.Io, terminal: Terminal, limit: u32) !u32 {
+    for (0..service_state_attempts) |_| {
+        if (try popupTop(gpa, io, terminal)) |top| if (top < limit) return top;
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    return error.PopupTopTimeout;
+}
+
+fn waitForPopupTopAbove(gpa: std.mem.Allocator, io: std.Io, terminal: Terminal, limit: u32) !u32 {
+    for (0..service_state_attempts) |_| {
+        if (try popupTop(gpa, io, terminal)) |top| if (top > limit) return top;
+        try std.Io.sleep(io, service_state_interval, .awake);
+    }
+    return error.PopupTopTimeout;
 }
 
 /// A terminal for a real client: a pane of a separate tmux server runs
@@ -1883,11 +1936,14 @@ fn expectWindowOrder(gpa: std.mem.Allocator, io: std.Io, session: []const u8, ex
     try std.testing.expect(lines.next() == null);
 }
 
-/// These tests create sessions and bind server-wide keys. Without an existing
-/// TMUX_TMPDIR (set by `zig build test-tmux`) tmux would reach the user's own
-/// server, so the tests stop instead.
+/// These tests create sessions and bind server-wide keys. Anywhere but the
+/// directory `zig build test-tmux` creates for them, tmux could reach the
+/// user's own server (through $TMUX, the default socket, or a shared
+/// TMUX_TMPDIR), so the tests stop instead.
 fn requireIsolatedTmux() void {
-    const dir = std.c.getenv("TMUX_TMPDIR") orelse @panic("tmux tests need TMUX_TMPDIR; run them with zig build test-tmux");
+    if (std.c.getenv("TMUX") != null) @panic("tmux tests must not run with TMUX set; run them with zig build test-tmux");
+    const dir = std.mem.span(std.c.getenv("TMUX_TMPDIR") orelse @panic("tmux tests need TMUX_TMPDIR; run them with zig build test-tmux"));
+    if (!std.mem.startsWith(u8, dir, "/tmp/zask-tmux-test-")) @panic("tmux tests need the TMUX_TMPDIR that zig build test-tmux creates");
     if (std.c.access(dir, 0) != 0) @panic("tmux tests need TMUX_TMPDIR to name an existing directory");
 }
 

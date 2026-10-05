@@ -20,6 +20,9 @@ pub const Outcome = enum {
     tmux_unavailable,
     /// tmux refused the popup, e.g. tmux older than 3.3.
     popup_unavailable,
+    /// less can take neither a lesskey source (582+) nor a file compiled by
+    /// `lesskey`, so the popup could not close with Ctrl+G; it is not opened.
+    pager_keys_unavailable,
 };
 
 pub const Request = struct {
@@ -65,10 +68,14 @@ pub fn show(gpa: std.mem.Allocator, io: std.Io, tmux: tmux_client.Client, reques
     defer gpa.free(keys_path);
     defer std.Io.Dir.cwd().deleteFile(io, keys_path) catch {};
     try paths.writeFileMode(io, keys_path, emacs_keys, paths.private_file_permissions);
+    const compiled_path = try std.fmt.allocPrint(gpa, "{s}.less", .{path});
+    defer gpa.free(compiled_path);
+    defer std.Io.Dir.cwd().deleteFile(io, compiled_path) catch {};
+    const keys = pagerKeys(tmux.runner, keys_path, compiled_path) orelse return .pager_keys_unavailable;
 
     const title = try std.fmt.allocPrint(gpa, " {s}: last {d} lines ", .{ request.label, max_lines });
     defer gpa.free(title);
-    const command = try pagerCommand(gpa, path, keys_path);
+    const command = try pagerCommand(gpa, path, keys);
     defer gpa.free(command);
     tmux.displayPopup(client_name, title, command) catch |err| switch (err) {
         error.PopupUnavailable => return .popup_unavailable,
@@ -93,17 +100,51 @@ const emacs_keys =
     \\
 ;
 
+/// How less gets `emacs_keys`; both paths borrow from the caller.
+const PagerKeys = union(enum) {
+    /// less 582+ reads the source with `--lesskey-src`.
+    source: []const u8,
+    /// Older less reads a file compiled by `lesskey` with `-k`.
+    compiled: []const u8,
+};
+
+/// Asks the local less which form it takes, compiling the keys to
+/// `compiled_path` for an older less. Null when neither works. The popup runs
+/// the same less, found the same way, on this machine.
+fn pagerKeys(runner: proc_runner.Runner, keys_path: []const u8, compiled_path: []const u8) ?PagerKeys {
+    var option_buffer: [std.fs.max_path_bytes + 16]u8 = undefined;
+    const option = std.fmt.bufPrint(&option_buffer, "--lesskey-src={s}", .{keys_path}) catch return null;
+    if (succeeds(runner, &.{ "less", option, "-V" })) return .{ .source = keys_path };
+    if (succeeds(runner, &.{ "lesskey", "-o", compiled_path, keys_path })) return .{ .compiled = compiled_path };
+    return null;
+}
+
+fn succeeds(runner: proc_runner.Runner, argv: []const []const u8) bool {
+    const result = proc_runner.captured(runner.run(argv, .{}) catch return false);
+    defer runner.gpa.free(result.stdout);
+    defer runner.gpa.free(result.stderr);
+    return result.term == .exited and result.term.exited == 0;
+}
+
 /// Caller owns the returned shell command. Starts at the end of the log and
 /// cancels LESS options that would quit at the end of the text (-E / -F) and
-/// so close the popup before it is read. The keys in `keys_path` are added
-/// for this run only, never to the user's lesskey; a less older than 582
-/// lacks `--lesskey-src` and pages without them.
-fn pagerCommand(gpa: std.mem.Allocator, path: []const u8, keys_path: []const u8) ![]const u8 {
+/// so close the popup before it is read. The keys apply to this run only,
+/// never to the user's lesskey.
+fn pagerCommand(gpa: std.mem.Allocator, path: []const u8, keys: PagerKeys) ![]const u8 {
     const quoted = try shell.quote(gpa, path);
     defer gpa.free(quoted);
-    const keys = try shell.quote(gpa, keys_path);
-    defer gpa.free(keys);
-    return std.fmt.allocPrint(gpa, "if less --lesskey-src={s} -V >/dev/null 2>&1; then exec less --lesskey-src={s} -+E -+F +G -- {s}; fi; exec less -+E -+F +G -- {s}", .{ keys, keys, quoted, quoted });
+    return switch (keys) {
+        .source => |source| {
+            const quoted_keys = try shell.quote(gpa, source);
+            defer gpa.free(quoted_keys);
+            return std.fmt.allocPrint(gpa, "exec less --lesskey-src={s} -+E -+F +G -- {s}", .{ quoted_keys, quoted });
+        },
+        .compiled => |compiled| {
+            const quoted_keys = try shell.quote(gpa, compiled);
+            defer gpa.free(quoted_keys);
+            return std.fmt.allocPrint(gpa, "exec less -k {s} -+E -+F +G -- {s}", .{ quoted_keys, quoted });
+        },
+    };
 }
 
 // -----------------------------------------------------------------------------
@@ -158,12 +199,13 @@ test "log_popup.show: pages the captured lines on the client showing the pane" {
     defer setup.deinit();
     try setup.recorder.enqueue("0\nbooting\npanic: boom\n", "", .{ .exited = 0 });
     try setup.recorder.enqueue("100|%3|/dev/pts/1\n", "", .{ .exited = 0 });
+    try setup.recorder.enqueue("less 668\n", "", .{ .exited = 0 });
     try setup.recorder.enqueue("", "", .{ .exited = 0 });
 
     const outcome = try setup.showApi("%3");
 
     try std.testing.expectEqual(Outcome.shown, outcome);
-    const popup = setup.recorder.commands.items[2];
+    const popup = setup.recorder.commands.items[3];
     try proc_runner.expectCommandArgvStartsWith(popup, &.{ "tmux", "display-popup", "-c", "/dev/pts/1", "-EE" });
     try proc_runner.expectCommandArgContains(popup, 10, "api: last 200 lines");
     try proc_runner.expectCommandArgContains(popup, 11, "exec less --lesskey-src=");
@@ -182,6 +224,8 @@ test "log_popup.show: reports why no popup was shown" {
         capture_status: u8 = 0,
         clients_stdout: ?[]const u8 = null,
         popup_stderr: ?[]const u8 = null,
+        /// Whether less takes the keys, once the popup gets that far.
+        less_keys: bool = true,
         expected: Outcome,
     }{
         .{ .name = "outside tmux", .pane = null, .expected = .outside_tmux },
@@ -190,6 +234,7 @@ test "log_popup.show: reports why no popup was shown" {
         .{ .name = "empty pane", .capture_stdout = "0\n\n\n", .expected = .empty },
         .{ .name = "no client on the pane", .capture_stdout = "0\npanic: boom\n", .clients_stdout = "100|%7|/dev/pts/1\n", .expected = .no_client },
         .{ .name = "popup refused", .capture_stdout = "0\npanic: boom\n", .clients_stdout = "100|%3|/dev/pts/1\n", .popup_stderr = "unknown command: display-popup", .expected = .popup_unavailable },
+        .{ .name = "less without Ctrl+G", .capture_stdout = "0\npanic: boom\n", .clients_stdout = "100|%3|/dev/pts/1\n", .less_keys = false, .expected = .pager_keys_unavailable },
     };
 
     for (cases) |case| {
@@ -199,6 +244,14 @@ test "log_popup.show: reports why no popup was shown" {
         defer setup.deinit();
         if (case.capture_stdout) |stdout| try setup.recorder.enqueue(stdout, case.capture_stderr, .{ .exited = case.capture_status });
         if (case.clients_stdout) |stdout| try setup.recorder.enqueue(stdout, "", .{ .exited = 0 });
+        if (case.popup_stderr != null or !case.less_keys) {
+            if (case.less_keys) {
+                try setup.recorder.enqueue("less 668\n", "", .{ .exited = 0 });
+            } else {
+                try setup.recorder.enqueue("", "There is no lesskey-src option", .{ .exited = 1 });
+                try setup.recorder.enqueueError(error.FileNotFound);
+            }
+        }
         if (case.popup_stderr) |stderr| try setup.recorder.enqueue("", stderr, .{ .exited = 1 });
 
         const outcome = try setup.showApi(case.pane);
@@ -211,8 +264,28 @@ test "log_popup.show: reports why no popup was shown" {
 }
 
 test "log_popup.pagerCommand: quotes the captured file and key paths" {
-    const command = try pagerCommand(std.testing.allocator, "/tmp/zask dir/demo's.txt", "/tmp/zask dir/demo's.txt.lesskey");
-    defer std.testing.allocator.free(command);
+    const cases = [_]struct { keys: PagerKeys, expected: []const u8 }{
+        .{ .keys = .{ .source = "/tmp/zask dir/k's.lesskey" }, .expected = "exec less --lesskey-src='/tmp/zask dir/k'\\''s.lesskey' -+E -+F +G -- '/tmp/zask dir/demo'\\''s.txt'" },
+        .{ .keys = .{ .compiled = "/tmp/zask dir/k's.less" }, .expected = "exec less -k '/tmp/zask dir/k'\\''s.less' -+E -+F +G -- '/tmp/zask dir/demo'\\''s.txt'" },
+    };
+    for (cases) |case| {
+        const command = try pagerCommand(std.testing.allocator, "/tmp/zask dir/demo's.txt", case.keys);
+        defer std.testing.allocator.free(command);
 
-    try std.testing.expectEqualStrings("if less --lesskey-src='/tmp/zask dir/demo'\\''s.txt.lesskey' -V >/dev/null 2>&1; then exec less --lesskey-src='/tmp/zask dir/demo'\\''s.txt.lesskey' -+E -+F +G -- '/tmp/zask dir/demo'\\''s.txt'; fi; exec less -+E -+F +G -- '/tmp/zask dir/demo'\\''s.txt'", command);
+        try std.testing.expectEqualStrings(case.expected, command);
+    }
+}
+
+test "log_popup.pagerKeys: compiles the keys for a less without lesskey sources" {
+    var recorder = proc_runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("", "There is no lesskey-src option", .{ .exited = 1 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const runner: proc_runner.Runner = .{ .gpa = std.testing.allocator, .io = undefined, .recorder = &recorder };
+
+    const keys = pagerKeys(runner, "/tmp/k.lesskey", "/tmp/k.less");
+
+    try std.testing.expectEqualDeep(@as(?PagerKeys, .{ .compiled = "/tmp/k.less" }), keys);
+    try proc_runner.expectCommandArgv(recorder.commands.items[0], &.{ "less", "--lesskey-src=/tmp/k.lesskey", "-V" });
+    try proc_runner.expectCommandArgv(recorder.commands.items[1], &.{ "lesskey", "-o", "/tmp/k.less", "/tmp/k.lesskey" });
 }
