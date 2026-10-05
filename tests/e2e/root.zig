@@ -5,6 +5,7 @@ test {
     _ = @import("check.zig");
     _ = @import("status_json.zig");
     _ = @import("wait.zig");
+    _ = @import("logs.zig");
     _ = @import("completion.zig");
     _ = @import("add_service.zig");
 }

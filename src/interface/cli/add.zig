@@ -52,12 +52,6 @@ pub fn run(ctx: *Context, opts: Options) !void {
     defer selected.deinitExpectedProjectName(gpa);
     const path = selected.path;
 
-    service_add.ensureEditable(path) catch |err| {
-        try writer.writeAll("Error: zask add cannot edit .jsonc configs yet because it would drop comments\n");
-        try writer.print("Config: {s}\n", .{path});
-        try writer.writeAll("Add the service to the file by hand.\n");
-        return err;
-    };
     const file = try ctx.loadSelectedConfig(selected);
 
     var diags = diagnostics.Diagnostics.init(gpa);
@@ -281,19 +275,42 @@ test "add.run: lists groups when the group is missing" {
     , run_result.output);
 }
 
-test "add.run: leaves a jsonc config for manual editing" {
+test "add.run: adds to a jsonc config and keeps its comments" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const commented = "// local services\n" ++ test_config;
+    const commented =
+        \\// local services
+        \\{
+        \\  "project": {"name": "demo", "root": "/tmp/demo"},
+        \\  "groups": [
+        \\    {"name": "backend", "services": [
+        \\      {"name": "api", "command": "serve"} // needs the db
+        \\    ]}
+        \\  ]
+        \\}
+        \\
+    ;
 
-    const run_result = try testRunAdd(arena.allocator(), "zask.jsonc", commented, &.{ "web", "x", "--group", "frontend" });
+    const run_result = try testRunAdd(arena.allocator(), "zask.jsonc", commented, &.{ "web", "npm run dev" });
 
-    try std.testing.expectEqual(@as(?anyerror, error.CommentedConfigNotEditable), run_result.err);
+    try std.testing.expectEqual(@as(?anyerror, null), run_result.err);
     try std.testing.expectEqualStrings(
-        \\Error: zask add cannot edit .jsonc configs yet because it would drop comments
+        \\Added service 'web' to group 'backend'
         \\Config: <config>
-        \\Add the service to the file by hand.
+        \\  {"name": "web", "command": "npm run dev"}
         \\
     , run_result.output);
-    try std.testing.expectEqualStrings(commented, run_result.config);
+    try std.testing.expectEqualStrings(
+        \\// local services
+        \\{
+        \\  "project": {"name": "demo", "root": "/tmp/demo"},
+        \\  "groups": [
+        \\    {"name": "backend", "services": [
+        \\      {"name": "api", "command": "serve"}, // needs the db
+        \\      {"name": "web", "command": "npm run dev"}
+        \\    ]}
+        \\  ]
+        \\}
+        \\
+    , run_result.config);
 }

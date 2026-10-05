@@ -31,6 +31,43 @@ pub fn prepareAppend(io: std.Io, path: []const u8, rotated_path: []const u8, rot
     return file.length(io);
 }
 
+/// Appends `text` to the log at `path`, on a line of its own when earlier
+/// output was cut off mid-line, creating the log owner-only when missing. The
+/// same `<path>.lock` as prepareAppend serializes it with rotation, so the
+/// text lands in the log that holds the output before it.
+///
+/// A pane pipe may still append to the log (`>>`), outside the lock. The text
+/// is written with O_APPEND in one write, so it never overwrites that output;
+/// std.Io has no append mode, hence the libc call. Output the pipe writes
+/// later still lands after the text.
+pub fn appendText(gpa: std.mem.Allocator, io: std.Io, path: []const u8, text: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
+    if (std.fs.path.dirname(path)) |dir| try ensurePrivateDir(io, dir);
+    var lock_path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const lock_path = std.fmt.bufPrint(&lock_path_buffer, "{s}.lock", .{path}) catch return error.NameTooLong;
+    var lock = try cwd.createFile(io, lock_path, .{ .truncate = false, .lock = .exclusive, .permissions = private_file_permissions });
+    defer lock.close(io);
+
+    try restrictExisting(io, path);
+    const cut_off = cut: {
+        var file = try cwd.createFile(io, path, .{ .read = true, .truncate = false, .permissions = private_file_permissions });
+        defer file.close(io);
+        const length = try file.length(io);
+        if (length == 0) break :cut false;
+        var last: [1]u8 = undefined;
+        break :cut try file.readPositionalAll(io, &last, length - 1) == 1 and last[0] != '\n';
+    };
+    const bytes = try std.mem.concat(gpa, u8, &.{ if (cut_off) "\n" else "", text });
+    defer gpa.free(bytes);
+    const path_z = try gpa.dupeZ(u8, path);
+    defer gpa.free(path_z);
+    const fd = std.c.open(path_z, .{ .ACCMODE = .WRONLY, .APPEND = true, .CLOEXEC = true, .NOFOLLOW = true });
+    if (fd < 0) return error.OpenFailed;
+    defer _ = std.c.close(fd);
+    const written = std.c.write(fd, bytes.ptr, bytes.len);
+    if (written < 0 or @as(usize, @intCast(written)) != bytes.len) return error.WriteFailed;
+}
+
 fn ensurePrivateDir(io: std.Io, path: []const u8) !void {
     _ = try std.Io.Dir.cwd().createDirPathStatus(io, path, private_dir_permissions);
     // An iterable handle, unlike the default path-only handle on Linux, can
@@ -94,6 +131,67 @@ fn testSetMode(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, mode: u32) !vo
 fn testMode(io: std.Io, dir: std.Io.Dir, sub_path: []const u8) !u32 {
     const stat = try dir.statFile(io, sub_path, .{});
     return @as(u32, @intCast(@intFromEnum(stat.permissions))) & 0o777;
+}
+
+test "log_file.appendText: starts the text on its own line after cut-off output" {
+    const cases = [_]struct { existing: ?[]const u8, want: []const u8 }{
+        .{ .existing = null, .want = "note\n" },
+        .{ .existing = "", .want = "note\n" },
+        .{ .existing = "done\n", .want = "done\nnote\n" },
+        .{ .existing = "panic: bo", .want = "panic: bo\nnote\n" },
+    };
+
+    for (cases) |case| {
+        const gpa = std.testing.allocator;
+        var threaded = std.Io.Threaded.init(gpa, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        if (case.existing) |data| {
+            try tmp.dir.createDirPath(io, "logs");
+            try tmp.dir.writeFile(io, .{ .sub_path = "logs/api.log", .data = data });
+        }
+        const path = try testPath(gpa, io, tmp.dir, "logs/api.log");
+        defer gpa.free(path);
+
+        try appendText(gpa, io, path, "note\n");
+
+        const written = try testReadFile(gpa, io, tmp.dir, "logs/api.log");
+        defer gpa.free(written);
+        try std.testing.expectEqualStrings(case.want, written);
+        try std.testing.expectEqual(@as(u32, 0o600), try testMode(io, tmp.dir, "logs/api.log"));
+    }
+}
+
+fn testAppendLines(path: [*:0]const u8, count: usize) void {
+    const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .APPEND = true });
+    if (fd < 0) return;
+    defer _ = std.c.close(fd);
+    for (0..count) |_| _ = std.c.write(fd, "output\n", 7);
+}
+
+test "log_file.appendText: keeps output another writer appends meanwhile" {
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "api.log", .data = "" });
+    const path = try testPath(gpa, io, tmp.dir, "api.log");
+    defer gpa.free(path);
+    const path_z = try gpa.dupeZ(u8, path);
+    defer gpa.free(path_z);
+
+    const writer = try std.Thread.spawn(.{}, testAppendLines, .{ path_z.ptr, 5000 });
+    for (0..200) |_| try appendText(gpa, io, path, "note\n");
+    writer.join();
+
+    const written = try tmp.dir.readFileAlloc(io, "api.log", gpa, .limited(1024 * 1024));
+    defer gpa.free(written);
+    try std.testing.expectEqual(@as(usize, 5000), std.mem.count(u8, written, "output\n"));
+    try std.testing.expectEqual(@as(usize, 200), std.mem.count(u8, written, "note\n"));
 }
 
 test "log_file.prepareAppend: creates missing directories and an empty file" {

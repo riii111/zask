@@ -43,12 +43,17 @@ pub const keys = struct {
     pub const @"type" = "type";
     pub const path = "path";
     pub const watch = "watch";
+    pub const restart_on_failure = "restart_on_failure";
 
     // service watch
     pub const paths = "paths";
     pub const include = "include";
     pub const exclude = "exclude";
     pub const debounce_ms = "debounce_ms";
+
+    // service restart_on_failure
+    pub const max_retries = "max_retries";
+    pub const delay_ms = "delay_ms";
 
     // startup_order step
     pub const group = "group";
@@ -75,8 +80,9 @@ pub const object_keys = struct {
     pub const group = [_][]const u8{ keys.name, keys.env_file, keys.services };
     pub const service = [_][]const u8{keys.name} ++ named_service;
     /// Detailed form inside a `services` object, where the key is the name.
-    pub const named_service = [_][]const u8{ keys.dir, keys.runtime, keys.command, keys.external, keys.port, keys.healthcheck, keys.env_file, keys.watch };
+    pub const named_service = [_][]const u8{ keys.dir, keys.runtime, keys.command, keys.external, keys.port, keys.healthcheck, keys.env_file, keys.watch, keys.restart_on_failure };
     pub const watch = [_][]const u8{ keys.paths, keys.include, keys.exclude, keys.debounce_ms };
+    pub const restart_on_failure = [_][]const u8{ keys.max_retries, keys.delay_ms };
     pub const healthcheck = [_][]const u8{ keys.type, keys.path };
     pub const docker_step = [_][]const u8{ keys.name, keys.docker };
     pub const group_step = [_][]const u8{ keys.name, keys.group, keys.wait_ports, keys.port_wait_timeout_seconds };
@@ -95,6 +101,18 @@ pub const allowed_values = struct {
     pub const runtime = [_][]const u8{ "npm", "yarn", "pnpm", "bun", "cargo", "bacon" };
     pub const healthcheck_type = [_][]const u8{ "tcp", "http" };
     pub const on_fail = [_][]const u8{ "warn", "abort" };
+};
+
+/// A service's `restart_on_failure` setting.
+pub const RestartOnFailure = struct {
+    /// Restarts in a row before zask gives up; a failure long enough after
+    /// the last restart starts the count over.
+    max_retries: u32,
+    /// Wait after the exit before each restart.
+    delay_ms: u64,
+
+    pub const default_max_retries = 3;
+    pub const default_delay_ms = 1000;
 };
 
 pub const Config = struct {
@@ -275,11 +293,27 @@ pub const Config = struct {
         return config_value.optionalObjectString(healthcheck, "path", "/health");
     }
 
-    pub fn anyServiceWatches(self: Config) !bool {
+    /// True when any service needs the `zask-watch` loop: file watch or
+    /// restart on failure.
+    pub fn anyServiceSupervised(self: Config) !bool {
         for (try self.services()) |service| {
-            if (service == .object and service.object.get(keys.watch) != null) return true;
+            if (service != .object) continue;
+            if (service.object.get(keys.watch) != null or service.object.get(keys.restart_on_failure) != null) return true;
         }
         return false;
+    }
+
+    /// Returns null when the service has no `restart_on_failure`.
+    pub fn serviceRestartOnFailure(service: Value) !?RestartOnFailure {
+        const node = (if (service == .object) service.object.get(keys.restart_on_failure) else null) orelse return null;
+        if (node != .object) return error.InvalidConfig;
+        const max_retries = config_value.optionalObjectInt(node, keys.max_retries) orelse RestartOnFailure.default_max_retries;
+        const delay_ms = config_value.optionalObjectInt(node, keys.delay_ms) orelse RestartOnFailure.default_delay_ms;
+        if (max_retries < 1 or delay_ms < 0) return error.InvalidConfig;
+        return .{
+            .max_retries = std.math.cast(u32, max_retries) orelse std.math.maxInt(u32),
+            .delay_ms = @intCast(delay_ms),
+        };
     }
 
     /// Returns null when the service has no `watch`. Release the result with
@@ -989,6 +1023,7 @@ fn validateServiceFields(gpa: std.mem.Allocator, service: Value, path: []const u
     try checkServiceDir(gpa, service, path, diags);
     try checkEnvFileField(gpa, service, path, diags);
     if (service.object.get(keys.watch)) |value| try validateWatch(gpa, value, try joinPath(gpa, path, keys.watch), diags);
+    if (service.object.get(keys.restart_on_failure)) |value| try validateRestartOnFailure(gpa, value, try joinPath(gpa, path, keys.restart_on_failure), diags);
     if (service.object.get(keys.healthcheck)) |healthcheck| {
         const hpath = try joinPath(gpa, path, "healthcheck");
         if (!try expectObject(healthcheck, hpath, diags)) return;
@@ -1025,6 +1060,23 @@ fn validateWatch(gpa: std.mem.Allocator, value: Value, path: []const u8, diags: 
         } else if (debounce.integer < 0) {
             try diags.add(debounce_path, "must be >= 0");
         }
+    }
+}
+
+fn validateRestartOnFailure(gpa: std.mem.Allocator, value: Value, path: []const u8, diags: *diagnostics.Diagnostics) !void {
+    if (!try expectObject(value, path, diags)) return;
+    try checkKeys(gpa, value, path, &object_keys.restart_on_failure, diags);
+    try checkOptionalMinInt(gpa, value, keys.max_retries, 1, path, diags);
+    try checkOptionalMinInt(gpa, value, keys.delay_ms, 0, path, diags);
+}
+
+fn checkOptionalMinInt(gpa: std.mem.Allocator, node: Value, key: []const u8, min: i64, path: []const u8, diags: *diagnostics.Diagnostics) !void {
+    const value = node.object.get(key) orelse return;
+    const field_path = try joinPath(gpa, path, key);
+    if (value != .integer) {
+        try diags.add(field_path, "must be an integer");
+    } else if (value.integer < min) {
+        try diags.addFmt(field_path, "must be >= {d}", .{min});
     }
 }
 
@@ -2260,17 +2312,74 @@ test "config.serviceWatch: applies defaults and resolves paths from the service 
     try std.testing.expectEqualStrings("/opt/shared", try cfg.serviceWatchPath(gpa, worker, explicit.paths[1]));
     try std.testing.expectEqualStrings("/home/me/lib", try cfg.serviceWatchPath(gpa, worker, explicit.paths[2]));
     try std.testing.expect((try Config.serviceWatch(gpa, try cfg.findService("web"))) == null);
-    try std.testing.expect(try cfg.anyServiceWatches());
+    try std.testing.expect(try cfg.anyServiceSupervised());
 }
 
-test "config.anyServiceWatches: false without watch settings" {
+test "config.anyServiceSupervised: false without watch or restart settings" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const cfg = try parseTestConfig(&arena,
         \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":[{"name":"api","command":"serve"}]}]}
     );
 
-    try std.testing.expect(!try cfg.anyServiceWatches());
+    try std.testing.expect(!try cfg.anyServiceSupervised());
+}
+
+test "config.serviceRestartOnFailure: applies defaults and explicit values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cfg = try parseTestConfig(&arena,
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[{"name":"be","services":{
+        \\  "api":{"command":"serve","restart_on_failure":{}},
+        \\  "worker":{"command":"work","restart_on_failure":{"max_retries":5,"delay_ms":0}},
+        \\  "web":"dev"
+        \\}}]}
+    );
+
+    const defaults = (try Config.serviceRestartOnFailure(try cfg.findService("api"))).?;
+    const explicit = (try Config.serviceRestartOnFailure(try cfg.findService("worker"))).?;
+    const missing = try Config.serviceRestartOnFailure(try cfg.findService("web"));
+
+    try std.testing.expectEqual(@as(u32, RestartOnFailure.default_max_retries), defaults.max_retries);
+    try std.testing.expectEqual(@as(u64, RestartOnFailure.default_delay_ms), defaults.delay_ms);
+    try std.testing.expectEqual(@as(u32, 5), explicit.max_retries);
+    try std.testing.expectEqual(@as(u64, 0), explicit.delay_ms);
+    try std.testing.expect(missing == null);
+    try std.testing.expect(try cfg.anyServiceSupervised());
+}
+
+test "config.validateAll: reports restart_on_failure problems with field paths" {
+    const json =
+        \\{
+        \\  "project": {"name":"demo","root":"/tmp/demo"},
+        \\  "groups": [{"name":"backend","services":[
+        \\    {"name":"api","command":"serve","restart_on_failure":{"max_retries":0,"delay_ms":-1,"max_retry":2}},
+        \\    {"name":"web","command":"dev","restart_on_failure":{"max_retries":"3","delay_ms":1.5}},
+        \\    {"name":"job","command":"run","restart_on_failure":true}
+        \\  ]}]
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const value = try parseJsonBytes(arena.allocator(), json);
+    var diags = diagnostics.Diagnostics.init(arena.allocator());
+    defer diags.deinit();
+
+    try validateAll(arena.allocator(), value, &diags);
+
+    const expected = [_]diagnostics.Diagnostic{
+        .{ .path = "groups[0].services[0].restart_on_failure.max_retry", .message = "unknown key" },
+        .{ .path = "groups[0].services[0].restart_on_failure.max_retries", .message = "must be >= 1" },
+        .{ .path = "groups[0].services[0].restart_on_failure.delay_ms", .message = "must be >= 0" },
+        .{ .path = "groups[0].services[1].restart_on_failure.max_retries", .message = "must be an integer" },
+        .{ .path = "groups[0].services[1].restart_on_failure.delay_ms", .message = "must be an integer" },
+        .{ .path = "groups[0].services[2].restart_on_failure", .message = "must be an object" },
+    };
+    try std.testing.expectEqual(expected.len, diags.slice().len);
+    for (expected, diags.slice()) |want, got| {
+        try std.testing.expectEqualStrings(want.path, got.path);
+        try std.testing.expectEqualStrings(want.message, got.message);
+    }
 }
 
 test "config.validateAll: reports watch problems with field paths" {

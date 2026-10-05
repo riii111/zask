@@ -152,7 +152,7 @@
       "additionalProperties": false,
       "properties": {
         "name": {
-          "description": "Service name used by commands such as `zask logs <name>`. Unique across all groups. `zask-watch` is reserved for the file watch window.",
+          "description": "Service name used by commands such as `zask logs <name>`. Unique across all groups. `zask-watch` is reserved for the window that runs file watch and restarts on failure.",
           "$ref": "#/definitions/identifier"
         },
         "command": {
@@ -200,7 +200,8 @@
           "description": "KEY=value files loaded before this service command, relative to the service directory.",
           "$ref": "#/definitions/envFile"
         },
-        "watch": { "$ref": "#/definitions/watch" }
+        "watch": { "$ref": "#/definitions/watch" },
+        "restart_on_failure": { "$ref": "#/definitions/restartOnFailure" }
       }
     },
     "namedService": {
@@ -216,7 +217,27 @@
         "port": { "$ref": "#/definitions/service/properties/port" },
         "healthcheck": { "$ref": "#/definitions/service/properties/healthcheck" },
         "env_file": { "$ref": "#/definitions/service/properties/env_file" },
-        "watch": { "$ref": "#/definitions/watch" }
+        "watch": { "$ref": "#/definitions/watch" },
+        "restart_on_failure": { "$ref": "#/definitions/restartOnFailure" }
+      }
+    },
+    "restartOnFailure": {
+      "description": "Restart the service when it exits with a non-zero status or is killed by a signal. A clean exit (status 0), `zask stop`, Ctrl-C in its window, and `zask close` leave it stopped. Restarts happen in the `zask-watch` window, so they continue after the monitor closes or the client detaches.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_retries": {
+          "description": "Restarts in a row before zask gives up and leaves the service stopped. A failure 30 seconds or more after the last restart, or of a run started by anything other than this restart, starts the count over.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 3
+        },
+        "delay_ms": {
+          "description": "Milliseconds to wait after the exit before each restart.",
+          "type": "integer",
+          "minimum": 0,
+          "default": 1000
+        }
       }
     },
     "watch": {

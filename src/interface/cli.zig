@@ -111,7 +111,7 @@ const command_specs = [_]CommandSpec{
     .{ .command = .list, .names = &.{"list"}, .usage = "list", .description = "List configured services" },
     .{ .command = .status, .names = &.{"status"}, .usage = "status [--json]", .description = "Show service state" },
     .{ .command = .check, .names = &.{"check"}, .usage = "check [--prechecks]", .description = "Check config and environment without opening a session" },
-    .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service> [--tail <n>]", .description = "Focus service window, or print its last n lines", .completion = .service },
+    .{ .command = .logs, .names = &.{"logs"}, .usage = "logs <service> [--saved] [--tail <n>] | --path", .description = "Focus service window, or print its pane or saved log", .completion = .service },
     .{ .command = .init, .names = &.{"init"}, .usage = "init [project] [--root <path>] [--from <Procfile>] [--force]", .description = "Create project config", .completion = .init_options, .global = true },
     .{ .command = .wait, .names = &.{"wait"}, .usage = "wait <svc|group>... [--timeout <sec>]", .description = "Wait until services are ready" },
     .{ .command = .completion, .names = &.{"completion"}, .usage = "completion [zsh|bash|fish]", .description = "Print shell completion script", .completion = .shell, .global = true },
@@ -128,6 +128,7 @@ const command_specs = [_]CommandSpec{
 pub fn run(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
+    if (args.len == 4 and std.mem.eql(u8, args[1], "_log-stream")) return root.log_stream.run(arena, init.io, args[2], args[3]);
     var diags = diagnostics.Diagnostics.init(arena);
     var err_ctx: cli_context.ErrorContext = .{};
     const context: CommandContext = .{
@@ -159,7 +160,7 @@ fn exitWithJsonError(gpa: std.mem.Allocator, stdout: *std.Io.Writer, err: anyerr
 
 fn exitWithTextError(stdout: *std.Io.Writer, err: anyerror, err_ctx: cli_context.ErrorContext, diags: diagnostics.Diagnostics) !void {
     switch (err) {
-        error.InvalidArguments, error.UnknownCommand, error.ProjectRequired, error.ConfigAlreadyExists, error.InvalidProcfile, error.UnknownTarget, error.CommentedConfigNotEditable, error.ServiceAlreadyExists, error.GroupNotFound, error.GroupRequired, error.ServiceNotAdded => {
+        error.InvalidArguments, error.UnknownCommand, error.ProjectRequired, error.ConfigAlreadyExists, error.InvalidProcfile, error.UnknownTarget, error.ServiceAlreadyExists, error.GroupNotFound, error.GroupRequired, error.ServiceNotAdded => {
             try stdout.flush();
             std.process.exit(2);
         },
@@ -198,7 +199,7 @@ fn exitWithTextError(stdout: *std.Io.Writer, err: anyerror, err_ctx: cli_context
             try stdout.flush();
             std.process.exit(2);
         },
-        error.EnvironmentCheckFailed, error.SessionNotRunning, error.TmuxUnavailable, error.ServiceStopIncomplete, error.StartupFailed, error.WindowNotReady, error.ServiceNotFound, error.ServiceWindowMissing, error.LogOutputTooLarge, error.ServiceNotRunning, error.ReadinessUnavailable, error.WaitTimedOut => {
+        error.EnvironmentCheckFailed, error.SessionNotRunning, error.TmuxUnavailable, error.ServiceStopIncomplete, error.StartupFailed, error.WindowNotReady, error.ServiceNotFound, error.ServiceWindowMissing, error.LogOutputTooLarge, error.SavedLogMissing, error.SavedLogUnreadable, error.SavedLogUnavailable, error.ServiceNotRunning, error.ReadinessUnavailable, error.WaitTimedOut => {
             try stdout.flush();
             std.process.exit(1);
         },

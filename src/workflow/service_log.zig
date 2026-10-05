@@ -28,10 +28,12 @@ pub fn servicePath(gpa: std.mem.Allocator, dir: []const u8, service: []const u8)
 pub const Recording = struct {
     path: []const u8,
     header: []const u8,
+    token: []const u8,
 
     pub fn deinit(self: Recording, gpa: std.mem.Allocator) void {
         gpa.free(self.path);
         gpa.free(self.header);
+        gpa.free(self.token);
     }
 };
 
@@ -48,6 +50,16 @@ pub fn begin(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, service: []con
     return beginRotatingAt(gpa, io, dir, service, started_at, rotate_at_bytes);
 }
 
+/// Appends a zask line about `service` to its log: `text` is written as one
+/// line. Output a pane pipe writes meanwhile is kept, but may land after it.
+pub fn appendNote(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, service: []const u8, text: []const u8) !void {
+    const path = try servicePath(gpa, dir, service);
+    defer gpa.free(path);
+    const line = try std.fmt.allocPrint(gpa, "\n{s}\n", .{text});
+    defer gpa.free(line);
+    try log_file.appendText(gpa, io, path, line);
+}
+
 fn beginRotatingAt(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, service: []const u8, started_at: i64, rotate_at: u64) !Recording {
     const path = try servicePath(gpa, dir, service);
     errdefer gpa.free(path);
@@ -55,7 +67,11 @@ fn beginRotatingAt(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, service:
     defer gpa.free(rotated);
     const existing = try log_file.prepareAppend(io, path, rotated, rotate_at);
     const header = try startHeader(gpa, service, started_at, existing > 0);
-    return .{ .path = path, .header = header };
+    errdefer gpa.free(header);
+    var bytes: [16]u8 = undefined;
+    io.random(&bytes);
+    const token = try gpa.dupe(u8, &std.fmt.bytesToHex(bytes, .lower));
+    return .{ .path = path, .header = header, .token = token };
 }
 
 /// A blank line separates the header from earlier output, which may not end

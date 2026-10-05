@@ -1,6 +1,7 @@
 const std = @import("std");
 const config = @import("config.zig");
 const diagnostics = @import("diagnostics.zig");
+const jsonc = @import("jsonc.zig");
 
 const Value = std.json.Value;
 const keys = config.keys;
@@ -31,10 +32,12 @@ pub const AddServiceResult = union(enum) {
 };
 
 /// Inserts `service` into a group's `services` as text, keeping the rest of
-/// `bytes` unchanged. An array gets a detailed entry; a named object gets the
-/// shorthand string, or a detailed entry when a port is set.
+/// `bytes` unchanged, comments included. An array gets a detailed entry; a
+/// named object gets the shorthand string, or a detailed entry when a port is
+/// set. The entry goes after the last existing one and after any comment on
+/// that entry's line, so comments stay next to what they describe.
 ///
-/// `source` must be `bytes` parsed as strict JSON and must pass config
+/// `source` must be `bytes` parsed as JSON or JSONC and must pass config
 /// validation. Every returned slice is allocated from `gpa` or borrowed from
 /// `source`; pass an arena.
 pub fn addService(gpa: std.mem.Allocator, bytes: []const u8, source: Value, group: ?[]const u8, service: NewService) !AddServiceResult {
@@ -52,23 +55,32 @@ pub fn addService(gpa: std.mem.Allocator, bytes: []const u8, source: Value, grou
     const services_value = target.object.get(keys.services).?;
     const kind: ContainerKind = if (services_value == .array) .array else .object;
 
-    const container = try locateServices(gpa, bytes, index);
-    const layout = try Layout.detect(gpa, bytes, container);
+    // Offsets found in `plain` point at the same bytes in `bytes`.
+    const plain = try jsonc.withoutComments(gpa, bytes);
+    const container = try locateServices(gpa, plain, index);
+    const layout = try Layout.detect(gpa, bytes, plain, container);
     const entry = try renderEntry(gpa, kind, service, layout.entryStyle(bytes, container));
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     if (container.last) |last| {
+        const trailing = jsonc.skipComments(bytes, last.end, true);
         try out.appendSlice(gpa, bytes[0..last.end]);
         try out.append(gpa, ',');
+        try out.appendSlice(gpa, bytes[last.end..trailing.end]);
         if (layout.multiline) {
             try out.append(gpa, '\n');
             try out.appendSlice(gpa, layout.entry_indent);
+        } else if (trailing.line_comment) {
+            try out.append(gpa, '\n');
+            try out.appendSlice(gpa, lineIndent(bytes, last.start));
         } else try out.append(gpa, ' ');
         try out.appendSlice(gpa, entry);
-        try out.appendSlice(gpa, bytes[last.end..]);
+        try out.appendSlice(gpa, bytes[trailing.end..]);
     } else {
-        try out.appendSlice(gpa, bytes[0 .. container.open + 1]);
+        // Comments inside an empty container stay ahead of the new entry.
+        const comments_end = jsonc.skipComments(bytes, container.open + 1, false).end;
+        try out.appendSlice(gpa, bytes[0..comments_end]);
         try out.append(gpa, '\n');
         try out.appendSlice(gpa, layout.entry_indent);
         try out.appendSlice(gpa, entry);
@@ -111,7 +123,9 @@ const Layout = struct {
     /// Indentation of fields inside a multi-line detailed entry.
     field_indent: []const u8,
 
-    fn detect(gpa: std.mem.Allocator, bytes: []const u8, container: Container) !Layout {
+    /// `plain` is `bytes` with comments blanked; indentation inside comments
+    /// does not count toward the file's indent unit.
+    fn detect(gpa: std.mem.Allocator, bytes: []const u8, plain: []const u8, container: Container) !Layout {
         const open_indent = lineIndent(bytes, container.open);
         if (container.first) |first| {
             const multiline = std.mem.indexOfScalar(u8, bytes[container.open + 1 .. first.start], '\n') != null;
@@ -119,7 +133,7 @@ const Layout = struct {
             const unit = if (multiline and entry_indent.len > open_indent.len and std.mem.startsWith(u8, entry_indent, open_indent))
                 entry_indent[open_indent.len..]
             else
-                fileIndentUnit(bytes);
+                fileIndentUnit(plain);
             return .{
                 .multiline = multiline,
                 .entry_indent = entry_indent,
@@ -128,7 +142,7 @@ const Layout = struct {
         }
         // An empty container gets the entry on its own line, one level deeper
         // than the line that opens it.
-        const unit = fileIndentUnit(bytes);
+        const unit = fileIndentUnit(plain);
         const entry_indent = try std.mem.concat(gpa, u8, &.{ open_indent, unit });
         return .{
             .multiline = true,
@@ -309,7 +323,8 @@ fn lineIndent(bytes: []const u8, pos: usize) []const u8 {
     return bytes[line_start..end];
 }
 
-/// The indentation of the first indented line, or two spaces.
+/// The indentation of the first indented line that has content, or two
+/// spaces.
 fn fileIndentUnit(bytes: []const u8) []const u8 {
     var lines = std.mem.splitScalar(u8, bytes, '\n');
     while (lines.next()) |line| {
@@ -324,9 +339,11 @@ fn fileIndentUnit(bytes: []const u8) []const u8 {
 // Tests
 // -----------------------------------------------------------------------------
 
+/// Reads `bytes` as JSONC, which also accepts every JSON test input.
 fn testAdd(arena: *std.heap.ArenaAllocator, bytes: []const u8, group: ?[]const u8, service: NewService) !AddServiceResult {
     const gpa = arena.allocator();
-    const source = try config.parseJsonBytes(gpa, bytes);
+    var syntax_error: jsonc.SyntaxError = undefined;
+    const source = try jsonc.parse(gpa, bytes, .jsonc, &syntax_error);
     var diags = diagnostics.Diagnostics.init(gpa);
     try config.validateAll(gpa, source, &diags);
     try std.testing.expect(diags.isEmpty());
@@ -336,7 +353,8 @@ fn testAdd(arena: *std.heap.ArenaAllocator, bytes: []const u8, group: ?[]const u
 fn testAdded(arena: *std.heap.ArenaAllocator, bytes: []const u8, group: ?[]const u8, service: NewService) !AddedService {
     const result = try testAdd(arena, bytes, group, service);
     try std.testing.expect(result == .added);
-    _ = try config.Config.parse(arena.allocator(), result.added.bytes, "/home/me");
+    var diags = diagnostics.Diagnostics.init(arena.allocator());
+    _ = try config.Config.parseFormatWithDiagnostics(arena.allocator(), result.added.bytes, .jsonc, "/home/me", &diags);
     return result.added;
 }
 
@@ -551,4 +569,156 @@ test "config_edit.addService: reports missing group when none exist" {
     const result = try testAdd(&arena, bytes, null, .{ .name = "api", .command = "serve" });
 
     try std.testing.expectEqual(@as(usize, 0), result.group_not_found.len);
+}
+
+test "config_edit.addService: keeps a line comment with the last array entry" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const bytes =
+        \\{
+        \\  // services for local work
+        \\  "project": {"name": "demo", "root": "/tmp/demo"},
+        \\  "groups": [{"name": "backend", "services": [
+        \\    // the main api
+        \\    {
+        \\      "name": "web",
+        \\      "command": "dev" // hot reload
+        \\    } // waits for the db
+        \\    // {"name": "old", "command": "legacy"}
+        \\  ]}]
+        \\}
+    ;
+
+    const added = try testAdded(&arena, bytes, null, .{ .name = "api", .command = "cargo run", .port = 8080 });
+
+    try std.testing.expectEqualStrings(
+        \\{
+        \\  // services for local work
+        \\  "project": {"name": "demo", "root": "/tmp/demo"},
+        \\  "groups": [{"name": "backend", "services": [
+        \\    // the main api
+        \\    {
+        \\      "name": "web",
+        \\      "command": "dev" // hot reload
+        \\    }, // waits for the db
+        \\    {
+        \\      "name": "api",
+        \\      "command": "cargo run",
+        \\      "port": 8080
+        \\    }
+        \\    // {"name": "old", "command": "legacy"}
+        \\  ]}]
+        \\}
+    , added.bytes);
+}
+
+test "config_edit.addService: keeps block comments with the last named entry" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const bytes =
+        \\{
+        \\  "project": {"name": "demo", "root": "/tmp/demo"},
+        \\  "groups": [{"name": "backend", "services": {
+        \\    "worker": /* queue */ "work" /* paused by default,
+        \\                                   start it by hand */
+        \\  }}]
+        \\}
+    ;
+
+    const added = try testAdded(&arena, bytes, null, .{ .name = "api", .command = "cargo run" });
+
+    try std.testing.expectEqualStrings(
+        \\{
+        \\  "project": {"name": "demo", "root": "/tmp/demo"},
+        \\  "groups": [{"name": "backend", "services": {
+        \\    "worker": /* queue */ "work", /* paused by default,
+        \\                                   start it by hand */
+        \\    "api": "cargo run"
+        \\  }}]
+        \\}
+    , added.bytes);
+}
+
+test "config_edit.addService: moves to a new line after a line comment on one-line entries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const bytes =
+        \\{"project": {"name": "demo", "root": "/tmp/demo"},
+        \\ "groups": [{"name": "backend", "services": {"worker": "work" // paused
+        \\ }}]}
+    ;
+
+    const added = try testAdded(&arena, bytes, null, .{ .name = "api", .command = "cargo run" });
+
+    try std.testing.expectEqualStrings(
+        \\{"project": {"name": "demo", "root": "/tmp/demo"},
+        \\ "groups": [{"name": "backend", "services": {"worker": "work", // paused
+        \\ "api": "cargo run"
+        \\ }}]}
+    , added.bytes);
+}
+
+test "config_edit.addService: keeps comments inside an empty container" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const bytes =
+        \\/*
+        \\ * Local services.
+        \\ */
+        \\{
+        \\  "project": {"name": "demo", "root": "/tmp/demo"},
+        \\  "groups": [
+        \\    {"name": "backend", "services": [
+        \\      // add services here
+        \\    ]}
+        \\  ]
+        \\}
+    ;
+
+    const added = try testAdded(&arena, bytes, null, .{ .name = "api", .command = "cargo run" });
+
+    try std.testing.expectEqualStrings(
+        \\/*
+        \\ * Local services.
+        \\ */
+        \\{
+        \\  "project": {"name": "demo", "root": "/tmp/demo"},
+        \\  "groups": [
+        \\    {"name": "backend", "services": [
+        \\      // add services here
+        \\      {
+        \\        "name": "api",
+        \\        "command": "cargo run"
+        \\      }
+        \\    ]}
+        \\  ]
+        \\}
+    , added.bytes);
+}
+
+test "config_edit.addService: ignores service names inside comments and strings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const bytes =
+        \\{
+        \\  "project": {"name": "demo", "root": "/tmp/demo"},
+        \\  "groups": [{"name": "backend", "services": {
+        \\    // "api": "old",
+        \\    "worker": "echo '// \"api\": x /* ]'"
+        \\  }}]
+        \\}
+    ;
+
+    const added = try testAdded(&arena, bytes, null, .{ .name = "api", .command = "cargo run" });
+
+    try std.testing.expectEqualStrings(
+        \\{
+        \\  "project": {"name": "demo", "root": "/tmp/demo"},
+        \\  "groups": [{"name": "backend", "services": {
+        \\    // "api": "old",
+        \\    "worker": "echo '// \"api\": x /* ]'",
+        \\    "api": "cargo run"
+        \\  }}]
+        \\}
+    , added.bytes);
 }

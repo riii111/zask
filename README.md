@@ -227,10 +227,11 @@ other commands use. Pass `--group <group>` when the config has more than one
 group; a group that does not exist is reported, not created. `--port <port>`
 sets the port. The entry follows the group's form: an object entry in an array,
 the command string in an object, or a detailed object entry when a port is set.
-The rest of the file is kept as written. zask leaves the file unchanged and
+The rest of the file is kept as written, including comments in `.jsonc`
+configs. The new entry goes after the group's last service and after any
+comment on that service's line. zask leaves the file unchanged and
 reports why when a service with the same name exists, the result would fail
 validation or the size zask loads, or the file changed after zask read it.
-`.jsonc` configs are not edited yet; add the service by hand.
 
 Concurrent `zask add` runs on the same config wait for each other. An editor
 can still save while zask writes, so zask swaps the new file in atomically and
@@ -264,6 +265,43 @@ stays stopped once it exits. If a service keeps changing its own watched files
 right after each restart, restarts pause until the changes stop; add those
 files to `exclude`. The service name `zask-watch` is reserved for this window.
 
+`restart_on_failure` restarts a service that exits with a non-zero status or is
+killed by a signal. Without it, zask leaves exited services alone:
+
+```json
+{"name": "worker", "command": "bin/worker",
+ "restart_on_failure": {"max_retries": 3, "delay_ms": 1000}}
+```
+
+Both keys are optional; `{}` uses the values above. The same `zask-watch`
+window waits `delay_ms` after each failure, prints the exit status and attempt,
+and restarts the service; the service window prints the reason before the
+command starts again. After `max_retries` restarts in a row, zask leaves the
+service stopped and says so. A failure 30 seconds or more after the last
+restart, or of a run started by `zask start`, `zask restart`, or a file change,
+starts the count over. A service that
+exits with status 0 or is stopped with `zask stop`, Ctrl-C in its window, or
+`zask close` is not restarted.
+
+The monitor shows recovery in its own column for each service with
+`restart_on_failure`. The count is the restart attempt, as in the messages
+above, and only describes the current run: a later start by `zask start`,
+`zask restart`, or a file change clears it, and `zask close` clears all of it.
+
+| Column | Meaning |
+| --- | --- |
+| `↻ 0/3` | Recovery is on and has not restarted the current run |
+| `↻ 2/3` | The current run is the second restart; the row shows why |
+| `↻ 2/3 wait` | The service failed and the second restart waits for `delay_ms` |
+| `↻ 3/3 limit` | The service failed after 3 restarts in a row and stays stopped |
+| `↻ ?` | tmux or the recovery state could not be read, or zask could not tell whether the service was stopped |
+
+A stopped or cleanly exited service shows `↻ 0/3` with its usual status.
+The [service log](#service-logs) keeps the same history: each restart prints
+its reason and attempt at the start of the new run, and giving up adds a
+`zask: <service> ... not restarting it` line after the output of the run that
+failed last.
+
 [`schema/zask.schema.json`](schema/zask.schema.json) describes the config for
 editors that support JSON Schema. Point a top-level `"$schema"` key at it to get
 completion, descriptions, and diagnostics for keys, types, and allowed values,
@@ -279,6 +317,7 @@ file when it differs from the running zask, so upgrading zask also updates what
 the editor checks. For a project-local `zask.json`, point `"$schema"` at that
 file or at a copy of `schema/zask.schema.json`. Configs without `$schema` keep
 working.
+
 ## Service logs
 
 zask saves the terminal output of each service to
@@ -291,6 +330,8 @@ read with `grep` or an editor after `zask close`.
   stays readable.
 - When the log has reached 8 MiB at a start, it moves to `<service>.log.1`,
   replacing the older one, and a new log begins.
+- Logging ends when the foreground service command finishes. Commands should
+  keep their service in the foreground rather than leave background children.
 - The log keeps the output as the terminal received it, including color codes
   and `\r\n` line endings.
 - Logs may contain secrets, so the logs directory and the log files are made
@@ -303,9 +344,27 @@ read with `grep` or an editor after `zask close`.
 
 Docker Compose output is not saved.
 
+`zask logs` reads the saved log without a running session:
+
+- `zask logs api --saved` prints the whole `api.log`, and
+  `zask logs api --saved --tail 100` its last 100 lines. Neither touches tmux,
+  so they work after `zask close` as well as during a session. The output is
+  the saved bytes, so it keeps color codes and `\r\n` line endings; an earlier
+  generation in `api.log.1` is not included.
+- `zask logs api --path` prints only the log path, for an editor or
+  `grep pattern "$(zask logs api --path)"`. It prints the path even before the
+  first start has created the log.
+- When the session is not running, `zask logs api` and
+  `zask logs api --tail <n>` still fail, and also print the saved log path and
+  the command that reads it, if the log exists. `--tail` does the same when
+  only the service window is gone.
+- `--saved` exits `1` with the expected path when the service has not saved
+  any output yet, and `--saved` or `--path` exits `1` for an unknown service.
+
 ## Requirements
 
-- tmux
+- tmux (3.3 or newer for log popups)
+- `less` for log popups
 - Zig 0.16.0 to build from source
 - Docker with Docker Compose, when the config has a `docker` section
 

@@ -8,11 +8,14 @@ const paths = @import("../platform/paths.zig");
 const pathing = @import("pathing.zig");
 const proc_runner = @import("../platform/runner.zig");
 const progress_mod = @import("progress.zig");
+const recovery = @import("../model/recovery.zig");
+const log_stream = @import("../platform/log_stream.zig");
 const service_log = @import("service_log.zig");
 const session_layout = @import("session_layout.zig");
 const shell = @import("../platform/shell.zig");
 const stop_marks_mod = @import("../platform/stop_marks.zig");
 const tmux_client = @import("../platform/tmux.zig");
+const tmux_options = @import("../model/tmux_options.zig");
 const waits = @import("waits.zig");
 const zask_command = @import("zask_command.zig");
 
@@ -25,6 +28,18 @@ pub const StartMode = enum { observe, prime };
 /// the workflow printed before returning normally, so the CLI still exits 0,
 /// but the target may not have reached the requested state.
 pub const Outcome = enum { done, incomplete };
+
+/// `skipped` means no new process: the service was already running or a
+/// recorded stop kept it stopped.
+pub const StartOutcome = enum { started, skipped };
+
+/// What recordFailedRun left. `run_gone` means the pane no longer holds the
+/// failed run (someone started or closed it), so nothing was written.
+pub const FailedRunRecord = struct {
+    run_gone: bool = false,
+    record_error: ?anyerror = null,
+    note_error: ?anyerror = null,
+};
 
 /// `failed` is split from `signaled` so `stop --all` can surface services it could
 /// not signal — they may still be running in the workspace it leaves up.
@@ -39,6 +54,7 @@ const StopBroadcast = struct {
 };
 
 pub const Lifecycle = struct {
+    zask_path: []const u8 = "zask",
     gpa: std.mem.Allocator,
     cfg: config.Config,
     runner: proc_runner.Runner,
@@ -52,6 +68,9 @@ pub const Lifecycle = struct {
     service_log_dir: ?[]const u8 = null,
     /// Printed in the service pane before the start command runs.
     launch_notice: ?[]const u8 = null,
+    /// Recovery record the start leaves on the pane; null clears any earlier
+    /// one, so the monitor never shows it for a run started another way.
+    recovery_record: ?recovery.Record = null,
     /// Records user stops for the file watcher. Null skips recording.
     stop_marks: ?stop_marks_mod.StopMarks = null,
     /// Set for watcher restarts: start only if no stop is recorded, checked
@@ -219,10 +238,70 @@ pub const Lifecycle = struct {
     /// while this restart waits for the old process to exit.
     pub fn restartServiceWithNotice(self: Lifecycle, service: []const u8, notice: []const u8, writer: *std.Io.Writer) !void {
         if (try self.ensureServiceStopped(service, writer) == .incomplete) return error.ServiceStopIncomplete;
+        _ = try self.startServiceWithNotice(service, notice, null, writer);
+    }
+
+    /// Start for an automatic recovery, with `notice` shown in the service
+    /// pane and `record` left on it for the monitor. It never clears a
+    /// recorded stop, so it leaves the service stopped when the user stops it
+    /// first, and does nothing if it is running again.
+    pub fn startServiceWithNotice(self: Lifecycle, service: []const u8, notice: []const u8, record: ?recovery.Record, writer: *std.Io.Writer) !StartOutcome {
         var noticed = self;
         noticed.launch_notice = notice;
+        noticed.recovery_record = record;
         noticed.respect_stop_mark = true;
-        try noticed.startService(service, writer, .observe);
+        var progress = progress_mod.Line.init(writer);
+        return noticed.ensureServiceRunning(service, &progress, .observe);
+    }
+
+    /// Leaves `record` on the pane of the failed run it names, and `note` in
+    /// the service log after that run's output, only while the pane still
+    /// holds that dead run. The check runs under the service lock that starts
+    /// take, so a start after the supervisor saw the failure gets neither.
+    /// A record or note that cannot be written is returned, not raised.
+    pub fn recordFailedRun(self: Lifecycle, service: []const u8, record: recovery.Record, note: ?[]const u8) !FailedRunRecord {
+        const held = try self.holdStopMark(service);
+        defer if (held) |h| h.release();
+        const pane = self.tmux.observePane(service);
+        defer pane.deinit(self.gpa);
+        const pid = pane.processId();
+        if (pane.state != .dead or pid == null or pid != record.pid) return .{ .run_gone = true };
+
+        var result: FailedRunRecord = .{};
+        self.tmux.setPaneOption(service, tmux_options.recovery, try record.encode(self.gpa)) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => result.record_error = err,
+        };
+        const text = note orelse return result;
+        const log_dir = self.service_log_dir orelse return result;
+        self.noteAfterRun(service, log_dir, text) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => result.note_error = err,
+        };
+        return result;
+    }
+
+    /// The relay acknowledgement is written after the run's completion marker
+    /// and all preceding output. A timeout is a failed save, never permission
+    /// to write the note ahead of pending output. The service lock is held.
+    fn noteAfterRun(self: Lifecycle, service: []const u8, log_dir: []const u8, text: []const u8) !void {
+        const log_path = try service_log.servicePath(self.gpa, log_dir, service);
+        defer self.gpa.free(log_path);
+        const token = (try self.tmux.showPaneOption(service, tmux_options.log_run)) orelse return error.OutputNotSaved;
+        defer self.gpa.free(token);
+        const done_path = try log_stream.completionPath(self.gpa, log_path, token);
+        defer self.gpa.free(done_path);
+        for (0..300) |_| {
+            if (std.Io.Dir.cwd().statFile(self.runner.io, done_path, .{})) |_| {
+                try service_log.appendNote(self.gpa, self.runner.io, log_dir, service, text);
+                std.Io.Dir.cwd().deleteFile(self.runner.io, done_path) catch {};
+                return;
+            } else |err| switch (err) {
+                error.FileNotFound => self.runner.sleep(.fromMilliseconds(10)),
+                else => return err,
+            }
+        }
+        return error.OutputNotSaved;
     }
 
     pub fn observeStopMark(self: Lifecycle, service: []const u8) observations.StopMarkObservation {
@@ -236,7 +315,7 @@ pub const Lifecycle = struct {
     }
 
     pub fn startServiceWithProgress(self: Lifecycle, service: []const u8, progress: anytype, mode: StartMode) !void {
-        try self.ensureServiceRunning(service, progress, mode);
+        _ = try self.ensureServiceRunning(service, progress, mode);
     }
 
     pub fn stopDocker(self: Lifecycle, writer: *std.Io.Writer) !Outcome {
@@ -394,7 +473,7 @@ pub const Lifecycle = struct {
         }
     }
 
-    fn ensureServiceRunning(self: Lifecycle, service: []const u8, progress: anytype, mode: StartMode) !void {
+    fn ensureServiceRunning(self: Lifecycle, service: []const u8, progress: anytype, mode: StartMode) !StartOutcome {
         const value = try self.cfg.findService(service);
         const held = try self.holdStopMark(service);
         defer if (held) |h| h.release();
@@ -405,7 +484,7 @@ pub const Lifecycle = struct {
             switch (serviceStartDecision(pane)) {
                 .no_op => {
                     try progress.info("{s} already running\n", .{service});
-                    return;
+                    return .skipped;
                 },
                 .send_start => {},
                 .recreate_window => recreate_window = true,
@@ -447,7 +526,7 @@ pub const Lifecycle = struct {
         }
         if (self.respect_stop_mark and self.observeStopMark(service) != .not_stopped) {
             try progress.info("  {s} was stopped; not starting it\n", .{service});
-            return;
+            return .skipped;
         }
         const started_at = self.runner.nowSeconds();
         const recording = if (self.service_log_dir) |log_dir|
@@ -461,8 +540,10 @@ pub const Lifecycle = struct {
             if (self.stop_marks) |marks| marks.clear(self.gpa, service) catch
                 try progress.warn("Warning: could not clear the stop record for {s}; file watch will not restart it\n", .{service});
         }
-        const output_log: ?tmux_client.OutputLog = if (recording) |log| .{ .path = log.path, .header = log.header } else null;
-        try self.tmux.respawnPaneWithOutputLog(service, service_dir, try self.withLaunchNotice(launch_command), started_at, output_log);
+        const output_log: ?tmux_client.OutputLog = if (recording) |log| .{ .path = log.path, .header = log.header, .relay_path = self.zask_path, .token = log.token } else null;
+        const recovery_value = if (self.recovery_record) |record| try record.encode(self.gpa) else null;
+        try self.tmux.respawnPaneWithOutputLog(service, service_dir, try self.withLaunchNotice(launch_command), started_at, output_log, recovery_value);
+        return .started;
     }
 
     /// A log that cannot be written must not block the start: the output stays
@@ -1026,10 +1107,10 @@ test "lifecycle.startAll: wraps service command with env files" {
     try lifecycle.startAll("all", &writer, .prime);
 
     const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.RespawnMissing;
-    try proc_runner.expectCommandArgContains(respawn, 9, "__zask_env_file='/tmp/demo/.env'");
-    try proc_runner.expectCommandArgContains(respawn, 9, "__zask_env_file='/tmp/demo/backend/.env.local'");
-    try proc_runner.expectCommandArgContains(respawn, 9, "export \"$__zask_env_key=$__zask_env_value\"");
-    try proc_runner.expectCommandArgContains(respawn, 9, "\nserve");
+    try proc_runner.expectCommandArgContains(respawn, 16, "__zask_env_file='/tmp/demo/.env'");
+    try proc_runner.expectCommandArgContains(respawn, 16, "__zask_env_file='/tmp/demo/backend/.env.local'");
+    try proc_runner.expectCommandArgContains(respawn, 16, "export \"$__zask_env_key=$__zask_env_value\"");
+    try proc_runner.expectCommandArgContains(respawn, 16, "\nserve");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting api...") != null);
 }
 
@@ -1383,10 +1464,17 @@ test "lifecycle.restartServiceWithNotice: prints notice before service command" 
     try lifecycle.restartServiceWithNotice("api", "zask: it's src/a.zig", &writer);
 
     const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
-    try proc_runner.expectCommandArgContains(respawn, 9, "printf '%s\\n' 'zask: it'\\''s src/a.zig'\nserve\n");
+    try proc_runner.expectCommandArgContains(respawn, 16, "printf '%s\\n' 'zask: it'\\''s src/a.zig'\nserve\n");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting api...") != null);
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
+
+const test_api_config =
+    \\{
+    \\  "project": {"name":"demo","root":"/tmp/demo"},
+    \\  "groups": [{"name":"backend","services":[{"name":"api","command":"serve"}]}]
+    \\}
+;
 
 fn testStopMarks(tmp: *std.testing.TmpDir, gpa: std.mem.Allocator) !stop_marks_mod.StopMarks {
     const base = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
@@ -1454,6 +1542,113 @@ test "lifecycle.restartServiceWithNotice: leaves service stopped when a stop is 
 
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "respawn-pane") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api was stopped; not starting it") != null);
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "lifecycle.startServiceWithNotice: respawns an exited service with the notice" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("1|1|123|serve|1700000000\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = std.testing.io, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), test_api_config);
+    var lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    lifecycle.stop_marks = try testStopMarks(&tmp, arena.allocator());
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    const outcome = try lifecycle.startServiceWithNotice("api", "zask: restarting api after it exited with status 1 (1/3)", null, &writer);
+
+    const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArgContains(respawn, 16, "printf '%s\\n' 'zask: restarting api after it exited with status 1 (1/3)'\nserve\n");
+    try std.testing.expectEqual(StartOutcome.started, outcome);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "C-c") == null);
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "lifecycle.startServiceWithNotice: leaves the recovery record with the respawn" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("1|1|123|serve|1700000000\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = std.testing.io, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), test_api_config);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    _ = try lifecycle.startServiceWithNotice("api", "zask: restarting api", .{ .kind = .restarted, .attempt = 2, .max_retries = 3, .exit = .{ .failed = 1 } }, &writer);
+
+    const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArgv(.{ .argv = respawn.argv[respawn.argv.len - 14 .. respawn.argv.len - 7], .cwd = null, .interactive = false }, &.{ ";", "set-option", "-p", "-t", "=demo:=api", "@zask_recovery", "restarted,,2,3,1" });
+}
+
+test "lifecycle.startService: clears an earlier recovery record with the respawn" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("1|1|123|serve|1700000000||restarted,,2,3,1\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = std.testing.io, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), test_api_config);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startService("api", &writer, .observe);
+
+    const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArgv(.{ .argv = respawn.argv[respawn.argv.len - 14 .. respawn.argv.len - 7], .cwd = null, .interactive = false }, &.{ ";", "set-option", "-p", "-u", "-t", "=demo:=api", "@zask_recovery" });
+}
+
+test "lifecycle.startServiceWithNotice: leaves a running service alone" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("0||123|serve|1700000000\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), test_api_config);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    const outcome = try lifecycle.startServiceWithNotice("api", "zask: restarting api", null, &writer);
+
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "respawn-pane") == null);
+    try std.testing.expectEqual(StartOutcome.skipped, outcome);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api already running") != null);
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "lifecycle.startServiceWithNotice: keeps a recorded stop" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("1|1|123|serve|1700000000\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = std.testing.io, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), test_api_config);
+    var lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    lifecycle.stop_marks = try testStopMarks(&tmp, arena.allocator());
+    try lifecycle.stop_marks.?.mark(arena.allocator(), "api");
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    const outcome = try lifecycle.startServiceWithNotice("api", "zask: restarting api", null, &writer);
+
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "respawn-pane") == null);
+    try std.testing.expectEqual(StartOutcome.skipped, outcome);
+    try std.testing.expectEqual(observations.StopMarkObservation.stopped, lifecycle.observeStopMark("api"));
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
@@ -2288,8 +2483,8 @@ test "lifecycle.startTarget: docker start sends compose up after transient busy 
     try lifecycle.startTarget("docker", &writer);
 
     const respawn = proc_runner.findCommandContaining(&recorder, "docker compose") orelse return error.CommandNotFound;
-    try proc_runner.expectCommandArg(respawn, 1, "respawn-pane");
-    try proc_runner.expectCommandArgContains(respawn, 9, "docker compose");
+    try proc_runner.expectCommandArg(respawn, 8, "respawn-pane");
+    try proc_runner.expectCommandArgContains(respawn, 16, "docker compose");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting Docker...") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }
@@ -2321,7 +2516,7 @@ test "lifecycle.startTarget: docker start respawns shell pane without compose pr
     try lifecycle.startTarget("docker", &writer);
 
     const respawn = proc_runner.findCommandContaining(&recorder, "docker compose") orelse return error.CommandNotFound;
-    try proc_runner.expectCommandArg(respawn, 1, "respawn-pane");
+    try proc_runner.expectCommandArg(respawn, 8, "respawn-pane");
     try proc_runner.expectCommandOrder(&recorder, "pgrep", "respawn-pane");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Starting Docker...") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker already starting") == null);
@@ -2354,8 +2549,8 @@ test "lifecycle.startTarget: docker start disables compose menu and waits when s
     try lifecycle.startTarget("docker", &writer);
 
     const respawn = proc_runner.findCommandContaining(&recorder, "COMPOSE_MENU=false") orelse return error.CommandNotFound;
-    try proc_runner.expectCommandArg(respawn, 1, "respawn-pane");
-    try proc_runner.expectCommandArgContains(respawn, 9, "COMPOSE_MENU=false");
+    try proc_runner.expectCommandArg(respawn, 8, "respawn-pane");
+    try proc_runner.expectCommandArgContains(respawn, 16, "COMPOSE_MENU=false");
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Docker containers ready") != null);
 }
 
@@ -2441,11 +2636,11 @@ test "lifecycle.startAll: respawns service pane without sending command to shell
     try lifecycle.startAll("all", &writer, .observe);
 
     const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
-    try proc_runner.expectCommandArg(respawn, 1, "respawn-pane");
-    try proc_runner.expectCommandArg(respawn, 6, "/tmp/demo app/backend");
-    try proc_runner.expectCommandArg(respawn, 7, "sh");
-    try proc_runner.expectCommandArg(respawn, 8, "-lc");
-    try proc_runner.expectCommandArgContains(respawn, 9, "serve");
+    try proc_runner.expectCommandArg(respawn, 8, "respawn-pane");
+    try proc_runner.expectCommandArg(respawn, 13, "/tmp/demo app/backend");
+    try proc_runner.expectCommandArg(respawn, 14, "sh");
+    try proc_runner.expectCommandArg(respawn, 15, "-lc");
+    try proc_runner.expectCommandArgContains(respawn, 16, "serve");
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "send-keys") == null);
 }
 
@@ -2472,8 +2667,62 @@ test "lifecycle.startAll: resolves relative service cwd before sending command" 
     try lifecycle.startAll("all", &writer, .observe);
 
     const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
-    try proc_runner.expectCommandArg(respawn, 6, cwd);
-    try proc_runner.expectCommandArgContains(respawn, 9, "serve");
+    try proc_runner.expectCommandArg(respawn, 13, cwd);
+    try proc_runner.expectCommandArgContains(respawn, 16, "serve");
+}
+
+test "lifecycle.recordFailedRun: appends only after the run output is saved" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "logs");
+    try tmp.dir.writeFile(io, .{ .sub_path = "logs/api.log", .data = "panic: boom\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "logs/api.log.done-token", .data = "done\n" });
+    var recorder = proc_runner.Recorder.init(gpa);
+    defer recorder.deinit();
+    try recorder.enqueue("1|3|123|serve|1700000000\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    try recorder.enqueue("token\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = gpa, .io = io, .recorder = &recorder };
+    var lifecycle = testLifecycle(gpa, run, try parseTestConfig(gpa, test_api_config));
+    lifecycle.service_log_dir = try std.fs.path.join(gpa, &.{ try tmp.dir.realPathFileAlloc(io, ".", gpa), "logs" });
+
+    const result = try lifecycle.recordFailedRun("api", .{ .kind = .gave_up, .pid = 123, .attempt = 3, .max_retries = 3, .exit = .{ .failed = 3 } }, "zask: api gave up");
+
+    try std.testing.expectEqualDeep(FailedRunRecord{}, result);
+    try proc_runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "set-option", "-p", "-t", "=demo:=api", "@zask_recovery", "gave_up,123,3,3,3" });
+    try std.testing.expectEqualStrings("panic: boom\n\nzask: api gave up\n", try tmp.dir.readFileAlloc(io, "logs/api.log", gpa, .limited(1024)));
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "lifecycle.recordFailedRun: leaves a run started since the failure alone" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "logs");
+    try tmp.dir.writeFile(io, .{ .sub_path = "logs/api.log", .data = "=== zask: api started ===\n" });
+    var recorder = proc_runner.Recorder.init(gpa);
+    defer recorder.deinit();
+    try recorder.enqueue("0||456|serve|1700000100\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = gpa, .io = io, .recorder = &recorder };
+    var lifecycle = testLifecycle(gpa, run, try parseTestConfig(gpa, test_api_config));
+    lifecycle.service_log_dir = try std.fs.path.join(gpa, &.{ try tmp.dir.realPathFileAlloc(io, ".", gpa), "logs" });
+
+    const result = try lifecycle.recordFailedRun("api", .{ .kind = .gave_up, .pid = 123, .attempt = 3, .max_retries = 3, .exit = .{ .failed = 3 } }, "zask: api gave up");
+
+    try std.testing.expect(result.run_gone);
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "set-option") == null);
+    try std.testing.expectEqualStrings("=== zask: api started ===\n", try tmp.dir.readFileAlloc(io, "logs/api.log", gpa, .limited(1024)));
 }
 
 test "lifecycle.startService: pipes output to the service log with the respawn" {
@@ -2503,9 +2752,9 @@ test "lifecycle.startService: pipes output to the service log with the respawn" 
     try lifecycle.startService("api", &writer, .prime);
 
     const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
-    try proc_runner.expectCommandArg(respawn, 11, "pipe-pane");
-    try proc_runner.expectCommandArgContains(respawn, 14, "=== zask: api started at 2023-11-14T22:13:20Z ===");
-    try proc_runner.expectCommandArgContains(respawn, 14, try std.fmt.allocPrint(gpa, ">> '{s}/api.log'", .{log_dir}));
+    try proc_runner.expectCommandArg(respawn, 18, "pipe-pane");
+    try proc_runner.expectCommandArgContains(respawn, 21, "=== zask: api started at 2023-11-14T22:13:20Z ===");
+    try proc_runner.expectCommandArgContains(respawn, 21, try std.fmt.allocPrint(gpa, ">> '{s}/api.log'", .{log_dir}));
     try std.testing.expectEqualStrings("1700000000", respawn.argv[respawn.argv.len - 1]);
     _ = try tmp.dir.statFile(threaded.io(), "logs/api.log", .{});
     try std.testing.expectEqualStrings("Starting api...\n", writer.buffered());
@@ -2538,8 +2787,8 @@ test "lifecycle.startService: starts without a log and warns when the log cannot
     try lifecycle.startService("api", &writer, .prime);
 
     const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
-    try proc_runner.expectCommandArgv(.{ .argv = respawn.argv[10..14], .cwd = null, .interactive = false }, &.{ ";", "pipe-pane", "-t", "=demo:=api" });
-    try proc_runner.expectCommandArg(respawn, 14, ";");
+    try proc_runner.expectCommandArgv(.{ .argv = respawn.argv[17..21], .cwd = null, .interactive = false }, &.{ ";", "pipe-pane", "-t", "=demo:=api" });
+    try proc_runner.expectCommandArg(respawn, 21, ";");
     const expected = try std.fmt.allocPrint(gpa, "Warning: api output is not saved: cannot write a log in {s} (NotDir)\nStarting api...\n", .{log_dir});
     try std.testing.expectEqualStrings(expected, writer.buffered());
 }
