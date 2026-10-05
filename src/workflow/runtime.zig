@@ -570,10 +570,10 @@ const WatchRestarter = struct {
         return .{ .state = pane.state, .exit = pane.exit, .pid = pane.processId() };
     }
 
-    pub fn recover(self: WatchRestarter, service: []const u8, notice: []const u8, writer: *std.Io.Writer) !void {
+    pub fn recover(self: WatchRestarter, service: []const u8, notice: []const u8, writer: *std.Io.Writer) !lifecycle_mod.StartOutcome {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
-        try self.runtime.withAllocator(arena.allocator()).lifecycle().startServiceWithNotice(service, notice, writer);
+        return self.runtime.withAllocator(arena.allocator()).lifecycle().startServiceWithNotice(service, notice, writer);
     }
 };
 

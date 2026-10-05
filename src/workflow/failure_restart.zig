@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const config = @import("../model/config.zig");
+const lifecycle = @import("lifecycle.zig");
 const observations = @import("../model/observations.zig");
 
 /// A failure this long after the last restart was not a crash loop, so it
@@ -114,8 +115,9 @@ pub const Supervisor = struct {
     /// Observes every supervised service once and restarts those whose
     /// failure has waited `delay_ms`. `ctx` provides `now() i96` (monotonic
     /// ns), `nowSeconds() i64` (Unix seconds), `observeRun(name) Run`,
-    /// `stopMark(name)`, and `recover(name, notice, writer)`. Restart failures
-    /// are reported and count as attempts.
+    /// `stopMark(name)`, and `recover(name, notice, writer) !StartOutcome`.
+    /// Restart failures are reported and count as attempts; a restart that
+    /// finds the service already started or stopped by someone else does not.
     pub fn tick(self: *Supervisor, ctx: anytype, writer: *std.Io.Writer) !void {
         for (self.services.items) |*service| {
             try self.check(service, ctx, writer);
@@ -172,14 +174,21 @@ pub const Supervisor = struct {
         if (now_ns - failed_at < @as(i96, service.policy.delay_ms) * std.time.ns_per_ms) return;
 
         service.pending = null;
-        service.restarts += 1;
-        service.restarted_at = ctx.nowSeconds();
-        const notice = try std.fmt.allocPrint(self.gpa, "zask: restarting {s} after it {f} ({d}/{d})", .{ service.name, ExitText{ .exit = run.exit }, service.restarts, service.policy.max_retries });
+        const attempt = service.restarts + 1;
+        const notice = try std.fmt.allocPrint(self.gpa, "zask: restarting {s} after it {f} ({d}/{d})", .{ service.name, ExitText{ .exit = run.exit }, attempt, service.policy.max_retries });
         defer self.gpa.free(notice);
-        ctx.recover(service.name, notice, writer) catch |err| switch (err) {
+        const outcome: lifecycle.StartOutcome = ctx.recover(service.name, notice, writer) catch |err| switch (err) {
             error.OutOfMemory => return err,
-            else => try writer.print("  Warning: could not restart {s}: {s}\n", .{ service.name, @errorName(err) }),
+            else => failed: {
+                try writer.print("  Warning: could not restart {s}: {s}\n", .{ service.name, @errorName(err) });
+                break :failed .started;
+            },
         };
+        // Someone else started or stopped the service under the lock first;
+        // that run is not part of this series.
+        if (outcome == .skipped) return;
+        service.restarts = attempt;
+        service.restarted_at = ctx.nowSeconds();
         service.restarted_pid = ctx.observeRun(service.name).pid;
     }
 };
@@ -230,6 +239,8 @@ const TestContext = struct {
     run: Run = .{ .state = .busy, .pid = 100 },
     mark: observations.StopMarkObservation = .not_stopped,
     fail_recover: bool = false,
+    /// A manual start that wins the service lock before the next recovery.
+    started_elsewhere: ?i64 = null,
     next_pid: i64 = 200,
     recovers: std.ArrayList([]const u8) = .empty,
 
@@ -256,13 +267,19 @@ const TestContext = struct {
         return self.mark;
     }
 
-    pub fn recover(self: *TestContext, name: []const u8, notice: []const u8, writer: *std.Io.Writer) !void {
+    pub fn recover(self: *TestContext, name: []const u8, notice: []const u8, writer: *std.Io.Writer) !lifecycle.StartOutcome {
         _ = name;
         _ = writer;
         if (self.fail_recover) return error.CommandFailed;
+        if (self.started_elsewhere) |pid| {
+            self.started_elsewhere = null;
+            self.run = .{ .state = .busy, .pid = pid };
+            return .skipped;
+        }
         try self.recovers.append(std.testing.allocator, try std.testing.allocator.dupe(u8, notice));
         self.run = .{ .state = .busy, .pid = self.next_pid };
         self.next_pid += 1;
+        return .started;
     }
 
     /// The current run dies `after_s` seconds from now.
@@ -530,6 +547,24 @@ test "failure_restart.tick: another run failing during the delay waits its own d
     try std.testing.expectEqual(@as(usize, 0), before_own_delay);
     try std.testing.expectEqual(@as(usize, 1), ctx.recovers.items.len);
     try std.testing.expectEqualStrings("zask: restarting api after it exited with status 2 (1/3)", ctx.recovers.items[0]);
+}
+
+test "failure_restart.tick: a manual start winning the lock gets a fresh series" {
+    var project = try testApi(0, 3);
+    defer project.deinit();
+    var ctx: TestContext = .{};
+    defer ctx.deinit();
+    ctx.crash(1, .{ .failed = 1 });
+    try project.tick(&ctx);
+    ctx.crash(1, .{ .failed = 1 });
+
+    ctx.started_elsewhere = 900;
+    try project.tick(&ctx);
+    ctx.crash(1, .{ .failed = 1 });
+    try project.tick(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 2), ctx.recovers.items.len);
+    try std.testing.expectEqualStrings("zask: restarting api after it exited with status 1 (1/3)", ctx.recovers.items[1]);
 }
 
 test "failure_restart.writeSupervised: lists policy per service" {
