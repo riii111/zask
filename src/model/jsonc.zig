@@ -52,6 +52,49 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, format: Format, syntax_e
     };
 }
 
+/// Returns `bytes` with every comment replaced by spaces, so byte offsets
+/// found in the result point at the same tokens in `bytes`. `bytes` must
+/// already parse as JSONC. The result is `bytes` itself when it has no
+/// comments; otherwise it is allocated from `gpa`.
+pub fn withoutComments(gpa: std.mem.Allocator, bytes: []const u8) ![]const u8 {
+    return switch (try blankComments(gpa, bytes, .jsonc)) {
+        .ok => |source| source,
+        .err => error.InvalidSyntax,
+    };
+}
+
+pub const CommentRun = struct {
+    /// Just past the last comment, or the start offset when none was found.
+    end: usize,
+    /// The last comment runs to the end of its line, so anything placed at
+    /// `end` must start on a new line.
+    line_comment: bool = false,
+};
+
+/// Skips whitespace and comments from `start`, which must sit outside any
+/// string or comment, and reports where the comments end. With `same_line`,
+/// only comments that begin on the line of `start` count; a block comment
+/// that begins there still counts as a whole even when it spans lines.
+pub fn skipComments(bytes: []const u8, start: usize, same_line: bool) CommentRun {
+    var run: CommentRun = .{ .end = start };
+    var i = start;
+    while (i < bytes.len) {
+        switch (bytes[i]) {
+            ' ', '\t', '\r' => i += 1,
+            '\n' => if (same_line) return run else {
+                i += 1;
+            },
+            '/' => {
+                const end = (commentEnd(bytes, i) orelse return run) orelse return run;
+                run = .{ .end = end, .line_comment = bytes[i + 1] == '/' };
+                i = end;
+            },
+            else => return run,
+        }
+    }
+    return run;
+}
+
 const BlankResult = union(enum) {
     ok: []const u8,
     err: struct { offset: usize, message: []const u8 },
@@ -254,5 +297,31 @@ test "jsonc.parse: reports syntax errors with original position" {
         try std.testing.expectEqualStrings(case.message, actual.message);
         try std.testing.expectEqual(case.line, actual.line);
         try std.testing.expectEqual(case.column, actual.column);
+    }
+}
+
+test "jsonc.skipComments: reports where comments after a value end" {
+    const cases = [_]struct {
+        name: []const u8,
+        bytes: []const u8,
+        same_line: bool,
+        end: usize,
+        line_comment: bool,
+    }{
+        .{ .name = "no comment", .bytes = "1 ]", .same_line = true, .end = 1, .line_comment = false },
+        .{ .name = "line comment", .bytes = "1 // a\n]", .same_line = true, .end = 6, .line_comment = true },
+        .{ .name = "block then line", .bytes = "1 /* a */ // b\n]", .same_line = true, .end = 14, .line_comment = true },
+        .{ .name = "block spanning lines", .bytes = "1 /* a\n b */\n]", .same_line = true, .end = 12, .line_comment = false },
+        .{ .name = "comment on next line", .bytes = "1\n// a\n]", .same_line = true, .end = 1, .line_comment = false },
+        .{ .name = "comments across lines", .bytes = "1\n// a\n/* b */ ]", .same_line = false, .end = 14, .line_comment = false },
+        .{ .name = "slash outside comment", .bytes = "1 /x", .same_line = true, .end = 1, .line_comment = false },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("case: {s}\n", .{case.name});
+
+        const run = skipComments(case.bytes, 1, case.same_line);
+
+        try std.testing.expectEqual(case.end, run.end);
+        try std.testing.expectEqual(case.line_comment, run.line_comment);
     }
 }

@@ -155,7 +155,7 @@ fn exitWithJsonError(gpa: std.mem.Allocator, stdout: *std.Io.Writer, err: anyerr
 
 fn exitWithTextError(stdout: *std.Io.Writer, err: anyerror, err_ctx: cli_context.ErrorContext, diags: diagnostics.Diagnostics) !void {
     switch (err) {
-        error.InvalidArguments, error.UnknownCommand, error.ProjectRequired, error.ConfigAlreadyExists, error.InvalidProcfile, error.UnknownTarget, error.CommentedConfigNotEditable, error.ServiceAlreadyExists, error.GroupNotFound, error.GroupRequired, error.ServiceNotAdded => {
+        error.InvalidArguments, error.UnknownCommand, error.ProjectRequired, error.ConfigAlreadyExists, error.InvalidProcfile, error.UnknownTarget, error.ServiceAlreadyExists, error.GroupNotFound, error.GroupRequired, error.ServiceNotAdded => {
             try stdout.flush();
             std.process.exit(2);
         },

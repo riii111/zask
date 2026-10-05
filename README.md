@@ -224,10 +224,11 @@ other commands use. Pass `--group <group>` when the config has more than one
 group; a group that does not exist is reported, not created. `--port <port>`
 sets the port. The entry follows the group's form: an object entry in an array,
 the command string in an object, or a detailed object entry when a port is set.
-The rest of the file is kept as written. zask leaves the file unchanged and
+The rest of the file is kept as written, including comments in `.jsonc`
+configs. The new entry goes after the group's last service and after any
+comment on that service's line. zask leaves the file unchanged and
 reports why when a service with the same name exists, the result would fail
 validation or the size zask loads, or the file changed after zask read it.
-`.jsonc` configs are not edited yet; add the service by hand.
 
 Concurrent `zask add` runs on the same config wait for each other. An editor
 can still save while zask writes, so zask swaps the new file in atomically and
