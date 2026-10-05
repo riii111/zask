@@ -45,6 +45,36 @@ pub fn bindControlKeys(gpa: std.mem.Allocator, tx: tmux_client.Client) !void {
         \\  tmux set-option -t "$session" {[opt]s} {[all]s};
         \\fi
     , .{ .opt = tmux_options.dash_mode, .all = tmux_options.dash_mode_all, .bad = tmux_options.dash_mode_bad }));
+    try bindTreeNavigation(gpa, tx);
+}
+
+/// Window list (choose-tree) moves that tmux itself lacks; Ctrl+N / Ctrl+P
+/// move and Ctrl+G closes there already.
+const tree_moves = [_]struct { key: []const u8, tree_key: []const u8 }{
+    .{ .key = "C-v", .tree_key = "NPage" },
+    .{ .key = "M-v", .tree_key = "PPage" },
+    .{ .key = "M-<", .tree_key = "Home" },
+    .{ .key = "M->", .tree_key = "End" },
+};
+
+/// The window list of a zask session: only zask sets this session option.
+const zask_tree_condition = "#{&&:#{==:#{pane_mode},tree-mode},#{" ++ tmux_options.zask_path ++ "}}";
+
+/// tmux keys cannot be bound for one mode or session, so these root-table
+/// bindings are server-wide: each acts only in the window list of a zask
+/// session and otherwise sends the key on unchanged, as if it were unbound.
+/// tmux skips the root table in copy mode, so copy-mode keys are untouched.
+/// A key the user already bound in the root table is left as it is.
+pub fn bindTreeNavigation(gpa: std.mem.Allocator, tx: tmux_client.Client) !void {
+    for (tree_moves) |move| {
+        if (try tx.rootKeyBinding(move.key)) |existing| {
+            defer tx.gpa.free(existing);
+            if (std.mem.indexOf(u8, existing, tmux_options.zask_path) == null) continue;
+        }
+        const in_tree = try std.fmt.allocPrint(gpa, "send-keys {s}", .{move.tree_key});
+        const elsewhere = try std.fmt.allocPrint(gpa, "send-keys {s}", .{move.key});
+        try tx.bindRootKey(move.key, &.{ "if-shell", "-F", zask_tree_condition, in_tree, elsewhere });
+    }
 }
 
 /// Flips the same session option as the Ctrl+q m binding, so both toggles agree.
@@ -89,6 +119,47 @@ test "tmux_setup.bindControlKeys: list binding delegates preview sizing to zask 
     try proc_runner.expectCommandArgContains(command, 6, "#{client_height}");
     try proc_runner.expectCommandArgNotContains(command, 6, "resize-window");
     try proc_runner.expectCommandArgNotContains(command, 6, "choose-tree");
+}
+
+test "tmux_setup.bindTreeNavigation: binds window list moves only for zask sessions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    for (tree_moves) |_| {
+        try recorder.enqueue("", "", .{ .exited = 0 });
+        try recorder.enqueue("", "", .{ .exited = 0 });
+    }
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const tx = tmux_client.Client{ .gpa = arena.allocator(), .runner = run, .session = "demo" };
+
+    try bindTreeNavigation(arena.allocator(), tx);
+
+    try proc_runner.expectCommandArgv(recorder.commands.items[1], &.{ "tmux", "bind-key", "-T", "root", "C-v", "if-shell", "-F", "#{&&:#{==:#{pane_mode},tree-mode},#{@zask_path}}", "send-keys NPage", "send-keys C-v" });
+    try proc_runner.expectCommandArgv(recorder.commands.items[3], &.{ "tmux", "bind-key", "-T", "root", "M-v", "if-shell", "-F", "#{&&:#{==:#{pane_mode},tree-mode},#{@zask_path}}", "send-keys PPage", "send-keys M-v" });
+    try proc_runner.expectCommandArgv(recorder.commands.items[5], &.{ "tmux", "bind-key", "-T", "root", "M-<", "if-shell", "-F", "#{&&:#{==:#{pane_mode},tree-mode},#{@zask_path}}", "send-keys Home", "send-keys M-<" });
+    try proc_runner.expectCommandArgv(recorder.commands.items[7], &.{ "tmux", "bind-key", "-T", "root", "M->", "if-shell", "-F", "#{&&:#{==:#{pane_mode},tree-mode},#{@zask_path}}", "send-keys End", "send-keys M->" });
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "tmux_setup.bindTreeNavigation: keeps a root binding the user made" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    const table = "bind-key -T root C-v send-keys -l hello\nbind-key -T root M-v if-shell -F \"#{&&:#{==:#{pane_mode},tree-mode},#{@zask_path}}\" { send-keys PPage } { send-keys M-v }\n";
+    for (tree_moves) |_| try recorder.enqueue(table, "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const tx = tmux_client.Client{ .gpa = arena.allocator(), .runner = run, .session = "demo" };
+
+    try bindTreeNavigation(arena.allocator(), tx);
+
+    var bound: std.ArrayList([]const u8) = .empty;
+    for (recorder.commands.items) |command| {
+        if (std.mem.eql(u8, command.argv[1], "bind-key")) try bound.append(arena.allocator(), command.argv[4]);
+    }
+    try std.testing.expectEqual(@as(usize, 3), bound.items.len);
+    for (bound.items) |key| try std.testing.expect(!std.mem.eql(u8, key, "C-v"));
 }
 
 test "tmux_setup.bindClientSizeHooks: runs sync command when client becomes active" {

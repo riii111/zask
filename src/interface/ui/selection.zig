@@ -1,6 +1,14 @@
 const std = @import("std");
 
-pub const Direction = enum { up, down };
+/// `page_up` / `page_down` carry the rows one page moves, at least one.
+pub const Motion = union(enum) {
+    up,
+    down,
+    page_up: usize,
+    page_down: usize,
+    first,
+    last,
+};
 
 /// Remembers the selected row by name so refreshes and filter changes never
 /// move the selection onto a different service. When the selected row is
@@ -37,13 +45,22 @@ pub const Selection = struct {
     }
 
     /// Moves within the visible rows without wrapping. A hidden selection
-    /// lands on the row now at its last position.
-    pub fn move(self: *Selection, gpa: std.mem.Allocator, names: []const []const u8, direction: Direction) !void {
+    /// lands on the row now at its last position, except that `first` and
+    /// `last` always go to the ends.
+    pub fn move(self: *Selection, gpa: std.mem.Allocator, names: []const []const u8, motion: Motion) !void {
         if (names.len == 0) return;
-        const target = if (self.position(names)) |current| switch (direction) {
-            .up => current -| 1,
-            .down => @min(current + 1, names.len - 1),
-        } else @min(self.index, names.len - 1);
+        const end = names.len - 1;
+        const target = switch (motion) {
+            .first => 0,
+            .last => end,
+            .up, .down, .page_up, .page_down => if (self.position(names)) |current| switch (motion) {
+                .up => current -| 1,
+                .down => @min(current + 1, end),
+                .page_up => |rows| current -| @max(rows, 1),
+                .page_down => |rows| @min(current +| @max(rows, 1), end),
+                .first, .last => unreachable,
+            } else @min(self.index, end),
+        };
         try self.select(gpa, names, target);
     }
 
@@ -97,7 +114,7 @@ test "Selection.track: keeps the selected name when rows reorder or hide it" {
 
 test "Selection.move: steps through visible rows without wrapping" {
     const names = [_][]const u8{ "docker", "api", "web" };
-    const cases = [_]struct { from: []const u8, direction: Direction, expected: []const u8 }{
+    const cases = [_]struct { from: []const u8, direction: Motion, expected: []const u8 }{
         .{ .from = "api", .direction = .down, .expected = "web" },
         .{ .from = "api", .direction = .up, .expected = "docker" },
         .{ .from = "web", .direction = .down, .expected = "web" },
@@ -114,7 +131,7 @@ test "Selection.move: steps through visible rows without wrapping" {
 }
 
 test "Selection.move: hidden selection lands on the row at its last position" {
-    const cases = [_]struct { index: usize, direction: Direction, expected: []const u8 }{
+    const cases = [_]struct { index: usize, direction: Motion, expected: []const u8 }{
         .{ .index = 1, .direction = .down, .expected = "worker" },
         .{ .index = 1, .direction = .up, .expected = "worker" },
         .{ .index = 5, .direction = .down, .expected = "worker" },
@@ -127,6 +144,37 @@ test "Selection.move: hidden selection lands on the row at its last position" {
 
         try std.testing.expectEqualStrings(case.expected, selection.name.?);
     }
+}
+
+test "Selection.move: pages and jumps to the ends without wrapping" {
+    const names = [_][]const u8{ "a", "b", "c", "d", "e", "f" };
+    const cases = [_]struct { from: []const u8, motion: Motion, expected: []const u8 }{
+        .{ .from = "a", .motion = .{ .page_down = 2 }, .expected = "c" },
+        .{ .from = "e", .motion = .{ .page_down = 2 }, .expected = "f" },
+        .{ .from = "d", .motion = .{ .page_up = 2 }, .expected = "b" },
+        .{ .from = "b", .motion = .{ .page_up = 2 }, .expected = "a" },
+        .{ .from = "c", .motion = .{ .page_down = 0 }, .expected = "d" },
+        .{ .from = "c", .motion = .{ .page_down = std.math.maxInt(usize) }, .expected = "f" },
+        .{ .from = "d", .motion = .first, .expected = "a" },
+        .{ .from = "b", .motion = .last, .expected = "f" },
+    };
+    for (cases) |case| {
+        var selection = try testSelectionAt(case.from, 0);
+        defer selection.deinit(std.testing.allocator);
+
+        try selection.move(std.testing.allocator, &names, case.motion);
+
+        try std.testing.expectEqualStrings(case.expected, selection.name.?);
+    }
+}
+
+test "Selection.move: hidden selection still jumps to the ends" {
+    var selection = try testSelectionAt("web", 1);
+    defer selection.deinit(std.testing.allocator);
+
+    try selection.move(std.testing.allocator, &.{ "api", "worker", "db" }, .last);
+
+    try std.testing.expectEqualStrings("db", selection.name.?);
 }
 
 test "Selection.move: empty list keeps the selection" {

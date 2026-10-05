@@ -457,6 +457,32 @@ pub const Client = struct {
         _ = try self.runner.run(&.{ self.tmux_path, "bind-key", "-T", "prefix", key, "run-shell", command }, .{ .check = true, .discard = true });
     }
 
+    /// Caller owns the result: the root-table binding of `key` as list-keys
+    /// prints it, or null when the key is unbound. The whole table is listed
+    /// because `list-keys -T root <key>` prints nothing even for a bound key
+    /// (tmux 3.7). Lenient parse: list-keys output is not a format zask fixes,
+    /// so lines that do not read as a binding are skipped.
+    pub fn rootKeyBinding(self: Client, key: []const u8) !?[]const u8 {
+        const result = runner.captured(try self.runner.run(&.{ self.tmux_path, "list-keys", "-T", "root" }, .{ .check = true }));
+        defer self.gpa.free(result.stdout);
+        defer self.gpa.free(result.stderr);
+        var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.eql(u8, bindingKey(line) orelse continue, key)) return try self.gpa.dupe(u8, line);
+        }
+        return null;
+    }
+
+    /// Binds `key` in the root table, which applies to every session on the
+    /// server, to the tmux command `command`.
+    pub fn bindRootKey(self: Client, key: []const u8, command: []const []const u8) !void {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(self.gpa);
+        try argv.appendSlice(self.gpa, &.{ self.tmux_path, "bind-key", "-T", "root", key });
+        try argv.appendSlice(self.gpa, command);
+        _ = try self.runner.run(argv.items, .{ .check = true, .discard = true });
+    }
+
     pub fn chooseTree(self: Client, pane_id: []const u8) !void {
         _ = try self.runner.run(&.{ self.tmux_path, "choose-tree", "-Zw", "-t", pane_id }, .{ .check = true, .discard = true });
     }
@@ -764,6 +790,19 @@ pub const PaneInfo = struct {
     }
 };
 
+/// The key of a `bind-key [-r] -T <table> <key> ...` line from list-keys.
+fn bindingKey(line: []const u8) ?[]const u8 {
+    var fields = std.mem.tokenizeAny(u8, line, " \t");
+    if (!std.mem.eql(u8, fields.next() orelse return null, "bind-key")) return null;
+    while (fields.next()) |field| {
+        if (std.mem.eql(u8, field, "-T")) {
+            _ = fields.next() orelse return null;
+            return fields.next();
+        }
+    }
+    return null;
+}
+
 pub fn isShellCommand(command: []const u8) bool {
     return std.mem.eql(u8, command, "zsh") or std.mem.eql(u8, command, "bash") or std.mem.eql(u8, command, "sh") or command.len == 0;
 }
@@ -908,6 +947,42 @@ test "tmux.sendKeys: records command through runner" {
 
     const command = recorder.commands.items[0];
     try runner.expectCommandArgv(command, &.{ "tmux", "send-keys", "-t", "=demo:=api", "echo ok", "Enter" });
+}
+
+test "tmux.rootKeyBinding: finds the key in the root table listing" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    const table =
+        \\bind-key    -T root MouseDown1Pane select-pane -t = \\; send-keys -M
+        \\bind-key -r -T root C-v           send-keys -l x
+        \\bind-key    -T root M->           send-keys End
+        \\
+    ;
+    try recorder.enqueue(table, "", .{ .exited = 0 });
+    try recorder.enqueue(table, "", .{ .exited = 0 });
+    try recorder.enqueue(table, "", .{ .exited = 0 });
+    const client = testClient(&recorder);
+
+    const unbound = try client.rootKeyBinding("M-v");
+    const bound = try client.rootKeyBinding("C-v");
+    defer if (bound) |text| std.testing.allocator.free(text);
+    const symbol = try client.rootKeyBinding("M->");
+    defer if (symbol) |text| std.testing.allocator.free(text);
+
+    try std.testing.expectEqual(@as(?[]const u8, null), unbound);
+    try std.testing.expectEqualStrings("bind-key -r -T root C-v           send-keys -l x", bound.?);
+    try std.testing.expectEqualStrings("bind-key    -T root M->           send-keys End", symbol.?);
+    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "list-keys", "-T", "root" });
+}
+
+test "tmux.bindRootKey: binds the command in the root table" {
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    const client = testClient(&recorder);
+
+    try client.bindRootKey("M-<", &.{ "send-keys", "Home" });
+
+    try runner.expectCommandArgv(recorder.commands.items[0], &.{ "tmux", "bind-key", "-T", "root", "M-<", "send-keys", "Home" });
 }
 
 test "tmux.respawnPane: records wrapped shell command" {

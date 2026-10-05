@@ -61,10 +61,14 @@ pub fn show(gpa: std.mem.Allocator, io: std.Io, tmux: tmux_client.Client, reques
     // Registered before writing so a partly written file is removed too.
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     try paths.writeFileMode(io, path, lines, paths.private_file_permissions);
+    const keys_path = try std.fmt.allocPrint(gpa, "{s}.lesskey", .{path});
+    defer gpa.free(keys_path);
+    defer std.Io.Dir.cwd().deleteFile(io, keys_path) catch {};
+    try paths.writeFileMode(io, keys_path, emacs_keys, paths.private_file_permissions);
 
     const title = try std.fmt.allocPrint(gpa, " {s}: last {d} lines ", .{ request.label, max_lines });
     defer gpa.free(title);
-    const command = try pagerCommand(gpa, path);
+    const command = try pagerCommand(gpa, path, keys_path);
     defer gpa.free(command);
     tmux.displayPopup(client_name, title, command) catch |err| switch (err) {
         error.PopupUnavailable => return .popup_unavailable,
@@ -74,13 +78,32 @@ pub fn show(gpa: std.mem.Allocator, io: std.Io, tmux: tmux_client.Client, reques
     return .shown;
 }
 
+/// Emacs moves for the popup, in lesskey source form. less binds all but
+/// Ctrl+G this way already; listing them keeps them when the user's own
+/// lesskey rebinds them. Ctrl+G closes the popup, as it closes the window list.
+const emacs_keys =
+    \\#command
+    \\^N forw-line
+    \\^P back-line
+    \\^V forw-screen
+    \\\ev back-screen
+    \\\e< goto-line
+    \\\e> goto-end
+    \\^G quit
+    \\
+;
+
 /// Caller owns the returned shell command. Starts at the end of the log and
 /// cancels LESS options that would quit at the end of the text (-E / -F) and
-/// so close the popup before it is read.
-fn pagerCommand(gpa: std.mem.Allocator, path: []const u8) ![]const u8 {
+/// so close the popup before it is read. The keys in `keys_path` are added
+/// for this run only, never to the user's lesskey; a less older than 582
+/// lacks `--lesskey-src` and pages without them.
+fn pagerCommand(gpa: std.mem.Allocator, path: []const u8, keys_path: []const u8) ![]const u8 {
     const quoted = try shell.quote(gpa, path);
     defer gpa.free(quoted);
-    return std.fmt.allocPrint(gpa, "exec less -+E -+F +G -- {s}", .{quoted});
+    const keys = try shell.quote(gpa, keys_path);
+    defer gpa.free(keys);
+    return std.fmt.allocPrint(gpa, "if less --lesskey-src={s} -V >/dev/null 2>&1; then exec less --lesskey-src={s} -+E -+F +G -- {s}; fi; exec less -+E -+F +G -- {s}", .{ keys, keys, quoted, quoted });
 }
 
 // -----------------------------------------------------------------------------
@@ -143,7 +166,8 @@ test "log_popup.show: pages the captured lines on the client showing the pane" {
     const popup = setup.recorder.commands.items[2];
     try proc_runner.expectCommandArgvStartsWith(popup, &.{ "tmux", "display-popup", "-c", "/dev/pts/1", "-EE" });
     try proc_runner.expectCommandArgContains(popup, 10, "api: last 200 lines");
-    try proc_runner.expectCommandArgContains(popup, 11, "exec less -+E -+F +G -- ");
+    try proc_runner.expectCommandArgContains(popup, 11, "exec less --lesskey-src=");
+    try proc_runner.expectCommandArgContains(popup, 11, " -+E -+F +G -- ");
     try proc_runner.expectCommandArgContains(popup, 11, setup.scratch_dir);
     try std.testing.expectEqual(@as(usize, 0), try setup.scratchFiles());
     try proc_runner.expectNoRemainingResponses(&setup.recorder);
@@ -186,9 +210,9 @@ test "log_popup.show: reports why no popup was shown" {
     }
 }
 
-test "log_popup.pagerCommand: quotes the captured file path" {
-    const command = try pagerCommand(std.testing.allocator, "/tmp/zask dir/demo's.txt");
+test "log_popup.pagerCommand: quotes the captured file and key paths" {
+    const command = try pagerCommand(std.testing.allocator, "/tmp/zask dir/demo's.txt", "/tmp/zask dir/demo's.txt.lesskey");
     defer std.testing.allocator.free(command);
 
-    try std.testing.expectEqualStrings("exec less -+E -+F +G -- '/tmp/zask dir/demo'\\''s.txt'", command);
+    try std.testing.expectEqualStrings("if less --lesskey-src='/tmp/zask dir/demo'\\''s.txt.lesskey' -V >/dev/null 2>&1; then exec less --lesskey-src='/tmp/zask dir/demo'\\''s.txt.lesskey' -+E -+F +G -- '/tmp/zask dir/demo'\\''s.txt'; fi; exec less -+E -+F +G -- '/tmp/zask dir/demo'\\''s.txt'", command);
 }

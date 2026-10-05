@@ -87,6 +87,11 @@ zask close
 Use `zask logs api --path` to find the log file for your editor.
 Docker Compose output is not saved.
 
+The monitor, the window list (Ctrl+q w), and the log popup (`l` in the
+monitor) share Emacs keys: Ctrl+N / Ctrl+P move, Ctrl+V / Alt+V page,
+Alt+< / Alt+> jump to either end, Enter picks, and Ctrl+G closes the list or
+popup. The window list keys are bound only for zask sessions.
+
 For scripts, `zask status --json` reports service state as JSON.
 `zask wait api && npm run e2e` waits for the API to be ready before running tests.
 Run `zask help` for the full command list.
@@ -153,7 +158,7 @@ completion and validation.
 ## Requirements
 
 - tmux (3.3 or newer for log popups)
-- `less` for log popups
+- `less` for log popups (582 or newer for Ctrl+G to close them)
 - Zig 0.16.0 to build from source
 - Docker with Docker Compose, when the config has a `docker` section
 
