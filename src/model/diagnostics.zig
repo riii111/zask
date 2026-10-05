@@ -42,18 +42,11 @@ pub const Diagnostics = struct {
 // Tests
 // -----------------------------------------------------------------------------
 
-test "diagnostics.isEmpty: reports empty before first add" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var diags = Diagnostics.init(arena.allocator());
-
-    try std.testing.expect(diags.isEmpty());
-}
-
 test "diagnostics.add: accumulates path and message" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var diags = Diagnostics.init(arena.allocator());
+    try std.testing.expect(diags.isEmpty());
 
     try diags.add("project.name", "required");
     try diags.add("groups[0].services[0].name", "must be an identifier");

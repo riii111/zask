@@ -242,10 +242,10 @@ test "add.run: reports the added entry and edited config" {
 test "add.run: leaves the config on refusal" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const cases = [_]struct { args: []const []const u8, err: anyerror, first_line: []const u8 }{
+    const cases = [_]struct { args: []const []const u8, err: anyerror, first_line: []const u8, lists_groups: bool = false }{
         .{ .args = &.{ "api", "x", "--group", "frontend" }, .err = error.ServiceAlreadyExists, .first_line = "Error: service 'api' already exists in group 'backend'" },
-        .{ .args = &.{ "web", "x" }, .err = error.GroupRequired, .first_line = "Error: the config has more than one group; choose one with --group <group>" },
-        .{ .args = &.{ "web", "x", "--group", "tools" }, .err = error.GroupNotFound, .first_line = "Error: group 'tools' not found" },
+        .{ .args = &.{ "web", "x" }, .err = error.GroupRequired, .first_line = "Error: the config has more than one group; choose one with --group <group>", .lists_groups = true },
+        .{ .args = &.{ "web", "x", "--group", "tools" }, .err = error.GroupNotFound, .first_line = "Error: group 'tools' not found", .lists_groups = true },
         .{ .args = &.{ "web!", "x", "--group", "frontend" }, .err = error.ServiceNotAdded, .first_line = "Error: adding service 'web!' would make the config invalid" },
     };
 
@@ -255,24 +255,10 @@ test "add.run: leaves the config on refusal" {
 
         try std.testing.expectEqual(@as(?anyerror, case.err), run_result.err);
         try std.testing.expect(std.mem.startsWith(u8, run_result.output, case.first_line));
+        try std.testing.expectEqual(case.lists_groups, std.mem.indexOf(u8, run_result.output, "\nGroups: backend frontend\n") != null);
         try std.testing.expect(std.mem.indexOf(u8, run_result.output, "The config was not changed.\n") != null);
         try std.testing.expectEqualStrings(test_config, run_result.config);
     }
-}
-
-test "add.run: lists groups when the group is missing" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    const run_result = try testRunAdd(arena.allocator(), "zask.json", test_config, &.{ "web", "x", "--group", "tools" });
-
-    try std.testing.expectEqualStrings(
-        \\Error: group 'tools' not found
-        \\Groups: backend frontend
-        \\Config: <config>
-        \\The config was not changed.
-        \\
-    , run_result.output);
 }
 
 test "add.run: adds to a jsonc config and keeps its comments" {

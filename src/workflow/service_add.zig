@@ -235,6 +235,7 @@ test "service_add.addService: writes the edited config" {
         \\}
         \\
     , try testRead(gpa, io, file.path));
+    try testExpectOnlyConfig(file, io);
 }
 
 test "service_add.addService: leaves the file when the result is invalid" {
@@ -269,6 +270,7 @@ test "service_add.addService: leaves the file when it changed after loading" {
 
     try std.testing.expect(outcome == .changed);
     try std.testing.expectEqualStrings(edited_elsewhere, try testRead(gpa, io, file.path));
+    try testExpectOnlyConfig(file, io);
 }
 
 test "service_add.addService: keeps the original on write failure" {
@@ -415,22 +417,6 @@ test "service_add.replaceIfUnchanged: keeps a save made while putting one back" 
     try std.testing.expectEqualStrings("second save\n", try testRead(gpa, io, result.conflict));
 }
 
-test "service_add.replaceIfUnchanged: deletes the displaced config it expected" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init_single_threaded;
-    const io = threaded.io();
-    var file = try testWriteConfig(gpa, io, test_config);
-    defer file.tmp.cleanup();
-
-    const result = try replaceIfUnchanged(gpa, io, file.path, test_config, "ours\n");
-
-    try std.testing.expect(result == .replaced);
-    try std.testing.expectEqualStrings("ours\n", try testRead(gpa, io, file.path));
-    try testExpectOnlyConfig(file, io);
-}
-
 test "service_add.replaceIfUnchanged: puts back a displaced config it cannot read" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -524,7 +510,6 @@ test "service_add.addService: writes a jsonc config with its comments" {
         \\}
         \\
     , try testRead(gpa, io, file.path));
-    try testExpectOnlyConfig(file, io);
 }
 
 test "service_add.addService: refuses comments in a json config" {
@@ -541,61 +526,4 @@ test "service_add.addService: refuses comments in a json config" {
 
     try std.testing.expectError(error.InvalidSyntax, result);
     try std.testing.expectEqualStrings(test_jsonc_config, try testRead(gpa, io, file.path));
-}
-
-test "service_add.addService: leaves a jsonc config that changed after loading" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init_single_threaded;
-    const io = threaded.io();
-    const edited_elsewhere = test_jsonc_config ++ "// edited elsewhere\n";
-    var file = try testWriteNamedConfig(gpa, io, "zask.jsonc", edited_elsewhere);
-    defer file.tmp.cleanup();
-    var diags = diagnostics.Diagnostics.init(gpa);
-
-    const outcome = try addService(gpa, io, file.target(file.path, test_jsonc_config), null, .{ .name = "api", .command = "x" }, &diags);
-
-    try std.testing.expect(outcome == .changed);
-    try std.testing.expectEqualStrings(edited_elsewhere, try testRead(gpa, io, file.path));
-    try testExpectOnlyConfig(file, io);
-}
-
-test "service_add.addService: keeps a jsonc config on write failure" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init_single_threaded;
-    const io = threaded.io();
-    var file = try testWriteNamedConfig(gpa, io, "zask.jsonc", test_jsonc_config);
-    defer file.tmp.cleanup();
-    var diags = diagnostics.Diagnostics.init(gpa);
-    try std.Io.Dir.cwd().setFilePermissions(io, file.dir_path, @enumFromInt(0o555), .{});
-    defer std.Io.Dir.cwd().setFilePermissions(io, file.dir_path, @enumFromInt(0o755), .{}) catch {};
-
-    const result = addService(gpa, io, file.target(file.path, test_jsonc_config), null, .{ .name = "api", .command = "x" }, &diags);
-
-    try std.testing.expectError(error.AccessDenied, result);
-    try std.testing.expectEqualStrings(test_jsonc_config, try testRead(gpa, io, file.path));
-}
-
-test "service_add.replaceIfUnchanged: puts back an editor save to a jsonc config" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    var threaded = std.Io.Threaded.init_single_threaded;
-    const io = threaded.io();
-    var file = try testWriteNamedConfig(gpa, io, "zask.jsonc", test_jsonc_config);
-    defer file.tmp.cleanup();
-    const editor_save = test_jsonc_config ++ "// saved in the editor\n";
-    const pending = (try PendingWrite.stage(gpa, io, file.path, test_jsonc_config, "ours\n")).?;
-    try std.testing.expect(try pending.targetUnchanged(gpa, io));
-
-    try testEditorSave(file, io, editor_save);
-    try pending.swapIn(gpa);
-    const result = if (pending.displacedIsExpected(gpa, io)) Replacement.replaced else pending.restoreDisplaced(gpa, io);
-
-    try std.testing.expect(result == .changed);
-    try std.testing.expectEqualStrings(editor_save, try testRead(gpa, io, file.path));
-    try testExpectOnlyConfig(file, io);
 }

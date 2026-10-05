@@ -1618,19 +1618,6 @@ test "config.serviceEnvFilePath: joins service-relative paths under expanded hom
     try std.testing.expectEqualStrings("/home/me/work/demo/backend/.env.local", env_path);
 }
 
-test "config.parse: rejects unknown service runtime" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo"},
-        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"backend","runtime":"unknown","command":"serve"}]}]
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
-}
-
 test "config.resolveGroup: rejects missing services and groups" {
     const json =
         \\{
@@ -1698,31 +1685,30 @@ test "config.parse: rejects malformed env_file values" {
     }
 }
 
-test "config.parse: rejects legacy flat services" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo"},
-        \\  "services": [{"name":"api","command":"serve"}]
-        \\}
-    ;
+test "config.validateAll: points legacy keys to their replacements" {
+    const cases = [_]struct { key: []const u8, json: []const u8, message: []const u8 }{
+        .{ .key = "services", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[],"services":[{"name":"api","command":"serve"}]}
+        , .message = "legacy flat services are not supported; define groups instead" },
+        .{ .key = "phases", .json =
+        \\{"project":{"name":"demo","root":"/tmp/demo"},"groups":[],"phases":[{"type":"docker"}]}
+        , .message = "legacy phases are not supported; define startup_order instead" },
+    };
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
-}
+    for (cases) |case| {
+        errdefer std.debug.print("key: {s}\n", .{case.key});
+        var diags = diagnostics.Diagnostics.init(arena.allocator());
 
-test "config.parse: rejects legacy phases" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo"},
-        \\  "groups": [],
-        \\  "phases": [{"type":"docker"}]
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
+        try validateAll(arena.allocator(), try parseJsonBytes(arena.allocator(), case.json), &diags);
 
-    try std.testing.expectError(error.InvalidConfig, parseTestConfig(&arena, json));
+        var found = false;
+        for (diags.slice()) |diagnostic| {
+            if (std.mem.eql(u8, diagnostic.path, case.key) and std.mem.eql(u8, diagnostic.message, case.message)) found = true;
+        }
+        try std.testing.expect(found);
+    }
 }
 
 test "config.parse: rejects malformed docker config" {

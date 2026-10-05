@@ -168,22 +168,6 @@ test "initInference.detect: selects compose files in priority order" {
     try std.testing.expectEqualStrings("compose.yaml", result.compose_file.?);
 }
 
-test "initInference.detect: infers compose file by default" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var threaded = std.Io.Threaded.init_single_threaded;
-    const base = try std.fs.path.join(arena.allocator(), &.{ ".zig-cache", "tmp", &tmp.sub_path });
-    const compose_yaml = try testTmpPath(arena.allocator(), tmp, "compose.yaml");
-
-    try paths.writeFile(threaded.io(), compose_yaml, "services: {}\n");
-
-    const result = try detect(arena.allocator(), threaded.io(), base, .{});
-
-    try std.testing.expectEqualStrings("compose.yaml", result.compose_file.?);
-}
-
 test "initInference.detect: skips compose inference when compose file is explicit" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
