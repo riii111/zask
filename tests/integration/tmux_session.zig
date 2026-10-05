@@ -832,6 +832,103 @@ test "runtime.watch: restarts running service, skips stopping one, and ends with
     try waitForProcessExit(io, watch_pid);
 }
 
+test "runtime.watch: restarts failed services up to the limit and leaves stopped ones" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const session = try std.fmt.allocPrint(gpa, "zask-test-{d}-recover", .{std.c.getpid()});
+    const client = tmuxClient(gpa, io, session);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    // api always fails, job exits cleanly, and worker fails once `crash`
+    // appears. Each run appends to a file so the test counts starts.
+    const config_json = try std.fmt.allocPrint(gpa,
+        \\{{
+        \\  "project": {{"name":"{s}","root":"{s}"}},
+        \\  "groups": [{{"name":"backend","services":[
+        \\    {{"name":"api","command":"sh -c 'echo run >> api.runs; sleep 0.3; exit 3'","restart_on_failure":{{"max_retries":2,"delay_ms":0}}}},
+        \\    {{"name":"job","command":"sh -c 'echo run >> job.runs; exit 0'","restart_on_failure":{{"delay_ms":0}}}},
+        \\    {{"name":"worker","command":"sh -c 'echo run >> worker.runs; while [ ! -e crash ]; do sleep 0.1; done; rm crash; exit 1'","restart_on_failure":{{"delay_ms":0}}}}
+        \\  ]}}]
+        \\}}
+    , .{ session, project_root });
+    try tmp.dir.writeFile(io, .{ .sub_path = "zask.json", .data = config_json });
+    const config_path = try std.fs.path.join(gpa, &.{ project_root, "zask.json" });
+    const cfg = try zask.config.Config.parse(gpa, config_json, "/tmp");
+    var environ = std.process.Environ.Map.init(gpa);
+    defer environ.deinit();
+    try environ.put("HOME", project_root);
+    const run_impl: zask.runner.Runner = .{ .gpa = gpa, .io = io };
+    const runtime = zask.runtime.Runtime{
+        .gpa = gpa,
+        .io = io,
+        .environ = &environ,
+        .cfg = cfg,
+        .config_path = config_path,
+        .zask_path = build_options.zask_path,
+        .command_hint = .{ .config = config_path },
+        .runner_impl = run_impl,
+        .tmux_impl = client,
+        .docker_impl = .{ .gpa = gpa, .runner = run_impl, .dir = project_root, .file = "compose.yaml" },
+        .stop_marks = try zask.stop_marks.StopMarks.forSession(gpa, io, session),
+    };
+    defer std.Io.Dir.cwd().deleteTree(io, runtime.stop_marks.?.dir) catch {};
+    var buffer: [4096]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    const watch_command = try std.fmt.allocPrint(gpa, "HOME={s} {s}", .{ project_root, try zask.zask_command.invokeWatch(gpa, build_options.zask_path, config_path) });
+    const window = zask.session_layout.watch_window;
+
+    client.killSession() catch {};
+    try client.newSession("dashboard", project_root, "sleep 60");
+    defer client.killSession() catch {};
+    var previous: []const u8 = "dashboard";
+    for ([_][]const u8{ "api", "job", "worker" }) |name| {
+        try client.newWindowAfter(previous, name, project_root, try zask.zask_command.waitingPlaceholder(gpa, name));
+        try client.setWindowOption(name, "remain-on-exit", "on");
+        try waitForPaneState(client, gpa, io, name, .idle);
+        previous = name;
+    }
+    try client.newWindowAfter(previous, window, project_root, watch_command);
+    try waitForWatchPaneText(gpa, io, session, window, "Restarting worker on failure: up to 3 times, 0s apart");
+
+    try runtime.start("api", &writer);
+    try runtime.start("job", &writer);
+    try runtime.start("worker", &writer);
+
+    try waitForWatchPaneText(gpa, io, session, window, "api exited with status 3 after 2 restarts in a row; not restarting.");
+    try waitForPaneState(client, gpa, io, "api", .dead);
+    // The login shell may scroll the notice off screen, so read the history.
+    const api_history = try run(gpa, io, &.{ build_options.tmux_path, "capture-pane", "-p", "-J", "-S", "-", "-t", try std.fmt.allocPrint(gpa, "{s}:api", .{session}) });
+    try std.testing.expect(std.mem.indexOf(u8, api_history.stdout, "zask: restarting api after it exited with status 3 (2/2)") != null);
+    try waitForWatchPaneText(gpa, io, session, window, "job exited with status 0; not restarting");
+    try waitForPaneState(client, gpa, io, "worker", .busy);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "crash", .data = "" });
+
+    try waitForWatchPaneText(gpa, io, session, window, "worker exited with status 1; restarting in 0s (1/3)");
+    try waitForPaneState(client, gpa, io, "worker", .busy);
+
+    try runtime.stop("worker", &writer);
+    try waitForPaneState(client, gpa, io, "worker", .idle);
+    try std.Io.sleep(io, .fromMilliseconds(1500), .awake);
+    try waitForPaneState(client, gpa, io, "worker", .idle);
+
+    try std.testing.expectEqualStrings("run\nrun\nrun\n", try tmp.dir.readFileAlloc(io, "api.runs", gpa, .limited(4096)));
+    try std.testing.expectEqualStrings("run\n", try tmp.dir.readFileAlloc(io, "job.runs", gpa, .limited(4096)));
+    try std.testing.expectEqualStrings("run\nrun\n", try tmp.dir.readFileAlloc(io, "worker.runs", gpa, .limited(4096)));
+
+    const watch_pid = try panePid(gpa, io, session, window);
+    try runtime.close(&writer);
+
+    try std.testing.expect(!client.hasSession());
+    try waitForProcessExit(io, watch_pid);
+}
+
 fn tmuxClient(gpa: std.mem.Allocator, io: std.Io, session: []const u8) zask.tmux.Client {
     return .{
         .gpa = gpa,

@@ -179,6 +179,13 @@ pub const Lifecycle = struct {
     /// while this restart waits for the old process to exit.
     pub fn restartServiceWithNotice(self: Lifecycle, service: []const u8, notice: []const u8, writer: *std.Io.Writer) !void {
         try self.ensureServiceStopped(service, writer);
+        try self.startServiceWithNotice(service, notice, writer);
+    }
+
+    /// Start for an automatic recovery, with `notice` shown in the service
+    /// pane. It never clears a recorded stop, so it leaves the service stopped
+    /// when the user stops it first, and does nothing if it is running again.
+    pub fn startServiceWithNotice(self: Lifecycle, service: []const u8, notice: []const u8, writer: *std.Io.Writer) !void {
         var noticed = self;
         noticed.launch_notice = notice;
         noticed.respect_stop_mark = true;
@@ -1205,6 +1212,13 @@ test "lifecycle.restartServiceWithNotice: prints notice before service command" 
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 
+const test_api_config =
+    \\{
+    \\  "project": {"name":"demo","root":"/tmp/demo"},
+    \\  "groups": [{"name":"backend","services":[{"name":"api","command":"serve"}]}]
+    \\}
+;
+
 fn testStopMarks(tmp: *std.testing.TmpDir, gpa: std.mem.Allocator) !stop_marks_mod.StopMarks {
     const base = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
     return stop_marks_mod.StopMarks.init(gpa, std.testing.io, base, "demo");
@@ -1271,6 +1285,72 @@ test "lifecycle.restartServiceWithNotice: leaves service stopped when a stop is 
 
     try std.testing.expect(proc_runner.findCommandContaining(&recorder, "respawn-pane") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api was stopped; not starting it") != null);
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "lifecycle.startServiceWithNotice: respawns an exited service with the notice" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("1|1|123|serve|1700000000\n", "", .{ .exited = 0 });
+    try recorder.enqueue("", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = std.testing.io, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), test_api_config);
+    var lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    lifecycle.stop_marks = try testStopMarks(&tmp, arena.allocator());
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startServiceWithNotice("api", "zask: restarting api after it exited with status 1 (1/3)", &writer);
+
+    const respawn = proc_runner.findCommandContaining(&recorder, "respawn-pane") orelse return error.CommandNotFound;
+    try proc_runner.expectCommandArgContains(respawn, 9, "printf '%s\\n' 'zask: restarting api after it exited with status 1 (1/3)'\nserve\n");
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "C-c") == null);
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "lifecycle.startServiceWithNotice: leaves a running service alone" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("0||123|serve|1700000000\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), test_api_config);
+    const lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startServiceWithNotice("api", "zask: restarting api", &writer);
+
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "respawn-pane") == null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "api already running") != null);
+    try proc_runner.expectNoRemainingResponses(&recorder);
+}
+
+test "lifecycle.startServiceWithNotice: keeps a recorded stop" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var recorder = proc_runner.Recorder.init(arena.allocator());
+    defer recorder.deinit();
+    try recorder.enqueue("1|1|123|serve|1700000000\n", "", .{ .exited = 0 });
+    const run = proc_runner.Runner{ .gpa = arena.allocator(), .io = std.testing.io, .recorder = &recorder };
+    const cfg = try parseTestConfig(arena.allocator(), test_api_config);
+    var lifecycle = testLifecycle(arena.allocator(), run, cfg);
+    lifecycle.stop_marks = try testStopMarks(&tmp, arena.allocator());
+    try lifecycle.stop_marks.?.mark(arena.allocator(), "api");
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try lifecycle.startServiceWithNotice("api", "zask: restarting api", &writer);
+
+    try std.testing.expect(proc_runner.findCommandContaining(&recorder, "respawn-pane") == null);
+    try std.testing.expectEqual(observations.StopMarkObservation.stopped, lifecycle.observeStopMark("api"));
     try proc_runner.expectNoRemainingResponses(&recorder);
 }
 

@@ -237,6 +237,23 @@ stays stopped once it exits. If a service keeps changing its own watched files
 right after each restart, restarts pause until the changes stop; add those
 files to `exclude`. The service name `zask-watch` is reserved for this window.
 
+`restart_on_failure` restarts a service that exits with a non-zero status or is
+killed by a signal. Without it, zask leaves exited services alone:
+
+```json
+{"name": "worker", "command": "bin/worker",
+ "restart_on_failure": {"max_retries": 3, "delay_ms": 1000}}
+```
+
+Both keys are optional; `{}` uses the values above. The same `zask-watch`
+window waits `delay_ms` after each failure, prints the exit status and attempt,
+and restarts the service; the service window prints the reason before the
+command starts again. After `max_retries` restarts in a row, zask leaves the
+service stopped and says so. A run that lasts 30 seconds, or a start by `zask
+start`, `zask restart`, or a file change, starts the count over. A service that
+exits with status 0 or is stopped with `zask stop`, Ctrl-C in its window, or
+`zask close` is not restarted.
+
 [`schema/zask.schema.json`](schema/zask.schema.json) describes the config for
 editors that support JSON Schema. Point a top-level `"$schema"` key at it to get
 completion, descriptions, and diagnostics for keys, types, and allowed values,

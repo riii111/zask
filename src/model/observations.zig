@@ -63,6 +63,22 @@ pub const PaneObservation = struct {
         return self.state == .busy;
     }
 
+    /// How the pane process ended. Meaningful only for `dead` panes.
+    pub fn exit(self: PaneObservation) PaneExit {
+        const status = std.fmt.parseInt(u32, self.exit_code, 10) catch return .killed;
+        return switch (status) {
+            0 => .clean,
+            interrupted_status => .interrupted,
+            else => .{ .failed = status },
+        };
+    }
+
+    /// The pane process id; tmux keeps reporting it after the process exits,
+    /// so it tells one run of a pane from the next. Null when unparseable.
+    pub fn processId(self: PaneObservation) ?i64 {
+        return std.fmt.parseInt(i64, self.pid, 10) catch null;
+    }
+
     pub fn uptime(self: PaneObservation, now: i64) Uptime {
         return switch (self.state) {
             .idle, .dead, .window_missing => .not_running,
@@ -76,6 +92,22 @@ pub const PaneObservation = struct {
             },
         };
     }
+};
+
+/// 128 + SIGINT. A service started with `exec` replaces the wrapper that
+/// turns Ctrl-C into an idle shell, so its pane dies with this status instead.
+const interrupted_status = 130;
+
+pub const PaneExit = union(enum) {
+    /// Exit status 0.
+    clean,
+    /// Exit status 130: Ctrl-C.
+    interrupted,
+    /// Non-zero exit status. The service wrapper exits with 128+N when the
+    /// service dies from signal N.
+    failed: u32,
+    /// No exit status: the pane process itself died from a signal.
+    killed,
 };
 
 pub const Uptime = union(enum) {
@@ -269,6 +301,33 @@ test "observations.serviceHealth: maps pane state and probes to health" {
     for (cases) |case| {
         try std.testing.expectEqual(case.expected, serviceHealth(case.pane, case.listen, case.http));
     }
+}
+
+test "observations.pane.exit: maps dead status to exit kind" {
+    const cases = [_]struct {
+        status: []const u8,
+        want: PaneExit,
+    }{
+        .{ .status = "0", .want = .clean },
+        .{ .status = "1", .want = .{ .failed = 1 } },
+        .{ .status = "130", .want = .interrupted },
+        .{ .status = "137", .want = .{ .failed = 137 } },
+        .{ .status = "", .want = .killed },
+        .{ .status = "x", .want = .killed },
+    };
+
+    for (cases) |case| {
+        const pane: PaneObservation = .{ .state = .dead, .exit_code = case.status };
+        try std.testing.expectEqual(case.want, pane.exit());
+    }
+}
+
+test "observations.pane.processId: parses pid or reports null" {
+    const parsed: PaneObservation = .{ .state = .dead, .pid = "4242" };
+    const missing: PaneObservation = .{ .state = .dead, .pid = "" };
+
+    try std.testing.expectEqual(@as(?i64, 4242), parsed.processId());
+    try std.testing.expectEqual(@as(?i64, null), missing.processId());
 }
 
 test "observations.pane.uptime: maps state and start marker to uptime" {
