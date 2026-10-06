@@ -1268,7 +1268,10 @@ test "phases.runServicePhase: reports unmatched port without service hints" {
 test "phases.startupFailureHint: maps common startup failures" {
     try std.testing.expectEqualStrings(
         "required environment may be missing; check env_file or the service command environment.",
-        startupFailureHint("[ERROR] missing required environment variable API_TOKEN").?,
+        startupFailureHint(
+            \\[ERROR] missing required environment variable API_TOKEN
+            \\    at main
+        ).?,
     );
     try std.testing.expectEqualStrings(
         "a dependency refused the connection; check whether the upstream service is running.",
@@ -1288,16 +1291,6 @@ test "phases.startupFailureHint: maps common startup failures" {
     );
     try std.testing.expect(startupFailureHint("server exited") == null);
     try std.testing.expect(startupFailureHint("name is required") == null);
-}
-
-test "phases.startupFailureHint: checks previous tail lines" {
-    try std.testing.expectEqualStrings(
-        "required environment may be missing; check env_file or the service command environment.",
-        startupFailureHint(
-            \\[ERROR] missing required environment variable API_TOKEN
-            \\    at main
-        ).?,
-    );
 }
 
 test "phases.phaseCwd: rejects path traversal" {
