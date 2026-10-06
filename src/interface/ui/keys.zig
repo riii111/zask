@@ -128,8 +128,8 @@ test "keys.Decoder: decodes single keys" {
     for (cases) |case| try testExpectKeys(case.input, &.{case.key});
 }
 
-test "keys.Decoder: splits repeated keys from one read" {
-    try testExpectKeys("jj\x1b[Ak", &.{ .{ .char = 'j' }, .{ .char = 'j' }, .up, .{ .char = 'k' } });
+test "keys.Decoder: splits mixed keys from one read" {
+    try testExpectKeys("jj\x1b[A\x0e\x0e\x1bv\x16\x1b>q", &.{ .{ .char = 'j' }, .{ .char = 'j' }, .up, .{ .ctrl = 'n' }, .{ .ctrl = 'n' }, .{ .alt = 'v' }, .{ .ctrl = 'v' }, .{ .alt = '>' }, .{ .char = 'q' } });
 }
 
 test "keys.Decoder: consumes unknown sequences without leaking parameter bytes" {
@@ -151,10 +151,6 @@ test "keys.Decoder: joins an arrow sequence split across reads" {
         try std.testing.expectEqual(@as(?Key, .down), decoder.next());
         try std.testing.expect(!decoder.pending());
     }
-}
-
-test "keys.Decoder: splits repeated Emacs keys from one read" {
-    try testExpectKeys("\x0e\x0e\x1bv\x16\x1b>q", &.{ .{ .ctrl = 'n' }, .{ .ctrl = 'n' }, .{ .alt = 'v' }, .{ .ctrl = 'v' }, .{ .alt = '>' }, .{ .char = 'q' } });
 }
 
 test "keys.Decoder: joins an Alt key split across reads" {

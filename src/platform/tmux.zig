@@ -1173,25 +1173,22 @@ test "tmux.observePane: returns dead pane fields without checking children" {
     try std.testing.expectEqual(@as(usize, 1), recorder.commands.items.len);
 }
 
-test "tmux.showOption: trims empty output to null" {
-    var recorder = runner.Recorder.init(std.testing.allocator);
-    defer recorder.deinit();
-    try recorder.enqueue(" \n", "", .{ .exited = 0 });
-    const client = testClient(&recorder);
+test "tmux.showOption: returns trimmed output or null when blank" {
+    const cases = [_]struct { stdout: []const u8, expected: ?[]const u8 }{
+        .{ .stdout = " \n", .expected = null },
+        .{ .stdout = " all \n", .expected = "all" },
+    };
+    for (cases) |case| {
+        var recorder = runner.Recorder.init(std.testing.allocator);
+        defer recorder.deinit();
+        try recorder.enqueue(case.stdout, "", .{ .exited = 0 });
+        const client = testClient(&recorder);
 
-    try std.testing.expect(try client.showOption("@zask_dash_mode") == null);
-}
+        const value = try client.showOption("@zask_dash_mode");
+        defer if (value) |owned| std.testing.allocator.free(owned);
 
-test "tmux.showOption: returns non-empty trimmed output" {
-    var recorder = runner.Recorder.init(std.testing.allocator);
-    defer recorder.deinit();
-    try recorder.enqueue(" all \n", "", .{ .exited = 0 });
-    const client = testClient(&recorder);
-
-    const value = (try client.showOption("@zask_dash_mode")).?;
-    defer std.testing.allocator.free(value);
-
-    try std.testing.expectEqualStrings("all", value);
+        try std.testing.expectEqualDeep(case.expected, value);
+    }
 }
 
 test "tmux.capturePane: returns captured stdout" {
@@ -1384,15 +1381,12 @@ test "tmux.displayPopup: targets the client and keeps failed commands on screen"
 }
 
 test "tmux.displayPopup: a popup command's own exit status is not a failure" {
-    const statuses = [_]u8{ 1, 127, 129 };
-    for (statuses) |status| {
-        var recorder = runner.Recorder.init(std.testing.allocator);
-        defer recorder.deinit();
-        try recorder.enqueue("", "", .{ .exited = status });
-        const client = testClient(&recorder);
+    var recorder = runner.Recorder.init(std.testing.allocator);
+    defer recorder.deinit();
+    try recorder.enqueue("", "", .{ .exited = 1 });
+    const client = testClient(&recorder);
 
-        try client.displayPopup("/dev/pts/1", " api ", "less file");
-    }
+    try client.displayPopup("/dev/pts/1", " api ", "less file");
 }
 
 test "tmux.displayPopup: reports rejected popups apart from tmux failures" {

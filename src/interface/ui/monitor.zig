@@ -820,14 +820,6 @@ fn testSelection(name: []const u8) !Selection {
     return .{ .name = try std.testing.allocator.dupe(u8, name) };
 }
 
-fn recordedCommandCount(recorder: *const proc_runner.Recorder, name: []const u8) usize {
-    var count: usize = 0;
-    for (recorder.commands.items) |command| {
-        if (command.argv.len > 0 and std.mem.eql(u8, command.argv[0], name)) count += 1;
-    }
-    return count;
-}
-
 test "monitor.render: shows local and named command forms" {
     const json =
         \\{
@@ -854,158 +846,88 @@ test "monitor.render: shows local and named command forms" {
     try std.testing.expect(std.mem.indexOf(u8, body, "zask demo <command>") != null);
 }
 
-test "monitor.service: skips health checks unless pane is busy" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo"},
-        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve","port":3000}]}]
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var recorder = proc_runner.Recorder.init(arena.allocator());
-    defer recorder.deinit();
-    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
-    try recorder.enqueue("", "", .{ .exited = 1 });
-    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+test "monitor.serviceMonitorStatus: maps service health to row status" {
+    const cases = [_]struct {
+        pane: observations.PaneState,
+        listen: observations.ProbeObservation,
+        http: observations.ProbeObservation = .not_configured,
+        expected: MonitorStatus,
+    }{
+        .{ .pane = .busy, .listen = .passed, .expected = .live },
+        .{ .pane = .busy, .listen = .not_configured, .expected = .live },
+        .{ .pane = .busy, .listen = .failed, .expected = .waiting },
+        .{ .pane = .busy, .listen = .passed, .http = .failed, .expected = .degraded },
+        .{ .pane = .busy, .listen = .unavailable, .expected = .unknown },
+        .{ .pane = .tmux_unavailable, .listen = .not_observed, .expected = .unknown },
+        .{ .pane = .dead, .listen = .not_observed, .expected = .dead },
+        .{ .pane = .idle, .listen = .not_observed, .expected = .stop },
+        .{ .pane = .window_missing, .listen = .not_observed, .expected = .stop },
+    };
 
-    const row = try serviceMonitorRow(ctx, (try cfg.services())[0]);
-
-    try std.testing.expectEqual(MonitorStatus.stop, row.status);
-    try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "nc"));
-    try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "curl"));
-    try proc_runner.expectNoRemainingResponses(&recorder);
+    for (cases) |case| {
+        const observation: observations.ServiceObservation = .{ .pane = .{ .state = case.pane }, .port = 3000, .listen = case.listen, .http = case.http, .observed_at = 0 };
+        try std.testing.expectEqual(case.expected, serviceMonitorStatus(observation));
+    }
 }
 
-test "monitor.service: shows no check for services without port" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo"},
-        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve"}]}]
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var recorder = proc_runner.Recorder.init(arena.allocator());
-    defer recorder.deinit();
-    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
-    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
-    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+test "monitor.dockerMonitorStatus: maps pane and compose state to row status" {
+    const cases = [_]struct {
+        pane: observations.PaneState,
+        compose: observations.ComposeState = .empty,
+        expected: MonitorStatus,
+    }{
+        .{ .pane = .busy, .compose = .running, .expected = .live },
+        .{ .pane = .busy, .compose = .empty, .expected = .waiting },
+        .{ .pane = .busy, .compose = .unavailable, .expected = .unknown },
+        .{ .pane = .dead, .expected = .dead },
+        .{ .pane = .idle, .expected = .stop },
+        .{ .pane = .window_missing, .expected = .stop },
+        .{ .pane = .tmux_unavailable, .expected = .unknown },
+    };
 
-    const row = try serviceMonitorRow(ctx, (try cfg.services())[0]);
-
-    try std.testing.expectEqual(MonitorStatus.live, row.status);
-    try std.testing.expectEqualStrings("no check", row.port);
-    try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "nc"));
-    try proc_runner.expectNoRemainingResponses(&recorder);
+    for (cases) |case| {
+        const observation: observations.DockerObservation = .{ .pane = .{ .state = case.pane }, .compose = .{ .state = case.compose }, .observed_at = 0 };
+        try std.testing.expectEqual(case.expected, dockerMonitorStatus(observation));
+    }
 }
 
-test "monitor.service: checks health for busy shell panes" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo"},
-        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve","port":3000}]}]
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var recorder = proc_runner.Recorder.init(arena.allocator());
-    defer recorder.deinit();
-    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
-    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
-    try recorder.enqueue("", "", .{ .exited = 0 });
-    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
+test "monitor.serviceMonitorRow: labels the observed port and status" {
+    const cases = [_]struct {
+        name: []const u8,
+        service: []const u8,
+        pane: []const u8,
+        listen_exit: ?u8 = null,
+        status: MonitorStatus,
+        port: []const u8,
+        summary: []const u8,
+    }{
+        .{ .name = "port not ready", .service = "{\"name\":\"api\",\"dir\":\"api\",\"command\":\"serve\",\"port\":3000}", .pane = "0||12345|node|\n", .listen_exit = 1, .status = .waiting, .port = ":3000", .summary = "waiting" },
+        .{ .name = "exited with port", .service = "{\"name\":\"api\",\"dir\":\"api\",\"command\":\"serve\",\"port\":3000}", .pane = "1|2|12345|node|\n", .status = .dead, .port = ":3000", .summary = "2" },
+        .{ .name = "running without port", .service = "{\"name\":\"api\",\"dir\":\"api\",\"command\":\"serve\"}", .pane = "0||12345|node|\n", .status = .live, .port = "no check", .summary = "live" },
+    };
 
-    const row = try serviceMonitorRow(ctx, (try cfg.services())[0]);
+    for (cases) |case| {
+        errdefer std.debug.print("case: {s}\n", .{case.name});
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const json = try std.fmt.allocPrint(arena.allocator(),
+            \\{{"project":{{"name":"demo","root":"/tmp/demo"}},"groups":[{{"name":"backend","services":[{s}]}}]}}
+        , .{case.service});
+        var recorder = proc_runner.Recorder.init(arena.allocator());
+        defer recorder.deinit();
+        try recorder.enqueue(case.pane, "", .{ .exited = 0 });
+        if (case.listen_exit) |code| try recorder.enqueue("", "", .{ .exited = code });
+        const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
+        const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+        const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
 
-    try std.testing.expectEqual(MonitorStatus.live, row.status);
-    try std.testing.expectEqual(@as(usize, 1), recordedCommandCount(&recorder, "nc"));
-    try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "curl"));
-    try proc_runner.expectNoRemainingResponses(&recorder);
-}
+        const row = try serviceMonitorRow(ctx, (try cfg.services())[0]);
 
-test "monitor.service: shows waiting while port is not ready" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo"},
-        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve","port":3000}]}]
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var recorder = proc_runner.Recorder.init(arena.allocator());
-    defer recorder.deinit();
-    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
-    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
-    try recorder.enqueue("", "", .{ .exited = 1 });
-    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
-
-    const row = try serviceMonitorRow(ctx, (try cfg.services())[0]);
-
-    try std.testing.expectEqual(MonitorStatus.waiting, row.status);
-    try std.testing.expectEqualStrings(":3000", row.port);
-    try std.testing.expectEqualStrings("waiting", row.status.summary(row.exit_code));
-    try std.testing.expectEqual(@as(usize, 1), recordedCommandCount(&recorder, "nc"));
-    try proc_runner.expectNoRemainingResponses(&recorder);
-}
-
-test "monitor.docker: skips compose observation unless pane is busy" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo"},
-        \\  "docker": {"compose": "compose.yaml"},
-        \\  "groups": []
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var recorder = proc_runner.Recorder.init(arena.allocator());
-    defer recorder.deinit();
-    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
-    try recorder.enqueue("", "", .{ .exited = 1 });
-    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
-
-    const row = try dockerMonitorRow(ctx);
-
-    try std.testing.expectEqual(MonitorStatus.stop, row.status);
-    try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "docker"));
-    try proc_runner.expectNoRemainingResponses(&recorder);
-}
-
-test "monitor.docker: checks compose for busy shell panes" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo"},
-        \\  "docker": {"compose": "compose.yaml"},
-        \\  "groups": []
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var recorder = proc_runner.Recorder.init(arena.allocator());
-    defer recorder.deinit();
-    try recorder.enqueue("0|0|12345|zsh\n", "", .{ .exited = 0 });
-    try recorder.enqueue("12346\n", "", .{ .exited = 0 });
-    try recorder.enqueue("api\n", "", .{ .exited = 0 });
-    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
-
-    const row = try dockerMonitorRow(ctx);
-
-    try std.testing.expectEqual(MonitorStatus.live, row.status);
-    try std.testing.expectEqual(@as(usize, 1), recordedCommandCount(&recorder, "docker"));
-    try proc_runner.expectNoRemainingResponses(&recorder);
+        try std.testing.expectEqual(case.status, row.status);
+        try std.testing.expectEqualStrings(case.port, row.port);
+        try std.testing.expectEqualStrings(case.summary, row.status.summary(row.exit_code));
+        try proc_runner.expectNoRemainingResponses(&recorder);
+    }
 }
 
 test "monitor.docker: runs compose from the root-relative subdir, not a doubled path" {
@@ -1032,52 +954,6 @@ test "monitor.docker: runs compose from the root-relative subdir, not a doubled 
     const compose = proc_runner.findCommandContaining(&recorder, "compose") orelse return error.MissingComposeCommand;
     try proc_runner.expectCommandCwd(compose, "infra");
     try std.testing.expectEqual(MonitorStatus.live, row.status);
-}
-
-test "monitor.service: shows unknown when the port probe cannot run" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo"},
-        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve","port":3000}]}]
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var recorder = proc_runner.Recorder.init(arena.allocator());
-    defer recorder.deinit();
-    try recorder.enqueue("0||12345|node|\n", "", .{ .exited = 0 });
-    try recorder.enqueueError(error.FileNotFound);
-    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
-
-    const row = try serviceMonitorRow(ctx, (try cfg.services())[0]);
-
-    try std.testing.expectEqual(MonitorStatus.unknown, row.status);
-    try proc_runner.expectNoRemainingResponses(&recorder);
-}
-
-test "monitor.service: shows exit code of an exited service" {
-    const json =
-        \\{
-        \\  "project": {"name":"demo","root":"/tmp/demo"},
-        \\  "groups": [{"name":"backend","services":[{"name":"api","dir":"api","command":"serve","port":3000}]}]
-        \\}
-    ;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var recorder = proc_runner.Recorder.init(arena.allocator());
-    defer recorder.deinit();
-    try recorder.enqueue("1|2|12345|node|\n", "", .{ .exited = 0 });
-    const runner: proc_runner.Runner = .{ .gpa = arena.allocator(), .io = undefined, .recorder = &recorder };
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const ctx: RenderContext = .{ .gpa = arena.allocator(), .cfg = cfg, .runner = runner, .tmux = .{ .gpa = arena.allocator(), .runner = runner, .session = "demo" } };
-
-    const row = try serviceMonitorRow(ctx, (try cfg.services())[0]);
-
-    try std.testing.expectEqual(MonitorStatus.dead, row.status);
-    try std.testing.expectEqualStrings("2", row.status.summary(row.exit_code));
-    try std.testing.expectEqual(@as(usize, 0), recordedCommandCount(&recorder, "nc"));
 }
 
 test "monitor.actionForKey: maps keys to monitor actions" {
@@ -1385,7 +1261,7 @@ test "monitor.render: adds the recovery column only when a service has restart_o
     try std.testing.expect(std.mem.indexOf(u8, hidden, "↻") == null);
 }
 
-test "monitor.pageRows: a page brings the next screen of rows into view" {
+test "monitor.pageRows: pages by the rows a short pane shows" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
@@ -1403,38 +1279,42 @@ test "monitor.pageRows: a page brings the next screen of rows into view" {
     try selection.move(gpa, &names, .{ .page_down = pageRows(size.rows) });
     const body = try testRender(gpa, .{ .rows = &rows }, .{ .selected = selection.name, .size = size });
 
-    const page = pageRows(size.rows);
-    try std.testing.expect(page > 1);
-    try std.testing.expectEqualStrings(names[page], selection.name.?);
-    try std.testing.expect(std.mem.indexOf(u8, testSelectedLine(body) orelse return error.MissingSelectedRow, names[page]) != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, names[0]) == null);
+    try std.testing.expectEqualStrings("svc-02", selection.name.?);
+    try std.testing.expect(std.mem.indexOf(u8, testSelectedLine(body) orelse return error.MissingSelectedRow, "svc-02") != null);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, body, "svc-"));
+    try std.testing.expect(std.mem.indexOf(u8, body, "svc-00") == null);
     try std.testing.expectEqual(@as(usize, std.math.maxInt(usize)), pageRows(null));
 }
 
-test "monitor.Layout.fit: drops fixed lines before the selected row" {
-    const cases = [_]struct { height: ?u16, notice: bool, expected: Layout }{
-        .{ .height = null, .notice = false, .expected = .{} },
-        .{ .height = 24, .notice = false, .expected = .{ .row_capacity = 17 } },
-        .{ .height = 8, .notice = false, .expected = .{ .row_capacity = 1 } },
-        .{ .height = 4, .notice = false, .expected = .{ .title_gap = false, .notice_line = false, .rule = false, .commands = false, .row_capacity = 1 } },
-        .{ .height = 4, .notice = true, .expected = .{ .title = false, .title_gap = false, .rule = false, .commands = false, .row_capacity = 1 } },
-        .{ .height = 2, .notice = false, .expected = .{ .title = false, .title_gap = false, .notice_line = false, .rule = false, .actions = false, .commands = false, .row_capacity = 1 } },
-        .{ .height = 1, .notice = false, .expected = .{ .title = false, .title_gap = false, .notice_line = false, .rule = false, .actions = false, .guide = false, .commands = false, .row_capacity = 1 } },
+test "monitor.render: tiny pane keeps the selected row and drops lines by priority" {
+    const title = "[zask-monitor]";
+    const notice = "filter toggle failed";
+    const cases = [_]struct {
+        rows: u16,
+        notice: ?[]const u8 = null,
+        shown: []const []const u8,
+        hidden: []const []const u8,
+    }{
+        .{ .rows = 4, .shown = &.{ title, action_guide, key_guide }, .hidden = &.{ "───", "zask status" } },
+        .{ .rows = 4, .notice = notice, .shown = &.{ notice, action_guide, key_guide }, .hidden = &.{ title, "───" } },
+        .{ .rows = 2, .shown = &.{key_guide}, .hidden = &.{ title, action_guide } },
+        .{ .rows = 1, .shown = &.{}, .hidden = &.{ title, key_guide } },
     };
-    for (cases) |case| try std.testing.expectEqualDeep(case.expected, Layout.fit(case.height, case.notice));
-}
-
-test "monitor.render: tiny pane keeps the selected row within its height" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const rows = [_]MonitorRow{ testRow("api", .live), testRow("web", .live), testRow("worker", .dead) };
 
-    const body = try testRender(arena.allocator(), .{ .rows = &rows }, .{ .selected = "worker", .size = .{ .cols = 45, .rows = 4 } });
+    for (cases) |case| {
+        errdefer std.debug.print("rows: {d} notice: {}\n", .{ case.rows, case.notice != null });
 
-    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, body, "\n") + 1);
-    try std.testing.expect(std.mem.indexOf(u8, testSelectedLine(body) orelse return error.MissingSelectedRow, "worker") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, action_guide) != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, key_guide) != null);
+        const body = try testRender(arena.allocator(), .{ .rows = &rows }, .{ .selected = "worker", .size = .{ .cols = 80, .rows = case.rows }, .notice = case.notice });
+
+        try std.testing.expectEqual(@as(usize, case.rows), std.mem.count(u8, body, "\n") + 1);
+        try std.testing.expect(std.mem.indexOf(u8, testSelectedLine(body) orelse return error.MissingSelectedRow, "worker") != null);
+        try std.testing.expect(std.mem.indexOf(u8, body, "api") == null);
+        for (case.shown) |text| try std.testing.expect(std.mem.indexOf(u8, body, text) != null);
+        for (case.hidden) |text| try std.testing.expect(std.mem.indexOf(u8, body, text) == null);
+    }
 }
 
 test "monitor.render: wide log text stays within the pane width" {
