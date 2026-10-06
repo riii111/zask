@@ -47,6 +47,7 @@ test "DashMode.parse: falls back to all for unset or unknown values" {
         .{ .value = "all", .expected = .all },
         .{ .value = "bad", .expected = .bad },
         .{ .value = "BAD", .expected = .all },
+        .{ .value = "unexpected", .expected = .all },
         .{ .value = "", .expected = .all },
     };
     for (cases) |case| try std.testing.expectEqual(case.expected, DashMode.parse(case.value));
