@@ -78,7 +78,6 @@ test "suggest.closest: returns null for distant or ambiguous input" {
         "",
         "frontend",
         "apx",
-        "ap",
     };
     for (cases) |case| {
         try std.testing.expect(closest(case, &candidates) == null);

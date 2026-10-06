@@ -450,25 +450,14 @@ test "init.options: rejects removed service and docker flags" {
     }
 }
 
-test "init.config: renders parseable minimal config" {
+test "init.config: renders minimal config" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const opts = try Options.parse(&.{"demo"});
+
     const json = try renderConfig(std.testing.allocator, "demo", .{ .opts = opts });
     defer std.testing.allocator.free(json);
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
 
-    try std.testing.expectEqualStrings("demo", try cfg.projectName());
-    const project_root = try cfg.projectRoot(arena.allocator());
-    try std.testing.expectEqualStrings(".", project_root);
-    try std.testing.expect(!cfg.dockerEnabled());
-    try std.testing.expectEqual(@as(usize, 0), (try cfg.services()).len);
-}
-
-test "init.config: renders minimal config verbatim" {
-    const opts = try Options.parse(&.{"demo"});
-    const json = try renderConfig(std.testing.allocator, "demo", .{ .opts = opts });
-    defer std.testing.allocator.free(json);
     try std.testing.expectEqualStrings(test_config_head ++
         \\  "project": {
         \\    "name": "demo",
@@ -478,13 +467,22 @@ test "init.config: renders minimal config verbatim" {
         \\}
         \\
     , json);
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    try std.testing.expectEqualStrings("demo", try cfg.projectName());
+    try std.testing.expectEqualStrings(".", try cfg.projectRoot(arena.allocator()));
+    try std.testing.expect(!cfg.dockerEnabled());
+    try std.testing.expectEqual(@as(usize, 0), (try cfg.services()).len);
 }
 
-test "init.config: renders service and docker config verbatim" {
+test "init.config: renders service and docker config" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const detected = try testDetectedServiceAndDocker(std.testing.allocator);
     defer detected.deinit(std.testing.allocator);
+
     const json = try renderConfig(std.testing.allocator, "demo", detected);
     defer std.testing.allocator.free(json);
+
     try std.testing.expectEqualStrings(test_config_head ++
         \\  "project": {
         \\    "name": "demo",
@@ -517,6 +515,16 @@ test "init.config: renders service and docker config verbatim" {
         \\}
         \\
     , json);
+    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
+    const services = try cfg.services();
+    try std.testing.expectEqual(@as(usize, 1), services.len);
+    try std.testing.expectEqualStrings("web", try config.Config.serviceName(services[0]));
+    try std.testing.expectEqualStrings("frontend", config.Config.serviceGroup(services[0]));
+    try std.testing.expectEqualStrings("pnpm run dev", try config.Config.serviceStartCommand(arena.allocator(), services[0]));
+    try std.testing.expect(cfg.dockerEnabled());
+    try std.testing.expectEqualStrings("compose.yaml", cfg.dockerComposeFile());
+    try std.testing.expectEqualStrings("./infra", try cfg.dockerDir(arena.allocator()));
+    try std.testing.expectEqual(@as(usize, 2), cfg.phases().len);
 }
 
 test "init.config: renders service-only config verbatim" {
@@ -543,26 +551,6 @@ test "init.config: renders service-only config verbatim" {
         \\}
         \\
     , json);
-}
-
-test "init.config: renders service and docker config" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const detected = try testDetectedServiceAndDocker(arena.allocator());
-    defer detected.deinit(arena.allocator());
-    const json = try renderConfig(std.testing.allocator, "demo", detected);
-    defer std.testing.allocator.free(json);
-    const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
-    const services = try cfg.services();
-
-    try std.testing.expectEqual(@as(usize, 1), services.len);
-    try std.testing.expectEqualStrings("web", try config.Config.serviceName(services[0]));
-    try std.testing.expectEqualStrings("frontend", config.Config.serviceGroup(services[0]));
-    try std.testing.expectEqualStrings("pnpm run dev", try config.Config.serviceStartCommand(arena.allocator(), services[0]));
-    try std.testing.expect(cfg.dockerEnabled());
-    try std.testing.expectEqualStrings("compose.yaml", cfg.dockerComposeFile());
-    try std.testing.expectEqualStrings("./infra", try cfg.dockerDir(arena.allocator()));
-    try std.testing.expectEqual(@as(usize, 2), cfg.phases().len);
 }
 
 test "init.config: renders procfile and docker config verbatim" {
@@ -608,9 +596,13 @@ test "init.config: renders procfile and docker config verbatim" {
     , json);
 }
 
-test "init.config: renders procfile dir verbatim" {
+test "init.config: renders procfile dir" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
     const json = try renderConfig(std.testing.allocator, "demo", try testDetectedProcfile("backend"));
     defer std.testing.allocator.free(json);
+
     try std.testing.expectEqualStrings(test_config_head ++
         \\  "project": {
         \\    "name": "demo",
@@ -636,17 +628,8 @@ test "init.config: renders procfile dir verbatim" {
         \\}
         \\
     , json);
-}
-
-test "init.config: procfile config parses back to the same commands" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const json = try renderConfig(std.testing.allocator, "demo", try testDetectedProcfile("backend"));
-    defer std.testing.allocator.free(json);
-
     const cfg = try config.Config.parse(arena.allocator(), json, "/home/me");
     const services = try cfg.services();
-
     try std.testing.expectEqual(test_procfile_services.len, services.len);
     for (test_procfile_services, services) |want, got| {
         try std.testing.expectEqualStrings(want.name, try config.Config.serviceName(got));
@@ -679,22 +662,6 @@ test "init.procfileDir: maps the procfile directory onto the project root" {
             try std.testing.expect(dir == null);
         }
     }
-}
-
-test "init.detect: infers compose file" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var threaded = std.Io.Threaded.init_single_threaded;
-    const base = try std.fs.path.join(arena.allocator(), &.{ ".zig-cache", "tmp", &tmp.sub_path });
-    const compose_yaml = try testTmpPath(arena.allocator(), tmp, "compose.yaml");
-
-    try paths.writeFile(threaded.io(), compose_yaml, "services: {}\n");
-
-    const detected = try applyDetections(arena.allocator(), threaded.io(), base, try Options.parse(&.{"demo"}));
-
-    try std.testing.expectEqualStrings("compose.yaml", detected.compose_file.?);
 }
 
 test "init.detect: renders detected default compose file" {
@@ -813,26 +780,6 @@ test "init.root: stabilizes default and explicit dot roots" {
 
     try std.testing.expectEqualStrings("/work/demo", default_root);
     try std.testing.expectEqualStrings("/work/demo", dot_root);
-}
-
-test "init.run: rejects existing config without force" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var threaded = std.Io.Threaded.init_single_threaded;
-    var environ = env.Map.init(arena.allocator());
-    defer environ.deinit();
-    const config_home = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}", .{&tmp.sub_path});
-    try environ.put("HOME", "/home/me");
-    try environ.put("XDG_CONFIG_HOME", config_home);
-    var buffer: [1024]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buffer);
-    var ctx = testContext(arena.allocator(), threaded.io(), &environ, &writer);
-
-    try run(&ctx, try Options.parse(&.{"demo"}));
-    try std.testing.expectError(error.ConfigAlreadyExists, run(&ctx, try Options.parse(&.{"demo"})));
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Re-run with --force") != null);
 }
 
 test "init.run: rejects existing config.jsonc without creating config.json" {
@@ -1011,7 +958,7 @@ test "init.run: reports missing procfile without writing config" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Error: Procfile not found") != null);
 }
 
-test "init.run: keeps existing config when importing procfile without force" {
+test "init.run: rejects existing config without force" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var tmp = std.testing.tmpDir(.{});
@@ -1033,4 +980,5 @@ test "init.run: keeps existing config when importing procfile without force" {
 
     const after = try std.Io.Dir.cwd().readFileAlloc(threaded.io(), config_path, arena.allocator(), .limited(4096));
     try std.testing.expectEqualStrings(before, after);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Re-run with --force") != null);
 }

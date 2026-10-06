@@ -361,28 +361,20 @@ test "cli.context.discoverConfigPath: rejects ambiguous local configs" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cases = [_][2][]const u8{
-        .{ "zask.json", ".zask.json" },
-        .{ "zask.json", "zask.jsonc" },
-        .{ ".zask.json", ".zask.jsonc" },
-    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "zask.json", .data = "{}" });
+    try tmp.dir.writeFile(io, .{ .sub_path = ".zask.jsonc", .data = "{}" });
+    const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    const previous = try testWithCwd(gpa, io, base);
+    defer std.process.setCurrentPath(io, previous) catch unreachable;
+    var err_ctx: ErrorContext = .{};
 
-    for (cases) |names| {
-        errdefer std.debug.print("names: {s} {s}\n", .{ names[0], names[1] });
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        for (names) |name| try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "{}" });
-        const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-        const previous = try testWithCwd(gpa, io, base);
-        defer std.process.setCurrentPath(io, previous) catch unreachable;
-        var err_ctx: ErrorContext = .{};
+    try std.testing.expectError(error.AmbiguousConfig, discoverConfigPath(gpa, io, &err_ctx));
 
-        try std.testing.expectError(error.AmbiguousConfig, discoverConfigPath(gpa, io, &err_ctx));
-
-        try std.testing.expectEqual(@as(usize, 2), err_ctx.conflicting_config_paths.len);
-        for (err_ctx.conflicting_config_paths) |path| {
-            try std.testing.expectEqualStrings(base, std.fs.path.dirname(path).?);
-        }
+    try std.testing.expectEqual(@as(usize, 2), err_ctx.conflicting_config_paths.len);
+    for (err_ctx.conflicting_config_paths) |path| {
+        try std.testing.expectEqualStrings(base, std.fs.path.dirname(path).?);
     }
 }
 

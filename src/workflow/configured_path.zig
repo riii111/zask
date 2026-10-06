@@ -75,24 +75,45 @@ fn writeError(writer: *std.Io.Writer, kind: []const u8, reason: []const u8, prob
 // Tests
 // -----------------------------------------------------------------------------
 
-test "configured_path.ensureDir: reports missing directory details" {
+test "configured_path.ensure: reports missing path details by kind" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var threaded = std.Io.Threaded.init_single_threaded;
-    var buffer: [512]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buffer);
+    const cases = [_]struct {
+        kind: Kind,
+        problem: Problem,
+        heading: []const u8,
+    }{
+        .{
+            .kind = .directory,
+            .problem = .{ .field = "service.dir", .service = "api", .configured = "missing", .project_root = ".", .path = "missing" },
+            .heading = "Error: configured directory not found\n",
+        },
+        .{
+            .kind = .file,
+            .problem = .{ .field = "env_file", .service = "api", .configured = ".env.local", .project_root = ".", .path = ".env.local" },
+            .heading = "Error: configured file not found\n",
+        },
+    };
 
-    try std.testing.expectError(error.ConfigPathNotFound, ensureDir(arena.allocator(), threaded.io(), &writer, .{
-        .field = "service.dir",
-        .service = "api",
-        .configured = "missing",
-        .project_root = ".",
-        .path = "missing",
-    }));
+    for (cases) |case| {
+        errdefer std.debug.print("field: {s}\n", .{case.problem.field});
+        var buffer: [512]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "field: service.dir") != null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "service: api") != null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "project.root: .") != null);
+        const result = switch (case.kind) {
+            .directory => ensureDir(arena.allocator(), threaded.io(), &writer, case.problem),
+            .file => ensureFile(arena.allocator(), threaded.io(), &writer, case.problem),
+        };
+
+        try std.testing.expectError(error.ConfigPathNotFound, result);
+        const output = writer.buffered();
+        try std.testing.expect(std.mem.indexOf(u8, output, case.heading) != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, try std.fmt.allocPrint(arena.allocator(), "field: {s}\n", .{case.problem.field})) != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "service: api\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "project.root: .\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, try std.fmt.allocPrint(arena.allocator(), "configured: {s}\n", .{case.problem.configured})) != null);
+    }
 }
 
 test "configured_path.ensureDir: rejects regular files" {
@@ -116,24 +137,4 @@ test "configured_path.ensureDir: rejects regular files" {
 
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "not a directory") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "field: project.root") != null);
-}
-
-test "configured_path.ensureFile: reports missing file details" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var threaded = std.Io.Threaded.init_single_threaded;
-    var buffer: [512]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buffer);
-
-    try std.testing.expectError(error.ConfigPathNotFound, ensureFile(arena.allocator(), threaded.io(), &writer, .{
-        .field = "env_file",
-        .service = "api",
-        .configured = ".env.local",
-        .project_root = ".",
-        .path = ".env.local",
-    }));
-
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "field: env_file") != null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "service: api") != null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "configured: .env.local") != null);
 }
